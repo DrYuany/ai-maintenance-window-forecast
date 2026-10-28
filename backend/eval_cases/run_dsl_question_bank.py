@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from dsl_prototype.llm_parser import ParseUnavailable, load_library, parse  # noqa: E402
+from app.core.dsl.llm_parser import ParseUnavailable, load_library, parse  # noqa: E402
 
 
 def _load_env() -> None:
@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     library = load_library()
     rows = [
         json.loads(line)
-        for line in (ROOT / "eval" / "questions.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (ROOT / "eval_cases" / "dsl_questions.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
 
@@ -150,7 +150,7 @@ def _solve_verify(rows: list[dict], library: list[dict], n: int) -> list[str]:
     求解用 max_tasks=10 子集（完整模型短时限证不了可行性）；引用的任务编号
     重映射进子集（如 任务022 → 任务002），约束语义不变，只换具体任务。
     """
-    from dsl_prototype.runner import run
+    from app.core.dsl.runner import run
 
     failures: list[str] = []
     count = 0
@@ -241,7 +241,7 @@ _MINUTE_CACHE: dict[str, int] = {}
 
 def _minute(time_str: str) -> int:
     if time_str not in _MINUTE_CACHE:
-        from dsl_prototype.runner import _solver_modules
+        from app.core.dsl.runner import _solver_modules
 
         load_project = _solver_modules()[0]
         data = load_project(ROOT.parent, base_id="基座01", as_of="2026-10-23T18:00:00+08:00")

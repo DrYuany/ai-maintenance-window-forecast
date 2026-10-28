@@ -1,7 +1,7 @@
 """校验器单测（纯 Python，不依赖 OR-Tools/求解）。"""
 from __future__ import annotations
 
-from dsl_prototype.validator import validate_dsl
+from app.core.dsl.validator import validate_dsl
 
 
 def test_valid_co_occur_dsl_passes_structure_check() -> None:
@@ -60,9 +60,11 @@ def test_unregistered_quantity_rejected() -> None:
     assert any("未注册" in e for e in errors)
 
 
-def test_quantity_needing_max_form_gives_explicit_error() -> None:
-    errors = validate_dsl({"objectives": [{"type": "minimize", "q": "最后完工时间"}]})
-    assert any("max/derived" in e for e in errors)
+def test_metrics_form_quantities_now_valid() -> None:
+    """最后完工时间/总经济成本/现金支出经 metrics 形式可引用（编译器物化）。"""
+    for name in ("最后完工时间", "总经济成本", "现金支出"):
+        errors = validate_dsl({"objectives": [{"type": "minimize", "q": name}]})
+        assert errors == [], f"{name} 应可引用，错误: {errors}"
 
 
 def test_raw_triple_with_illegal_filter_rejected() -> None:

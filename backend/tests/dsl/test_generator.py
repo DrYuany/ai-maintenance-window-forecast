@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from dsl_prototype.generator import (
+from app.core.dsl.generator import (
     apply_filter,
     per_task_terms,
     quantity_terms,

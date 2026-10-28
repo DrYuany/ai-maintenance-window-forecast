@@ -301,6 +301,13 @@ class AgentRuntime:
                     batch=pending,
                     memory=memory,
                 )
+            if pending.get("kind") == "dsl":
+                return self._start_dsl_solve(
+                    conversation_id=conversation_id,
+                    dsl=pending.get("dsl") or {},
+                    content=str(pending.get("sourcePrompt") or content),
+                    memory=memory,
+                )
             try:
                 request = PlanningRequest(**pending["request"])
             except (KeyError, TypeError, ValueError):
@@ -465,6 +472,36 @@ class AgentRuntime:
                     selected_version,
                     memory,
                     sink=sink,
+                )
+            # DSL 增量（第一期）：约束/自定义目标类修改，走预览→确认→求解。
+            dsl_result = self._try_dsl_parse(content)
+            if (
+                dsl_result is not None
+                and dsl_result.route == "dsl"
+                and dsl_result.dsl is not None
+            ):
+                base_version_id = selected_version.id if selected_version else memory.latestResultId
+                filters["pendingChange"] = {
+                    "kind": "dsl",
+                    "dsl": dsl_result.dsl,
+                    "source": dsl_result.source,
+                    "baseVersionId": base_version_id,
+                    "sourcePrompt": content,
+                    "preview": self._format_dsl_preview(dsl_result.dsl),
+                }
+                self.memories.apply_patch(
+                    memory,
+                    {
+                        "currentIntent": "dsl_change",
+                        "activeFilters": filters,
+                    },
+                )
+                return self._finalize_response(
+                    conversation_id,
+                    filters["pendingChange"]["preview"],
+                    "dsl_preview",
+                    memory.activeView,
+                    [],
                 )
             history = self.messages.list_by_conversation(conversation_id)
             try:
@@ -664,6 +701,83 @@ class AgentRuntime:
             [item for pair in pairs for item in pair],
         )
 
+    _DSL_LABELS = {
+        "co_occur": "互斥（不同天/同时）：{tasks}",
+        "precedence": "先后顺序：{before} → {after}",
+        "earliest": "最早开工：{task} 不早于 {time}",
+        "deadline": "最晚完工：{task} 不晚于 {time}",
+        "fix": "固定作业线：{task} 只上 {line} 号线",
+        "forbidden_dates": "禁止开工日期：{dates}",
+        "must": "必修：{task}",
+        "exclude": "排除：{task}",
+        "cardinality": "完成数 {op} {value}",
+        "budget": "预算：{quantity} {op} {value}",
+    }
+
+    @classmethod
+    def _format_dsl_preview(cls, dsl: dict[str, Any]) -> str:
+        lines = ["已基于当前配置准备自定义约束/目标，尚未求解。", "变更预览："]
+        index = 1
+        for spec in dsl.get("constraints") or []:
+            label = cls._DSL_LABELS.get(spec.get("type"), str(spec))
+            try:
+                text = label.format(**spec)
+            except (KeyError, IndexError):
+                text = json.dumps(spec, ensure_ascii=False)
+            lines.append(f"{index}. {text}")
+            index += 1
+        for spec in dsl.get("objectives") or []:
+            if spec.get("type") == "lexmin":
+                stages = " → ".join(
+                    f"{'最小化' if s.get('dir') == 'minimize' else '最大化'}{s.get('q')}"
+                    for s in spec.get("stages", [])
+                )
+                lines.append(f"{index}. 自定义分层目标：{stages}")
+                index += 1
+            else:
+                lines.append(f"{index}. 自定义目标：{json.dumps(spec, ensure_ascii=False)}")
+                index += 1
+        lines.extend([
+            "这次会生成独立沙盘版本，不覆盖现有方案。",
+            "回复“确认生成沙盘”执行；回复“取消”放弃本次变更。",
+        ])
+        return "\n".join(lines)
+
+    def _try_dsl_parse(self, content: str):
+        """DSL 三层解析（增量能力）。解析不了/LLM 不可用返回 None，回退现有路径。
+
+        规则层与门控是确定性的，不产生 API 调用；只有真正的新话术才走到 LLM。
+        """
+        try:
+            from app.core.dsl.llm_parser import ParseUnavailable, parse as dsl_parse
+        except Exception:  # pragma: no cover - DSL 包缺失时静默回退
+            return None
+        try:
+            return dsl_parse(content)
+        except (ParseUnavailable, Exception):  # noqa: BLE001 - 解析失败回退现有路径
+            return None
+
+    def _start_dsl_solve(
+        self,
+        *,
+        conversation_id: str,
+        dsl: dict[str, Any],
+        content: str,
+        memory,
+    ) -> AgentResponse:
+        """DSL 变更确认后的求解：默认配置 + 注入 DSL 约束/目标。"""
+        latest = None
+        if memory.latestResultId:
+            latest = self.versions.get(memory.latestResultId)
+        request = self._planning_request_from_context(memory, latest)
+        return self._start_planning_solve(
+            conversation_id=conversation_id,
+            content=content,
+            request=request,
+            memory=memory,
+            dsl=dsl,
+        )
+
     def _start_planning_solve(
         self,
         *,
@@ -672,6 +786,7 @@ class AgentRuntime:
         request: PlanningRequest,
         memory,
         pending_batch: dict[str, Any] | None = None,
+        dsl: dict[str, Any] | None = None,
     ) -> AgentResponse:
         if not self.jobs:
             return self._finalize_response(
@@ -706,10 +821,12 @@ class AgentRuntime:
                 "prompt_version": "none",
                 "solver_profile": {"name": "ortools-cp-sat", "random_seed": 17, "workers": 1, "max_seconds": request.seconds},
             },
-            {"intent": "maintenance_plan", "request": request_payload},
-            {"skill": SKILL_NAME, "request": request_payload, "data_snapshot": data_snapshot},
+            {"intent": "maintenance_plan", "request": request_payload, "dsl": dsl or {}},
+            {"skill": SKILL_NAME, "request": request_payload, "data_snapshot": data_snapshot, "dsl": dsl or {}},
         )
-        job = self.jobs.create(conversation_id, request_payload, artifact.model_fingerprint, snapshot=data_snapshot)
+        # job.request 保持 request 字段在顶层（兼容现有断言），DSL 附加在其上
+        job_payload = request_payload if dsl is None else {**request_payload, "kind": "dsl", "dsl": dsl}
+        job = self.jobs.create(conversation_id, job_payload, artifact.model_fingerprint, snapshot=data_snapshot)
         filters = dict(memory.activeFilters)
         filters["planningRequest"] = request_payload
         self.memories.apply_patch(memory, {
@@ -738,7 +855,8 @@ class AgentRuntime:
         response = self._finalize_response(
             conversation_id,
             (
-                f"已按“{request.strategy}”编译为固定模型契约，真实 CP-SAT 求解已启动。"
+                f"已按“{request.strategy}”编译为固定模型契约，"
+                f"{'附带自定义约束/目标，' if dsl else ''}真实 CP-SAT 求解已启动。"
                 f"{batch_message}任务 {job.id}，最长求解 {request.seconds} 秒；"
                 "超过 3 分钟我会询问是否继续，不会把超时说成无解。"
             ),
@@ -767,6 +885,7 @@ class AgentRuntime:
             content,
             request,
             artifact,
+            dsl,
         )
         return response
 
@@ -1195,12 +1314,19 @@ class AgentRuntime:
             return job
         raise ValueError("Unknown solve action")
 
-    def _execute_job(self, job_id: str, content: str, request: PlanningRequest, artifact) -> None:
+    def _execute_job(
+        self,
+        job_id: str,
+        content: str,
+        request: PlanningRequest,
+        artifact,
+        dsl: dict[str, Any] | None = None,
+    ) -> None:
         assert self.jobs is not None
         produced_version_id: str | None = None
         try:
             self.jobs.mark_running(job_id)
-            raw_result = self.product_executor.execute(request, job_id, artifact.model_fingerprint)
+            raw_result = self.product_executor.execute(request, job_id, artifact.model_fingerprint, dsl=dsl)
             current = self.jobs.get(job_id)
             if not current or current.status == "CANCELLED":
                 return
@@ -1211,7 +1337,11 @@ class AgentRuntime:
                     conversation_id=current.conversationId,
                     user_prompt=content,
                     focus_tag=request.strategy,
-                    parameter_snapshot=request.to_payload(),
+                    parameter_snapshot=(
+                        {**request.to_payload(), "dsl": dsl}
+                        if dsl
+                        else request.to_payload()
+                    ),
                     payload=raw_result,
                     solve_job_id=job_id,
                     model_fingerprint=artifact.model_fingerprint,

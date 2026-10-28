@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from dsl_prototype.runner import DslError, run  # noqa: E402
+from app.core.dsl.runner import DslError, run  # noqa: E402
 
 
 def _check(case: dict, selected: list[dict], data) -> str | None:
@@ -39,13 +39,13 @@ def _check(case: dict, selected: list[dict], data) -> str | None:
 
 
 def main() -> int:
-    from dsl_prototype.runner import _solver_modules
+    from app.core.dsl.runner import _solver_modules
 
     load_project = _solver_modules()[0]
     project = ROOT.parent
     data = load_project(project, base_id="基座01", as_of="2026-10-23T18:00:00+08:00")
 
-    cases_path = ROOT / "eval" / "golden_cases.jsonl"
+    cases_path = ROOT / "eval_cases" / "dsl_golden_cases.jsonl"
     cases = [json.loads(line) for line in cases_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
     failed = 0

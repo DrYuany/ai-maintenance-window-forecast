@@ -44,14 +44,36 @@ def _coeff_of_quantity(ref: object) -> str:
     raise ValueError(f"量引用无法解析: {ref!r}")
 
 
+# 由 build_model metrics 提供的具名量的量纲缩放（微元 vs 分钟）
+_METRICS_SCALES = {
+    "总经济成本": MONEY, "现金支出": MONEY,
+    "最后完工时间": 1, "完工时间和": 1, "完成任务数": 1,
+    "高严重完成数": 1, "中严重完成数": 1, "低严重完成数": 1,
+    "高严重完工时间和": 1, "中严重完工时间和": 1, "低严重完工时间和": 1,
+}
+
+
+def _scale_of_quantity(ref: object) -> int:
+    if isinstance(ref, str) and ref in _METRICS_SCALES:
+        return _METRICS_SCALES[ref]
+    return _scale_of_coeff(_coeff_of_quantity(ref))
+
+
 def materialize(
     model,
     choices: list[tuple[dict, Any]],
     cands: list[dict],
     ref: object,
     data,
+    metrics: dict | None = None,
 ):
-    """量引用 → cp_model 线性表达式（带量纲缩放）。"""
+    """量引用 → cp_model 线性表达式（带量纲缩放）。
+
+    build_model 已算好的指标（总经济成本/现金支出/最后完工时间等）直接从
+    metrics dict 引用——它们是 max/复合形式，生成器无法从候选字段重算。
+    """
+    if isinstance(ref, str) and metrics is not None and ref in metrics:
+        return metrics[ref]
     terms = generator.resolve_quantity_terms(cands, ref, data)
     coeff = _coeff_of_quantity(ref)
     scale = _scale_of_coeff(coeff)
@@ -89,6 +111,7 @@ def compile_constraint(
     cands: list[dict],
     data,
     spec: dict[str, Any],
+    metrics: dict | None = None,
 ) -> list[str]:
     """单条约束 → 加进模型，返回错误列表（空 = 成功）。"""
     ctype = spec["type"]
@@ -149,12 +172,11 @@ def compile_constraint(
         bad = [i for i, c in enumerate(cands) if c["开始"] // 1440 in {m // 1440 for m in minutes}]
         _add_subset_zero(model, choices, bad)
     elif ctype == "budget":
-        coeff = _coeff_of_quantity(spec["quantity"])
-        scale = _scale_of_coeff(coeff)
-        expr = materialize(model, choices, cands, spec["quantity"], data)
+        scale = _scale_of_quantity(spec["quantity"])
+        expr = materialize(model, choices, cands, spec["quantity"], data, metrics)
         _add_op(model, expr, spec["op"], int(round(float(spec["value"]) * scale)))
     elif ctype == "linear":
-        scales = {_scale_of_coeff(_coeff_of_quantity(ref)) for _c, ref in spec["terms"]}
+        scales = {_scale_of_quantity(ref) for _c, ref in spec["terms"]}
         if len(scales) > 1:
             errors.append("linear 原语不允许混合时间量与成本量（量纲不同）")
             return errors
@@ -191,7 +213,7 @@ def constraints_builder(
         cands = generator.candidate_rows(choices)
         errors: list[str] = []
         for index, spec in enumerate(dsl_constraints):
-            errors.extend(compile_constraint(m, choices, cands, data, spec))
+            errors.extend(compile_constraint(m, choices, cands, data, spec, metrics))
             if errors:
                 errors.append(f"（第 {index + 1} 条约束编译失败）")
                 break
@@ -207,11 +229,11 @@ def stages_builder(dsl_objectives: list[dict[str, Any]], data) -> Callable:
         for index, spec in enumerate(dsl_objectives):
             otype = spec["type"]
             if otype in ("minimize", "maximize"):
-                expr = materialize(m, choices, cands, spec["q"], data)
+                expr = materialize(m, choices, cands, spec["q"], data, metrics)
                 stages.append((f"dsl_{index}_{otype}", "minimize" if otype == "minimize" else "maximize", expr))
             elif otype == "lexmin":
                 for j, stage in enumerate(spec["stages"]):
-                    expr = materialize(m, choices, cands, stage["q"], data)
+                    expr = materialize(m, choices, cands, stage["q"], data, metrics)
                     stages.append((f"dsl_{index}_{j}_{stage['dir']}", stage["dir"], expr))
             else:
                 raise ValueError(f"目标 {otype} 已登记但原型未实现编译")

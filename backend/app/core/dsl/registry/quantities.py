@@ -9,9 +9,10 @@
 """
 from __future__ import annotations
 
-# 数学形式（4 种；max/derived 原型未实现，但登记在册以便校验器给出明确报错）
-FORMS: tuple[str, ...] = ("count", "weighted_sum", "max", "derived")
-IMPLEMENTED_FORMS: frozenset[str] = frozenset({"count", "weighted_sum"})
+# 数学形式（5 种；max/derived 原型未实现，但登记在册以便校验器给出明确报错；
+# metrics 由 build_model 的 metrics dict 提供，在编译器物化，生成器算不了）
+FORMS: tuple[str, ...] = ("count", "weighted_sum", "max", "derived", "metrics")
+IMPLEMENTED_FORMS: frozenset[str] = frozenset({"count", "weighted_sum", "metrics"})
 
 # 系数类型（加权和形式的系数，从候选字段提取）
 COEFFS: tuple[str, ...] = (
@@ -30,8 +31,8 @@ FILTERS: tuple[str, ...] = (
 )
 
 # 具名量（糖）：名字 → 生成器表达式。原 11 个指标是首批具名量。
-# 依赖 max/derived 形式的（最后完工时间、总经济成本、现金支出）原型暂不支持，
-# 登记为 None 以便校验器给出"原型未实现"而非"名字不存在"。
+# 标 {"form": "metrics"} 的：由 build_model 的 metrics dict 直接提供线性表达式
+# （编译器物化时引用），生成器无法从候选字段重算（max/复合形式）。
 NAMED_QUANTITIES: dict[str, dict | None] = {
     "完成任务数": {"form": "count", "filter": {}},
     "高严重完成数": {"form": "count", "filter": {"severity": "高"}},
@@ -41,10 +42,10 @@ NAMED_QUANTITIES: dict[str, dict | None] = {
     "高严重完工时间和": {"form": "weighted_sum", "coeff": "finish", "filter": {"severity": "高"}},
     "中严重完工时间和": {"form": "weighted_sum", "coeff": "finish", "filter": {"severity": "中"}},
     "低严重完工时间和": {"form": "weighted_sum", "coeff": "finish", "filter": {"severity": "低"}},
-    # 以下依赖 max/derived 形式，原型暂不支持（明确报错，不静默给错数）
-    "最后完工时间": None,
-    "总经济成本": None,
-    "现金支出": None,
+    # 以下由 build_model 的 metrics 提供（max/复合形式，生成器算不了）
+    "最后完工时间": {"form": "metrics"},
+    "总经济成本": {"form": "metrics"},
+    "现金支出": {"form": "metrics"},
 }
 
 

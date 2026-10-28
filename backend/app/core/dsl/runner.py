@@ -4,7 +4,7 @@
 已下发检修单的锁定/部分排程兜底在原型里未处理（正式合并时走 recommend 路径）。
 
 用法：
-    from dsl_prototype.runner import run
+    from app.core.dsl.runner import run
     report = run(dsl, base_id="基座01", seconds=30)
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 _SCRIPTS = PROJECT_ROOT / "maintenance-milp-modeler" / "scripts"
 
@@ -71,7 +71,7 @@ def run(
     # 与生产 recommend() 一致：启发式基座当热启动提示（不牺牲最优性证明）。
     baselines = {name: heuristic(data, options, name) for name in ("严重性优先", "低风速优先")}
     hint = max(baselines.values(), key=len)
-    output = output or (Path(__file__).resolve().parents[1] / ".runlogs" / "dsl-run")
+    output = output or (PROJECT_ROOT / "product-output" / "dsl-run")
     output.mkdir(parents=True, exist_ok=True)
 
     constraints = dsl.get("constraints") or []

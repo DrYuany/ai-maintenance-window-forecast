@@ -50,7 +50,14 @@ class MaintenanceProductExecutor:
         }
         return prepared, snapshot
 
-    def execute(self, request: PlanningRequest, job_id: str, model_fingerprint: str | None = None) -> dict[str, Any]:
+    def execute(
+        self,
+        request: PlanningRequest,
+        job_id: str,
+        model_fingerprint: str | None = None,
+        dsl: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """dsl：受控 DSL（约束/自定义目标），校验后编译成注入闭包传给求解。"""
         cancel_event: threading.Event | None = None
         try:
             from product_data import load_project
@@ -64,6 +71,22 @@ class MaintenanceProductExecutor:
                 overrides=request.overrides,
                 data_patches=request.data_patches,
             )
+            extra_constraints = None
+            custom_stages = None
+            if dsl:
+                from app.core.dsl.validator import validate_dsl
+
+                dsl_errors = validate_dsl(dsl, data)
+                if dsl_errors:
+                    raise MaintenanceProductExecutionError(
+                        "DSL 校验失败：" + "；".join(dsl_errors)
+                    )
+                from app.core.dsl.compiler import constraints_builder, stages_builder
+
+                if dsl.get("constraints"):
+                    extra_constraints = constraints_builder(dsl["constraints"], data)
+                if dsl.get("objectives"):
+                    custom_stages = stages_builder(dsl["objectives"], data)
             suffix = model_fingerprint or job_id
             base_output = self.project_root / "product-output" / f"agent-model-{suffix[:16]}"
             output = base_output
@@ -97,6 +120,8 @@ class MaintenanceProductExecutor:
                         on_solver=register_solver,
                         cancelled=cancel_event.is_set,
                         model_fingerprint=model_fingerprint,
+                        extra_constraints=extra_constraints,
+                        custom_stages=custom_stages,
                     )
                     if cancel_event.is_set():
                         shutil.rmtree(output, ignore_errors=True)
@@ -106,6 +131,8 @@ class MaintenanceProductExecutor:
                 "输出目录": str(output),
                 "模型输入": request.to_payload(),
             }
+            if dsl:
+                report["Agent任务"]["DSL"] = dsl
             artifact_path = output / "model_artifact.json"
             if not artifact_path.exists():
                 artifact_path = output / "diagnostic_model_artifact.json"

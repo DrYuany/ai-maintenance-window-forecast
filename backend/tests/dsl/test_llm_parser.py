@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from dsl_prototype import llm_parser
-from dsl_prototype.llm_parser import (
+from app.core.dsl import llm_parser
+from app.core.dsl.llm_parser import (
     ParseUnavailable,
     load_library,
     parse,

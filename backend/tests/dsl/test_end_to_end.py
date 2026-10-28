@@ -8,9 +8,11 @@
 """
 from __future__ import annotations
 
+
+from app.core.dsl.runner import DslError, run
 import pytest
 
-from dsl_prototype.runner import DslError, run
+pytestmark = pytest.mark.slow
 
 
 def _row(selected: list[dict], task_id: str) -> dict:
@@ -22,7 +24,9 @@ def _day_of(selected: list[dict], task_id: str) -> int:
 
 
 def test_co_occur_diff_day_forces_different_days() -> None:
-    """'任务001 和 002 不能同一天' —— 求解结果必须真的不同天。"""
+    """
+
+'任务001 和 002 不能同一天' —— 求解结果必须真的不同天。"""
     report = run({
         "constraints": [
             {"type": "co_occur", "mode": "diff_day", "tasks": ["任务001", "任务002"]},
@@ -57,7 +61,7 @@ def test_earliest_blocks_early_candidates() -> None:
     from pathlib import Path
     from product_data import load_project
 
-    data = load_project(Path(__file__).resolve().parents[2], base_id="基座01",
+    data = load_project(Path(__file__).resolve().parents[3], base_id="基座01",
                         as_of="2026-10-23T18:00:00+08:00")
     minute = data.minute("2026-11-05T08:00:00+08:00")
     assert _row(selected, "任务001")["开始"] >= minute

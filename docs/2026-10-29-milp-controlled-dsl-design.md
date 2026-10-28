@@ -363,10 +363,54 @@ LLM 只能在注册表内引用、校验器只放行线性表达式，从而**�
 
 ---
 
-## 11. 实施分期
+## 11. 实施分期与终态架构
 
-- **第一期**：七维度原语 + 可引用量生成器 + 校验器 + 路由查表，覆盖组合维度（选择层）。
-  同时补 §9 的 7 个高频动态场景（互斥/最早开工/固定船/最小间隔/资源时段/分项预算/天气敏感性）。
-- **第二期**：输入数据注册表统一化——把 overrides + data_patches + 时序数据统一为
-  "表 × 字段"注册表，补上海况/逐时/窗口的假设修改。
-- **第三期**：生成层规则参数化（时间粒度、海况判定、跨窗口），以及"待扩展"的风险/天气条件/备件预留构件。
+### 11.1 分期
+
+- **第一期**：
+  1. 编译器接入 build_model 的 metrics——解锁成本/完工时间类指标引用
+     （budget 总经济成本、weighted、lexmin 最后完工时间）；
+  2. DSL 包合并回主项目（`git mv` → `backend/app/core/dsl/`，历史完整保留）；
+  3. 接线 agent_runtime：修改类意图二次分流（planning_intent 命中走老路零回归，
+     DSL 命中走预览→确认→求解，编译产物走 extra_constraints/custom_stages）；
+  4. 证据链（DSL 进方案快照/模型指纹）+ 评测成为发布闸门。
+- **第二期**：输入数据注册表统一化——overrides + data_patches + 时序数据
+  统一为"表 × 字段"注册表，补上海况/逐时/窗口的假设修改（"明天风变大"）。
+- **第三期**：生成层规则参数化（时间粒度、海况判定、跨窗口），
+  以及"待扩展"的风险/天气条件/备件预留构件；收拢解析管道（见 11.3）。
+
+### 11.2 终态架构：一条管道
+
+```
+用户消息（修改类）
+  → 统一 DSL 解析器（三层）
+      规则层：原 13 类参数话术 + 高频约束话术（正则直出 DSL，零成本零延迟）
+      向量层：已验证模板检索 → few-shot
+      LLM 层：新话术兜底
+  → 统一 DSL schema（四段）
+      {"parameters": [...],   ← 原 overrides/relative_overrides
+       "data": [...],         ← 原 data_patches + 时序假设修改
+       "constraints": [...],  ← 约束原语
+       "objectives": [...],   ← 策略/加权/lexmin（策略 = 四模板快捷名）
+       "solver": {...}}       ← 求解时限等
+  → 统一编译器（四段各自编译）
+  → solve 预览 → 确认 → 求解（一条链）
+```
+
+对照 PlanningRequest 七字段：strategy/mode/weights → `objectives`；
+overrides → `parameters`；limits/必修 → `constraints`；data_patches → `data`；
+seconds → `solver`。**PlanningRequest 不消失，它变成 DSL 编译后的产物。**
+
+### 11.3 迁移三步（每步零回归）
+
+| 阶段 | 状态 |
+|---|---|
+| 现在（过渡态） | 双路径：planning_intent 正则命中走老路；未命中走 DSL。DSL 是纯增量 |
+| 中期（第二期） | DSL schema 补 `parameters`/`data` 段 + 编译器支持；新话术统一走 DSL |
+| 终态（第三期） | planning_intent 的正则模式迁移为统一解析器的规则层；编译逻辑迁移为
+DSL 编译器的 parameters/data 段；删除 planning_intent 的解析入口。一条管道 |
+
+**保留**（迁移，不是重写）：13 类正则模式本身（规则层最佳实现）、
+PlanningRequest 结构（parameters/data 段的 schema）、预览→确认→求解流程、
+build_change_plan 的继承项/变更项 diff 逻辑。
+**不保留**：两套解析器的分裂、两套"什么是修改类"的判定逻辑。

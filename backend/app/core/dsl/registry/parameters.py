@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 _CSV_PATH = (
-    Path(__file__).resolve().parents[4] / "data" / "模型参数" / "参数总表.csv"
+    Path(__file__).resolve().parents[5] / "data" / "模型参数" / "参数总表.csv"
 )
 
 # 生成层参数（改了必须重新生成候选）——来源：设计文档 §6.3 的 ✅生成层 列

@@ -27,7 +27,7 @@ from typing import Any
 
 from .validator import validate_dsl
 
-LIBRARY_PATH = Path(__file__).resolve().parents[1] / "eval" / "validated_library.jsonl"
+LIBRARY_PATH = Path(__file__).resolve().parents[3] / "eval_cases" / "dsl_validated_library.jsonl"
 
 _TASK = r"(任务\d{1,3}|T\d{1,3})"
 # 年作为可选捕获组，保证 groups 索引对齐 (year, month, day)

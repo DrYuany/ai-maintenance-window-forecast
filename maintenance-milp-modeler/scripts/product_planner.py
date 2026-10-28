@@ -444,7 +444,7 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
         '模型产物文件':artifact['artifactFile'],'模型产物指纹':artifact_fingerprint}
 
 
-def recommend(data, output, seconds=60, strategy='成本最低优先', mode='分层', weights=None, limits=None, on_solver=None, cancelled=None, model_fingerprint=None):
+def recommend(data, output, seconds=60, strategy='成本最低优先', mode='分层', weights=None, limits=None, on_solver=None, cancelled=None, model_fingerprint=None, extra_constraints=None, custom_stages=None):
     if strategy not in STRATEGIES: raise ValueError('未知策略')
     output=Path(output);output.mkdir(parents=True,exist_ok=True)
     if (output/'结果.json').exists(): raise ValueError('输出目录已有结果，请使用新目录保留历史版本')
@@ -473,13 +473,13 @@ def recommend(data, output, seconds=60, strategy='成本最低优先', mode='分
                         '求解器参数':{'num_search_workers':1,'random_seed':17,'max_time_in_seconds':seconds}}
     else:
         best=max(baselines.values(),key=len)
-        chosen,info=solve(data,options,output,seconds,strategy,mode,weights,limits,hint=best,on_solver=on_solver,cancelled=cancelled,model_fingerprint=model_fingerprint)
+        chosen,info=solve(data,options,output,seconds,strategy,mode,weights,limits,hint=best,on_solver=on_solver,cancelled=cancelled,model_fingerprint=model_fingerprint,extra_constraints=extra_constraints,custom_stages=custom_stages)
         # 完整排程做不出来时才放宽为部分排程。
-        # 除了“已证明不可行”，还要收“时限内既没找到可行解也没排除可行”的情况：
+        # 除了”已证明不可行”，还要收”时限内既没找到可行解也没排除可行”的情况：
         # 加了业务约束后，不可行性的证明本身会变慢，只等证明会把明明存在的部分方案也一起埋掉。
         if chosen is None and info['阶段'] and info['阶段'][-1]['状态'] in ('INFEASIBLE','UNKNOWN'):
             formal=info
-            chosen,info=solve(data,options,output,seconds,strategy,mode,weights,limits,partial=True,hint=best,on_solver=on_solver,cancelled=cancelled,model_fingerprint=model_fingerprint)
+            chosen,info=solve(data,options,output,seconds,strategy,mode,weights,limits,partial=True,hint=best,on_solver=on_solver,cancelled=cancelled,model_fingerprint=model_fingerprint,extra_constraints=extra_constraints,custom_stages=custom_stages)
             info['正式模型']=formal
             if formal['阶段'] and formal['阶段'][-1]['状态']=='UNKNOWN':
                 info['部分排程原因']=(

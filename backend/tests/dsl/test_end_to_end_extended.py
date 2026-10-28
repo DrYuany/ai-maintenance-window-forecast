@@ -5,7 +5,10 @@
 """
 from __future__ import annotations
 
-from dsl_prototype.runner import run
+from app.core.dsl.runner import run
+import pytest
+
+pytestmark = pytest.mark.slow
 
 
 def _row(selected: list[dict], task_id: str) -> dict:
@@ -17,7 +20,9 @@ def _sum_of_finishes(selected: list[dict]) -> int:
 
 
 def test_deadline_bounds_finish() -> None:
-    """'任务001 必须 11 月 6 日前修完' —— 完成时间不晚于期限。"""
+    """
+
+'任务001 必须 11 月 6 日前修完' —— 完成时间不晚于期限。"""
     report = run({
         "constraints": [
             {"type": "deadline", "task": "任务001", "time": "2026-11-06T00:00:00+08:00"},
@@ -28,7 +33,7 @@ def test_deadline_bounds_finish() -> None:
     from pathlib import Path
     from product_data import load_project
 
-    data = load_project(Path(__file__).resolve().parents[2], base_id="基座01",
+    data = load_project(Path(__file__).resolve().parents[3], base_id="基座01",
                         as_of="2026-10-23T18:00:00+08:00")
     minute = data.minute("2026-11-06T00:00:00+08:00")
     assert _row(selected, "任务001")["完成"] <= minute
@@ -58,7 +63,7 @@ def test_forbidden_dates_blocks_starts() -> None:
     from pathlib import Path
     from product_data import load_project
 
-    data = load_project(Path(__file__).resolve().parents[2], base_id="基座01",
+    data = load_project(Path(__file__).resolve().parents[3], base_id="基座01",
                         as_of="2026-10-23T18:00:00+08:00")
     day = data.minute("2026-11-03T00:00:00+08:00") // 1440
     assert all(c["开始"] // 1440 != day for c in selected)
@@ -135,9 +140,35 @@ def test_cardinality_bounds_completion_in_partial_mode() -> None:
     assert len(selected) >= 8
 
 
+def test_budget_on_total_cost_via_metrics() -> None:
+    """'总经济成本不超过 300 万' —— 经 build_model metrics 引用的复合成本量。"""
+    report = run({
+        "constraints": [
+            {"type": "budget", "quantity": "总经济成本", "op": "<=", "value": 3_000_000},
+        ],
+    }, seconds=60, max_tasks=10)
+    selected = report["排程"]
+    assert selected is not None
+    assert len(selected) == 10
+    cost = report["求解"].get("模型成本")
+    assert cost is not None and cost <= 3_000_000
+
+
+def test_lexmin_minimizes_total_cost_via_metrics() -> None:
+    """lexmin 目标引用复合成本量（metrics 形式）—— 编译 + 求解成功。"""
+    report = run({
+        "objectives": [
+            {"type": "lexmin", "stages": [{"q": "总经济成本", "dir": "minimize"}]},
+        ],
+    }, seconds=60, max_tasks=10)
+    selected = report["排程"]
+    assert selected is not None
+    assert len(selected) == 10
+
+
 def test_full_pipeline_nl_to_solve() -> None:
     """全链路：自然语言 → 规则层解析 → DSL → 真求解 → 约束生效。"""
-    from dsl_prototype.llm_parser import parse
+    from app.core.dsl.llm_parser import parse
 
     result = parse("任务001和任务002不能在同一天出海维修")
     assert result.source == "rule"

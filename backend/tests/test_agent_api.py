@@ -139,7 +139,7 @@ def _client(temp_db_path, monkeypatch, report: dict | None = None) -> TestClient
     os.environ["MWA_DB_PATH"] = str(temp_db_path)
     monkeypatch.setattr(
         "app.core.maintenance_product_executor.MaintenanceProductExecutor.execute",
-        lambda self, request, job_id, model_fingerprint=None: report or _report(),
+        lambda self, request, job_id, model_fingerprint=None, dsl=None: report or _report(),
     )
     from app.main import create_app
     return TestClient(create_app())
