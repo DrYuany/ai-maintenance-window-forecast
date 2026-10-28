@@ -7,6 +7,9 @@
 编译器接入 build_model metrics（成本/完工时间指标可引用），DSL 进证据链。
 第二期：parameters/data 段 + 时序假设修改（海况/逐时/窗口，见 registry/data_fields.py
 与 product_data 的 timeline_patches），规则层产出参数/数据/时序话术的 DSL。
+第三期：生成层规则参数化（候选开工粒度/跨天暂停/夜间转移/海况阈值）；
+planning_bridge 收拢解析管道（旧规划语言 → 统一 DSL，PlanningRequest 成为编译产物）；
+多轮上下文（未确认变更累加、绝对/相对互斥替换、DSL 跨类型合并、基版绑定）。
 
 ## 目录结构
 
