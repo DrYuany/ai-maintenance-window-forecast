@@ -78,6 +78,10 @@ RULE_PATTERNS: list[tuple[str, str]] = [
     (rf"{_TASK}.*?{_MONTH_DAY}.*?(?:前|之前).*?(?:修完|完成|修好|搞定)", "deadline"),
     # 禁开工日期
     (rf"{_MONTH_DAY}.*?(?:别开工|不要开工|禁止开工)", "forbidden_dates"),
+    # 预算（时间量）：完工时间和/完成数 + 不超过/最多/压到 + 数值
+    (rf"(完工时间和|完成数|完成任务数).*?(?:不超过|最多|压到|别超过)\s*(\d+)", "budget"),
+    # 计数下界：至少完成 N 项
+    (rf"(?:至少|最少|不低于).{0,4}(?:完成|修|排).{0,6}(\d+)\s*项", "cardinality_min"),
 ]
 
 
@@ -139,6 +143,16 @@ def parse_by_rules(message: str) -> dict[str, Any] | None:
                 "type": "forbidden_dates",
                 "dates": [_month_day(year, month, day)],
             }]}
+        if kind == "budget":
+            metric, value = groups
+            metric = _METRIC_ALIASES.get(metric, metric)
+            return {"constraints": [{
+                "type": "budget", "quantity": metric, "op": "<=", "value": int(value),
+            }]}
+        if kind == "cardinality_min":
+            return {"constraints": [{
+                "type": "cardinality", "filter": {}, "op": ">=", "value": int(groups[0]),
+            }]}
     return None
 
 
@@ -149,29 +163,46 @@ _BATCH_RE = re.compile(
 )
 
 _DATA_PATCH_RE = re.compile(
-    r"到货|维修工时.{0,4}(?:上涨|翻倍|增加|提高)|"
-    r"(?:严重故障|严重告警|高严重|中等故障|低严重).{0,6}" + _MONTH_DAY + r".{0,6}(?:前|之前).{0,4}(?:修完|完成|修好)"
+    r"到货|维修工时.{0,4}(?:上涨|翻倍|增加|提高)|(?:更费时|耗时变长|修得更久)"
+    r"|(?:严重故障|严重告警|高严重|高危|中等故障|中等告警|低严重).{0,8}"
+    r"(?:\d{1,2}月)?\d{1,2}[日号].{0,6}(?:前|之前).{0,4}(?:修完|完成|修好|搞定)"
     r"|补库延期"
 )
 
 # 参数类修改（主产品 planning_intent 处理，DSL 不认领但门控必须认）
 _PARAMETER_RE = re.compile(
-    r"船租.{0,6}(?:改成|改为|设为|上涨|上调|翻倍|涨|增加)"
+    r"船租.{0,6}(?:改成|改为|设为|上涨|上调|翻倍|翻一番|翻一倍|涨|增加)"
     r"|人工.{0,6}(?:改成|改为|设为|上涨|上调|涨|增加)"
     r"|(?:最多|不超过|限定|只上|只剩)\s*[\d一两二三]+\s*(?:条|人|小时)"
-    r"|每天.{0,6}(?:最多|只能|干|工作)\s*\d+.*小时"
+    r"|(?:少|减)\s*[\d一两二三]+\s*(?:条|人)"
+    r"|每天.{0,6}(?:最多|只能|干|工作)\s*\d+.*小时|每天\s*\d+(?:\.\d+)?.*小时"
     r"|人员.{0,6}(?:上限|改成|设为|砍)"
     r"|人手.{0,6}(?:砍|减|少)"
-    r"|转移.{0,6}(?:改成|要|用)\s*\d+"
+    r"|(?:转移|挪动|换风机).{0,6}(?:改成|要|用)\s*\d+"
     r"|(?:早上|每天)\s*\d+点(?:开工|开始|干活)"
     r"|每天\s*\d+点(?:收工|结束)"
+)
+
+# 策略/加权目标（主产品四模板处理，DSL 不认领但门控必须认）
+_STRATEGY_RE = re.compile(
+    r"(?:按|改成|改为|用|采用).{0,4}(?:高风险优先|风险优先|严重性优先|成本最低|经济优先|成本优先"
+    r"|最短完成|工期优先|检修最多|数量优先|省钱)"
+    r"|先修严重的|严重的先|早点干完|尽快完成|改成加权|权重|加权模式"
+    r"|省钱优先|最短完成优先|检修最多器件优先|数量优先"
 )
 
 _ILLEGAL_RE = re.compile(
     r"平方|相乘|除以|绝对值|非线性|方差|标准差"
     r"|碳排放|碳足迹|颜色|外观|声音|噪音|振动|温度"
+    r"|天气.{0,4}(?:改|变好|变差|调)"
     r"|最大化.{0,6}距离|最小化.{0,6}距离"
     r"|删掉|删除|报废|卖掉"
+)
+
+# 需要澄清的诉求（模糊/涉及未实现能力）：预算引成本量（未实现）、安全应急
+_CLARIFY_RE = re.compile(
+    r"预算.{0,6}(?:不超过|控制在|别超过|压到)\s*\d"
+    r"|台风|保安全|应急模式"
 )
 
 NON_CHANGE_PATTERNS: list[tuple[str, str]] = [
@@ -191,10 +222,14 @@ def _classify_non_change(message: str) -> str | None:
         return "batch"
     if _DATA_PATCH_RE.search(text):
         return "data_patch"
+    if _STRATEGY_RE.search(text):
+        return "strategy"
     if _PARAMETER_RE.search(text):
         return "parameter"
     if _ILLEGAL_RE.search(text):
         return "reject"
+    if _CLARIFY_RE.search(text):
+        return "clarify"
     for pattern, _kind in NON_CHANGE_PATTERNS:
         if re.search(pattern, text):
             return "not_change"
@@ -300,7 +335,12 @@ def parse_with_llm(
         from anthropic import Anthropic
 
         api_key, model, base_url = config
-        client = Anthropic(api_key=api_key, base_url=base_url, timeout=60.0)
+        # 本机 Claude Code 代理环境里有 ANTHROPIC_AUTH_TOKEN=PROXY_MANAGED：
+        # SDK 在 auth_token=None 时读环境变量并优先于 api_key 发 Bearer 头，
+        # 导致真实 key 被劫持（401 ****AGED）。构造时传空串跳过环境读取、
+        # 构造后置回 None 让 SDK 走 x-api-key 头。
+        client = Anthropic(api_key=api_key, auth_token="", base_url=base_url, timeout=60.0)
+        client.auth_token = None
         model_name = model
     else:
         model_name = "mock-model"
@@ -330,7 +370,9 @@ def parse_with_llm(
         return ParseResult(dsl=None, source="llm", route=payload["route"], confidence=1.0)
     errors = validate_dsl(payload)
     if errors:
-        raise ValueError("LLM 产物未通过校验：" + "；".join(errors))
+        # 产物过不了校验 → 不静默也不抛异常，路由为"澄清"（低置信），
+        # 由上层决定重试、换说法或转人工。
+        return ParseResult(dsl=None, source="llm", route="clarify", confidence=0.5)
     return ParseResult(
         dsl=payload,
         source="llm",

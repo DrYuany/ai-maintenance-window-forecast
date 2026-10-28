@@ -112,8 +112,9 @@ def test_llm_layer_sends_few_shot_and_validates() -> None:
 
 def test_llm_layer_rejects_invalid_output() -> None:
     client = _FakeClient({"constraints": [{"type": "magic_wand", "task": "任务001"}]})
-    with pytest.raises(ValueError, match="未通过校验"):
-        parse_with_llm("任意话", [], client=client)
+    result = parse_with_llm("任意话", [], client=client)
+    assert result.route == "clarify"
+    assert result.dsl is None
 
 
 def test_llm_layer_unavailable_without_key(monkeypatch) -> None:

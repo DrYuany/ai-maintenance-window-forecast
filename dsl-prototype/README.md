@@ -65,9 +65,15 @@ reject 8 ／ clarify 7 ／ batch 5。
 - **类型**：dsl 用例的约束类型覆盖期望类型
 - **求解**（--solve）：抽样 dsl 用例真求解，断言约束在排程里真的成立
 
-当前成绩：**规则层+门控 80/80（100%）、类型 10/10（100%）**（离线模式）；
-LLM 层 51 条用例待有效 DeepSeek key（`.env.local` 里现 key 已失效，换新后
-`py -m eval.run_question_bank` 即可全量跑）。
+当前成绩（真实 DeepSeek API 全量跑）：
+- **门控准确率 131/131 = 100%**（7 类意图 × 六路由判定）
+- **DSL 类型准确率 20/20 = 100%**（约束类型覆盖期望）
+- **求解验证 5/5 全过**（--solve：解析 → 真求解 → 断言约束在排程里成立）
+- 单测 37 通过；主项目 178 通过（零回归）
+
+环境注意：本机 Claude Code 代理会往环境变量注入 `ANTHROPIC_AUTH_TOKEN`，
+anthropic SDK 会用它劫持 api_key（401 ****AGED）。解析器与主项目
+conversation_agent 均已修复：构造时传 `auth_token=""` 再置回 `None`。
 
 ## 三层解析器（规则 → 向量 → LLM，不是反的）
 

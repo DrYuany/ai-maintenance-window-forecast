@@ -145,7 +145,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _solve_verify(rows: list[dict], library: list[dict], n: int) -> list[str]:
-    """对抽样 dsl 用例：解析 → 真求解 → 断言约束生效。"""
+    """对抽样 dsl 用例：解析 → 真求解 → 断言约束生效。
+
+    求解用 max_tasks=10 子集（完整模型短时限证不了可行性）；引用的任务编号
+    重映射进子集（如 任务022 → 任务002），约束语义不变，只换具体任务。
+    """
     from dsl_prototype.runner import run
 
     failures: list[str] = []
@@ -161,18 +165,43 @@ def _solve_verify(rows: list[dict], library: list[dict], n: int) -> list[str]:
             if result.dsl is None:
                 failures.append(f"{row['id']} 未产出 DSL")
                 continue
-            report = run(result.dsl, seconds=60, max_tasks=10, partial="exclude" in row["utterance"] or "must" in row["utterance"])
+            dsl = _remap_tasks(result.dsl)
+            report = run(dsl, seconds=60, max_tasks=10)
             selected = report["排程"]
             if selected is None:
                 failures.append(f"{row['id']} 求解未产生排程")
                 continue
             for ctype in row.get("constraint_types", []):
-                problem = _check_held(ctype, selected, result.dsl)
+                problem = _check_held(ctype, selected, dsl)
                 if problem:
                     failures.append(f"{row['id']} {problem}")
         except Exception as exc:  # noqa: BLE001
             failures.append(f"{row['id']} 求解异常: {exc}")
     return failures
+
+
+def _remap_tasks(dsl: dict) -> dict:
+    """把超出 max_tasks=10 子集的任务引用重映射进子集。"""
+    import copy
+
+    out = copy.deepcopy(dsl)
+
+    def remap(ref: str) -> str:
+        match = __import__("re").search(r"任务(\d{1,3})", str(ref))
+        if not match:
+            return ref
+        num = int(match.group(1))
+        if 1 <= num <= 10:
+            return ref
+        return f"任务{((num - 1) % 10) + 1:03d}"
+
+    for spec in out.get("constraints", []):
+        for key in ("task", "before", "after"):
+            if key in spec:
+                spec[key] = remap(spec[key])
+        if "tasks" in spec:
+            spec["tasks"] = [remap(t) for t in spec["tasks"]]
+    return out
 
 
 def _check_held(ctype: str, selected: list[dict], dsl: dict) -> str | None:

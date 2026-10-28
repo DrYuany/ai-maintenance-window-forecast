@@ -85,11 +85,16 @@ class ConversationAgent:
         if not self.enabled:
             raise ConversationAgentError("MINIMAX_API_KEY is not configured")
 
+        # 本机代理环境里的 ANTHROPIC_AUTH_TOKEN 会劫持 api_key（SDK 在
+        # auth_token=None 时读环境变量且优先发 Bearer 头）：构造传空串跳过
+        # 环境读取，构造后置回 None 让 SDK 走 x-api-key 头。
         client = Anthropic(
             api_key=self.api_key,
+            auth_token="",
             base_url=self.base_url,
             timeout=120.0,
         )
+        client.auth_token = None
         messages = self._build_messages(message, history)
         system = self._system_prompt(memory, toolbox, selected_version)
         tools = toolbox.tool_specs()
