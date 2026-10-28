@@ -43,7 +43,31 @@ py -m pytest tests/test_end_to_end.py tests/test_end_to_end_extended.py -v
 
 # 3. golden 判分（exit 0 = 全部通过）
 py -m eval.run_golden
+
+# 4. 提问库评测（131 条 MECE 提问）
+py -m eval.run_question_bank --no-llm    # 离线：规则层 + 意图门控
+py -m eval.run_question_bank             # 全模式：自动读项目 .env.local 走真 LLM
+py -m eval.run_question_bank --solve 8   # 另对前 8 条 dsl 用例做真求解验证
 ```
+
+## 提问库评测（eval/questions.jsonl，131 条）
+
+**MECE 划分（第一性维度）**：7 类意图 × 修改类的 5 内容 × 4 形式。
+
+意图维度（7，互斥穷尽）：闲聊 / 数据域查询 / 方案域查询 / 模型解释 / 方案解释 /
+对比 / 修改排程。修改类再按内容（参数/数据/约束/目标/批量）× 形式（标准/同义/口语/越界）。
+
+路由期望分布：not_change 54 ／ dsl 31 ／ parameter 18 ／ data_patch 8 ／
+reject 8 ／ clarify 7 ／ batch 5。
+
+判分口径：
+- **门控**：解析出的 route 与期望一致（clarify 类接受"任何非 dsl 路由"）
+- **类型**：dsl 用例的约束类型覆盖期望类型
+- **求解**（--solve）：抽样 dsl 用例真求解，断言约束在排程里真的成立
+
+当前成绩：**规则层+门控 80/80（100%）、类型 10/10（100%）**（离线模式）；
+LLM 层 51 条用例待有效 DeepSeek key（`.env.local` 里现 key 已失效，换新后
+`py -m eval.run_question_bank` 即可全量跑）。
 
 ## 三层解析器（规则 → 向量 → LLM，不是反的）
 

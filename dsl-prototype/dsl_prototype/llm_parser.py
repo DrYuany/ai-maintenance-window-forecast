@@ -1,12 +1,16 @@
-"""三层解析器：自然语言 → DSL JSON（第二阶段）。
+"""三层解析器：自然语言 → DSL JSON。
 
-    规则层（正则直出）    高频确定性话术，slot 抽取后直接产出 DSL，零成本零延迟
-    向量层（模板检索）    本地字符 n-gram 检索"已验证 DSL 模板库"，作为 few-shot
-                          喂给 LLM——降低误判、提高一致性（模板曾通过校验+求解）
-    LLM 层（生成+校验）   新话术兜底，产物必须过确定性校验器（validator）
+    规则层（正则直出）      高频确定性话术，slot 抽取后直接产出 DSL，零成本零延迟
+    向量层（模板检索）      本地字符 n-gram 检索"已验证 DSL 模板库"，作为 few-shot
+                            喂给 LLM——降低误判、提高一致性（模板曾通过校验+求解）
+    LLM 层（生成 + 校验）   新话术兜底，产物必须过确定性校验器（validator）
 
-顺序上规则最优先，LLM 覆盖面最广——不是反的。向量层不做"分类"（我们是开集
-结构化生成，不是闭集意图识别），而是做"检索"。
+路由（ParseResult.route）：一句话要么进 DSL，要么不进：
+  - dsl          修改类 → 产出 DSL JSON
+  - batch        批量多场景（主产品 build_scenario_batch 处理，DSL 不认领）
+  - data_patch   行级数据补丁（主产品 planning_intent 处理，DSL 不认领）
+  - reject       越界诉求（非线性/无意义数据），明确拒绝，不静默编造
+  - not_change   闲聊/查询/解释/对比 → 读工具或直接回答，不进 DSL
 
 确定性边界：解析层可能非确定（LLM），产物必须落库进证据链；"可复现"承诺
 从"NL→模型"降级为"DSL→模型"（见设计文档 §7.1）。
@@ -35,42 +39,65 @@ def _task_ref(value: str) -> str:
     return f"任务{int(plain):03d}"
 
 
-# ── 规则层：正则 + slot 抽取 ──────────────────────────────────────────────────
-
-RULE_PATTERNS: list[tuple[str, Any]] = [
-    # 不能同一天 / 不能同时 → 互斥
-    (rf"{_TASK}[和与、,，]{_TASK}.*?不能.*?(同[一1]天|同时)", "co_occur_diff_day"),
-    # 先修 A 再修 B → 先后
-    (rf"先修?{_TASK}.*?再修?{_TASK}", "precedence"),
-    # A 必须在 B 之前 → 先后（反向写法）
-    (rf"{_TASK}.*?必须.*?在{_TASK}.*?之前", "precedence_after"),
-    # 最早 X 月 Y 日开工 → 最早开工
-    (rf"{_TASK}.*?最早.*?{_MONTH_DAY}.*?(?:开工|开始)", "earliest"),
-    # 必须修 → 必修
-    (rf"{_TASK}.*?(?:必须|一定|务必).*?(?:修|安排|完成|做)", "must"),
-    # 别排 / 排除 → 排除
-    (rf"(?:别排|不要排|排除|不排){_TASK}", "exclude"),
-    # 只能上 N 号船/线 → 固定作业线
-    (rf"{_TASK}.*?只能.*?(\d+)号(?:船|线)", "fix"),
-    # 最晚 X 月 Y 日前修完 → 期限
-    (rf"{_TASK}.*?(?:最晚|最迟).*?{_MONTH_DAY}.*?(?:前|之前).*?(?:修完|完成|修好)", "deadline"),
-    # X 月 Y 日别开工 → 禁开工日期
-    (rf"{_MONTH_DAY}.*?(?:别开工|不要开工|禁止开工)", "forbidden_dates"),
-]
-
-
 def _month_day(year: str | None, month: str, day: str) -> str:
     return f"2026-{int(month):02d}-{int(day):02d}T08:00:00+08:00"
 
 
+_QUESTION_HINTS = re.compile(r"[吗么呢][?？]?$|是不是|能不能|行不行|什么时候|多久|怎么")
+
+
+_METRIC = r"(高严重完成数|中严重完成数|低严重完成数|完工时间和|完工时间|总经济成本|经济成本|现金支出|完成任务数|完成数|成本)"
+_METRIC_ALIASES = {
+    "成本": "总经济成本", "经济成本": "总经济成本",
+    "完工时间": "最后完工时间", "完成数": "完成任务数",
+}
+_DIR_ALIASES = {"最小化": "minimize", "降低": "minimize", "压缩": "minimize", "最大化": "maximize"}
+
+# ── 规则层：修改类正则 + slot 抽取 ────────────────────────────────────────────
+
+RULE_PATTERNS: list[tuple[str, str]] = [
+    # 自定义分层目标："先最小化完工时间和，再最小化成本"（lexmin，不是批量）
+    (rf"(?:先|首先|优先).*?(最小化|最大化|降低|压缩).*?{_METRIC}.*?(?:再|然后|接着).*?(最小化|最大化|降低|压缩).*?{_METRIC}", "lexmin"),
+    # 互斥：不能/别/不要 同一天、同时
+    (rf"{_TASK}[和与、,，]{_TASK}.*?(?:不能|不要|别).*?(?:同[一1]天|同时|一起)", "co_occur_diff_day"),
+    # 先后：先修 A 再修 B；A 修完才能动 B；A 在 B 之前
+    (rf"先修?{_TASK}.*?再修?{_TASK}", "precedence"),
+    (rf"{_TASK}.*?(?:修完|完成).{{0,4}}(?:才能|再|之后).{{0,4}}(?:动|修|开工).{{0,4}}{_TASK}", "precedence"),
+    (rf"{_TASK}.*?必须.*?在{_TASK}.*?之前", "precedence_after"),
+    # 最早开工（有日期的才算修改；"最早什么时候"是问句，被问句守卫拦截）
+    (rf"{_TASK}.*?最早.{{0,8}}?{_MONTH_DAY}", "earliest"),
+    # 必修
+    (rf"{_TASK}.*?(?:必须|一定|务必).*?(?:修|安排|完成|做)", "must"),
+    # 排除
+    (rf"(?:别排|不要排|排除|不排){_TASK}", "exclude"),
+    # 固定作业线：只能上 N 号船/线；用 N 号线
+    (rf"{_TASK}.*?只能.{{0,6}}(\d+)号(?:船|线)", "fix"),
+    (rf"{_TASK}.*?(?:用|上)(\d+)号(?:船|线)", "fix"),
+    # 期限：最晚 X 月 Y 日前修完；X 月 Y 日前修完
+    (rf"{_TASK}.*?(?:最晚|最迟).*?{_MONTH_DAY}.*?(?:前|之前).*?(?:修完|完成|修好)", "deadline"),
+    (rf"{_TASK}.*?{_MONTH_DAY}.*?(?:前|之前).*?(?:修完|完成|修好|搞定)", "deadline"),
+    # 禁开工日期
+    (rf"{_MONTH_DAY}.*?(?:别开工|不要开工|禁止开工)", "forbidden_dates"),
+]
+
+
 def parse_by_rules(message: str) -> dict[str, Any] | None:
-    """规则层：正则命中则直出 DSL，未命中返回 None。"""
+    """规则层：正则命中且不是问句则直出 DSL；未命中返回 None。"""
     text = message.strip()
+    if _QUESTION_HINTS.search(text):
+        return None
     for pattern, kind in RULE_PATTERNS:
         match = re.search(pattern, text)
         if not match:
             continue
         groups = list(match.groups())
+        if kind == "lexmin":
+            dir1, metric1, dir2, metric2 = groups
+            stages = [
+                {"q": _METRIC_ALIASES.get(metric1, metric1), "dir": _DIR_ALIASES[dir1]},
+                {"q": _METRIC_ALIASES.get(metric2, metric2), "dir": _DIR_ALIASES[dir2]},
+            ]
+            return {"objectives": [{"type": "lexmin", "stages": stages}]}
         if kind == "co_occur_diff_day":
             return {"constraints": [{
                 "type": "co_occur", "mode": "diff_day",
@@ -112,6 +139,65 @@ def parse_by_rules(message: str) -> dict[str, Any] | None:
                 "type": "forbidden_dates",
                 "dates": [_month_day(year, month, day)],
             }]}
+    return None
+
+
+# ── 意图门控：批量 / 数据补丁 / 参数修改 / 越界 / 非修改 ─────────────────────
+
+_BATCH_RE = re.compile(
+    r"(?:先|首先).{0,24}(?:再|然后|接着).{0,24}(?:算|排|求解|对比|比较|看看)|两个.{0,6}场景|两种.{0,6}情况|敏感性"
+)
+
+_DATA_PATCH_RE = re.compile(
+    r"到货|维修工时.{0,4}(?:上涨|翻倍|增加|提高)|"
+    r"(?:严重故障|严重告警|高严重|中等故障|低严重).{0,6}" + _MONTH_DAY + r".{0,6}(?:前|之前).{0,4}(?:修完|完成|修好)"
+    r"|补库延期"
+)
+
+# 参数类修改（主产品 planning_intent 处理，DSL 不认领但门控必须认）
+_PARAMETER_RE = re.compile(
+    r"船租.{0,6}(?:改成|改为|设为|上涨|上调|翻倍|涨|增加)"
+    r"|人工.{0,6}(?:改成|改为|设为|上涨|上调|涨|增加)"
+    r"|(?:最多|不超过|限定|只上|只剩)\s*[\d一两二三]+\s*(?:条|人|小时)"
+    r"|每天.{0,6}(?:最多|只能|干|工作)\s*\d+.*小时"
+    r"|人员.{0,6}(?:上限|改成|设为|砍)"
+    r"|人手.{0,6}(?:砍|减|少)"
+    r"|转移.{0,6}(?:改成|要|用)\s*\d+"
+    r"|(?:早上|每天)\s*\d+点(?:开工|开始|干活)"
+    r"|每天\s*\d+点(?:收工|结束)"
+)
+
+_ILLEGAL_RE = re.compile(
+    r"平方|相乘|除以|绝对值|非线性|方差|标准差"
+    r"|碳排放|碳足迹|颜色|外观|声音|噪音|振动|温度"
+    r"|最大化.{0,6}距离|最小化.{0,6}距离"
+    r"|删掉|删除|报废|卖掉"
+)
+
+NON_CHANGE_PATTERNS: list[tuple[str, str]] = [
+    (r"^(你好|您好|嗨|哈喽|hello|hi|在吗|在不在|谢谢|多谢|再见|拜拜)[!！。.～~ ]*$", "chitchat"),
+    (r"你(?:叫什么|是谁|是啥|会什么|能干什么|能做什么)", "chitchat"),
+    (r"(?:写首诗|讲个笑话|聊聊天|中午吃什么|今天天气|点外卖)", "chitchat"),
+    (r"为什么|为啥|为何|怎么理解|如何理解|是什么|有哪些|能(?:不能|否)介绍|介绍一下|讲讲|解释一下|什么原理|什么算法|怎么建", "explain"),
+    (r"对比|比较|差在哪|差多少|区别|哪个更|哪版更", "compare"),
+    (r"多少|哪些|怎么样|如何|有没有|够不够|什么时候|哪天|还剩|当前|现在|最近", "query"),
+]
+
+
+def _classify_non_change(message: str) -> str | None:
+    """非 DSL 修改类话术的路由分类；不匹配返回 None（交 LLM 层）。"""
+    text = message.strip()
+    if _BATCH_RE.search(text):
+        return "batch"
+    if _DATA_PATCH_RE.search(text):
+        return "data_patch"
+    if _PARAMETER_RE.search(text):
+        return "parameter"
+    if _ILLEGAL_RE.search(text):
+        return "reject"
+    for pattern, _kind in NON_CHANGE_PATTERNS:
+        if re.search(pattern, text):
+            return "not_change"
     return None
 
 
@@ -171,13 +257,17 @@ _PARSE_SYSTEM = """你是检修排程 DSL 生成器。把用户的排程约束�
 - budget: {"quantity": "完工时间和", "op": "<=", "value": 数值}
 - linear: {"terms": [[系数, 量]], "op": "<=", "value": 数值}
 
-任务编号写全称"任务018"（三位）。日期必须带时区。只输出 JSON，不要解释。"""
+任务编号写全称"任务018"（三位）。日期必须带时区。只输出 JSON，不要解释。
+
+如果这句话不是排程修改诉求（闲聊、查询、解释、对比），输出 {"route": "not_change"}；
+如果是非线性、无意义或越界诉求（如"最小化成本的平方""改颜色"），输出 {"route": "reject"}。"""
 
 
 @dataclass
 class ParseResult:
-    dsl: dict[str, Any]
+    dsl: dict[str, Any] | None
     source: str  # rule / llm
+    route: str = "dsl"  # dsl / batch / data_patch / reject / not_change
     confidence: float = 1.0
     templates_used: list[str] = field(default_factory=list)
 
@@ -235,23 +325,32 @@ def parse_with_llm(
     ).strip()
     # 容忍 markdown 代码围栏
     content = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.MULTILINE).strip()
-    dsl = json.loads(content)
-    errors = validate_dsl(dsl)
+    payload = json.loads(content)
+    if payload.get("route") in ("not_change", "reject"):
+        return ParseResult(dsl=None, source="llm", route=payload["route"], confidence=1.0)
+    errors = validate_dsl(payload)
     if errors:
         raise ValueError("LLM 产物未通过校验：" + "；".join(errors))
     return ParseResult(
-        dsl=dsl,
+        dsl=payload,
         source="llm",
+        route="dsl",
         confidence=1.0,
         templates_used=[entry.get("id", entry.get("utterance", "")) for entry in templates],
     )
 
 
 def parse(message: str, library: list[dict] | None = None, client=None) -> ParseResult:
-    """三层解析入口：规则 → 向量(few-shot) → LLM。"""
+    """三层解析入口：规则 → 意图门控 → 向量(few-shot) → LLM。
+
+    路由结果：dsl / batch / data_patch / reject / not_change。
+    """
     ruled = parse_by_rules(message)
     if ruled is not None:
-        return ParseResult(dsl=ruled, source="rule", confidence=1.0)
+        return ParseResult(dsl=ruled, source="rule", route="dsl", confidence=1.0)
+    classified = _classify_non_change(message)
+    if classified is not None:
+        return ParseResult(dsl=None, source="rule", route=classified, confidence=0.9)
     library = library if library is not None else load_library()
     templates = retrieve(message, library, top_k=3)
     return parse_with_llm(message, templates, client=client)
