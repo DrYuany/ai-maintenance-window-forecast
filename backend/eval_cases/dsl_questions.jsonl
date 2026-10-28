@@ -102,8 +102,8 @@
 {"id": "Q161", "intent": "modify_constraint", "route": "clarify", "utterance": "2号船周三那天别排它", "constraint_types": []}
 {"id": "Q170", "intent": "modify_objective", "route": "dsl", "utterance": "按高风险优先抢修", "constraint_types": [], "objective_types": ["strategy"]}
 {"id": "Q171", "intent": "modify_objective", "route": "strategy", "utterance": "先修严重的", "constraint_types": [], "objective_types": ["strategy"]}
-{"id": "Q172", "intent": "modify_objective", "route": "strategy", "utterance": "改成成本最低优先", "constraint_types": [], "objective_types": ["strategy"]}
-{"id": "Q173", "intent": "modify_objective", "route": "strategy", "utterance": "省钱优先", "constraint_types": [], "objective_types": ["strategy"]}
+{"id": "Q172", "intent": "modify_objective", "route": "dsl", "utterance": "改成成本最低优先", "constraint_types": []}
+{"id": "Q173", "intent": "modify_objective", "route": "dsl", "utterance": "省钱优先", "constraint_types": []}
 {"id": "Q174", "intent": "modify_objective", "route": "strategy", "utterance": "改成加权，高严重完成数0.6总经济成本0.4", "constraint_types": [], "objective_types": ["weighted"]}
 {"id": "Q175", "intent": "modify_objective", "route": "strategy", "utterance": "权重改一下，严重故障占六成", "constraint_types": [], "objective_types": ["weighted"]}
 {"id": "Q176", "intent": "modify_objective", "route": "dsl", "utterance": "先最小化完工时间和，再最小化成本", "constraint_types": [], "objective_types": ["lexmin"]}
@@ -137,3 +137,85 @@
 {"id": "Q231", "intent": "modify_parameter", "route": "dsl", "utterance": "不允许跨天暂停", "constraint_types": []}
 {"id": "Q232", "intent": "modify_parameter", "route": "dsl", "utterance": "安全风速上限改成11", "constraint_types": []}
 {"id": "Q233", "intent": "modify_parameter", "route": "dsl", "utterance": "禁止夜间转移", "constraint_types": []}
+{"id": "Q300", "intent": "modify_parameter", "route": "dsl", "utterance": "船租调整为8000元", "constraint_types": []}
+{"id": "Q301", "intent": "modify_parameter", "route": "dsl", "utterance": "船舶日租金设为15000", "constraint_types": []}
+{"id": "Q302", "intent": "modify_parameter", "route": "dsl", "utterance": "人工工资涨到200一小时", "constraint_types": []}
+{"id": "Q303", "intent": "modify_parameter", "route": "dsl", "utterance": "把人工费降到100", "constraint_types": []}
+{"id": "Q304", "intent": "modify_parameter", "route": "dsl", "utterance": "作业线最多开两条", "constraint_types": []}
+{"id": "Q305", "intent": "modify_parameter", "route": "dsl", "utterance": "只能开一条线", "constraint_types": []}
+{"id": "Q306", "intent": "modify_parameter", "route": "dsl", "utterance": "人员控制在15人以内", "constraint_types": []}
+{"id": "Q307", "intent": "modify_parameter", "route": "dsl", "utterance": "总人数不超过12", "constraint_types": []}
+{"id": "Q308", "intent": "modify_parameter", "route": "dsl", "utterance": "每日工时改为6小时", "constraint_types": []}
+{"id": "Q309", "intent": "modify_parameter", "route": "dsl", "utterance": "一天只能干5小时", "constraint_types": []}
+{"id": "Q310", "intent": "modify_parameter", "route": "dsl", "utterance": "早上7点开工", "constraint_types": []}
+{"id": "Q311", "intent": "modify_parameter", "route": "dsl", "utterance": "下午6点收工", "constraint_types": []}
+{"id": "Q312", "intent": "modify_parameter", "route": "dsl", "utterance": "换风机留4小时路上时间", "constraint_types": []}
+{"id": "Q313", "intent": "modify_parameter", "route": "dsl", "utterance": "把开工粒度调到15分钟", "constraint_types": []}
+{"id": "Q314", "intent": "modify_parameter", "route": "dsl", "utterance": "允许跨天施工", "constraint_types": []}
+{"id": "Q320", "intent": "modify_data", "route": "dsl", "utterance": "叶片备件11月6日到货2套", "constraint_types": []}
+{"id": "Q321", "intent": "modify_data", "route": "dsl", "utterance": "轮毂备件11月4号才能到", "constraint_types": []}
+{"id": "Q322", "intent": "modify_data", "route": "dsl", "utterance": "齿轮箱备件11月7日前到货", "constraint_types": []}
+{"id": "Q323", "intent": "modify_data", "route": "dsl", "utterance": "主轴维修工时增加30%", "constraint_types": []}
+{"id": "Q324", "intent": "modify_data", "route": "dsl", "utterance": "发电机维修时间上涨15%", "constraint_types": []}
+{"id": "Q325", "intent": "modify_data", "route": "dsl", "utterance": "高严重任务11月9日前修完", "constraint_types": []}
+{"id": "Q326", "intent": "modify_data", "route": "dsl", "utterance": "中严重11月10号前搞定", "constraint_types": []}
+{"id": "Q327", "intent": "modify_data", "route": "dsl", "utterance": "低严重任务11月12日前完成", "constraint_types": []}
+{"id": "Q340", "intent": "modify_constraint", "route": "dsl", "utterance": "任务003和任务005不能安排在同一天", "constraint_types": ["co_occur"]}
+{"id": "Q341", "intent": "modify_constraint", "route": "dsl", "utterance": "003和005不要一起出海", "constraint_types": ["co_occur"]}
+{"id": "Q342", "intent": "modify_constraint", "route": "dsl", "utterance": "先修任务004然后修任务006", "constraint_types": ["precedence"]}
+{"id": "Q343", "intent": "modify_constraint", "route": "dsl", "utterance": "任务004做完才轮到006", "constraint_types": ["precedence"]}
+{"id": "Q344", "intent": "modify_constraint", "route": "dsl", "utterance": "任务007最早11月6日开工", "constraint_types": ["earliest"]}
+{"id": "Q345", "intent": "modify_constraint", "route": "dsl", "utterance": "007不得早于11月6日", "constraint_types": ["earliest"]}
+{"id": "Q346", "intent": "modify_constraint", "route": "dsl", "utterance": "任务008最晚11月9日前完成", "constraint_types": ["deadline"]}
+{"id": "Q347", "intent": "modify_constraint", "route": "dsl", "utterance": "008必须在11月9号前修完", "constraint_types": ["deadline"]}
+{"id": "Q348", "intent": "modify_constraint", "route": "dsl", "utterance": "任务009只安排1号船", "constraint_types": ["fix"]}
+{"id": "Q349", "intent": "modify_constraint", "route": "dsl", "utterance": "009固定在2号作业线", "constraint_types": ["fix"]}
+{"id": "Q350", "intent": "modify_constraint", "route": "dsl", "utterance": "11月7日禁止开工", "constraint_types": ["forbidden_dates"]}
+{"id": "Q351", "intent": "modify_constraint", "route": "dsl", "utterance": "11月11号那天别施工", "constraint_types": ["forbidden_dates"]}
+{"id": "Q352", "intent": "modify_constraint", "route": "dsl", "utterance": "任务010必须安排", "constraint_types": ["must"]}
+{"id": "Q353", "intent": "modify_constraint", "route": "dsl", "utterance": "把任务011排除掉", "constraint_types": ["exclude"]}
+{"id": "Q354", "intent": "modify_constraint", "route": "dsl", "utterance": "至少完成9项", "constraint_types": ["cardinality"]}
+{"id": "Q355", "intent": "modify_constraint", "route": "dsl", "utterance": "完成任务数不低于7", "constraint_types": ["cardinality"]}
+{"id": "Q356", "intent": "modify_constraint", "route": "dsl", "utterance": "总经济成本不超过250万", "constraint_types": ["budget"]}
+{"id": "Q357", "intent": "modify_constraint", "route": "dsl", "utterance": "现金支出控制在100万以内", "constraint_types": ["budget"]}
+{"id": "Q365", "intent": "modify_objective", "route": "dsl", "utterance": "按成本最低优先排", "constraint_types": []}
+{"id": "Q366", "intent": "modify_objective", "route": "dsl", "utterance": "按最短完成优先排", "constraint_types": []}
+{"id": "Q367", "intent": "modify_objective", "route": "dsl", "utterance": "按检修最多器件优先排", "constraint_types": []}
+{"id": "Q368", "intent": "modify_objective", "route": "dsl", "utterance": "先修高危的", "constraint_types": []}
+{"id": "Q369", "intent": "modify_objective", "route": "dsl", "utterance": "省钱第一", "constraint_types": []}
+{"id": "Q370", "intent": "modify_objective", "route": "clarify", "utterance": "尽量多修几台"}
+{"id": "Q371", "intent": "modify_objective", "route": "clarify", "utterance": "改成加权，高严重完成数0.5、总经济成本0.5"}
+{"id": "Q372", "intent": "modify_objective", "route": "dsl", "utterance": "权重：高严重完成数0.7，最后完工时间0.3", "constraint_types": []}
+{"id": "Q373", "intent": "modify_objective", "route": "dsl", "utterance": "先最小化最后完工时间，再最小化总经济成本", "constraint_types": []}
+{"id": "Q380", "intent": "modify_batch", "route": "batch", "utterance": "先按成本优先算一遍，再按风险优先算一遍，然后对比", "constraint_types": []}
+{"id": "Q381", "intent": "modify_batch", "route": "batch", "utterance": "按船租0.8倍和1.2倍各算一版比较", "constraint_types": []}
+{"id": "Q382", "intent": "modify_batch", "route": "batch", "utterance": "做两个场景：两条作业线和三条作业线", "constraint_types": []}
+{"id": "Q383", "intent": "modify_batch", "route": "batch", "utterance": "先按默认算，再按不允许跨天算，比一比", "constraint_types": []}
+{"id": "Q390", "intent": "modify_illegal", "route": "reject", "utterance": "最小化风速的平方", "constraint_types": []}
+{"id": "Q391", "intent": "modify_illegal", "route": "reject", "utterance": "让成本和工期相乘最小", "constraint_types": []}
+{"id": "Q392", "intent": "modify_illegal", "route": "reject", "utterance": "把二氧化碳排放降到最低", "constraint_types": []}
+{"id": "Q393", "intent": "modify_illegal", "route": "reject", "utterance": "把风机涂成蓝色", "constraint_types": []}
+{"id": "Q394", "intent": "modify_illegal", "route": "reject", "utterance": "最大化两台风机之间的距离", "constraint_types": []}
+{"id": "Q395", "intent": "modify_illegal", "route": "reject", "utterance": "删掉任务012", "constraint_types": []}
+{"id": "Q396", "intent": "modify_illegal", "route": "reject", "utterance": "把天气改成晴天", "constraint_types": []}
+{"id": "Q397", "intent": "modify_illegal", "route": "reject", "utterance": "任务013的风险概率乘以损失最小化", "constraint_types": []}
+{"id": "Q400", "intent": "modify_ambiguous", "route": "clarify", "utterance": "明天风很大怎么办", "constraint_types": []}
+{"id": "Q401", "intent": "modify_ambiguous", "route": "clarify", "utterance": "下周天气不好，排程要不要改", "constraint_types": []}
+{"id": "Q402", "intent": "modify_ambiguous", "route": "clarify", "utterance": "帮我优化一下", "constraint_types": []}
+{"id": "Q403", "intent": "modify_ambiguous", "route": "clarify", "utterance": "看着办吧", "constraint_types": []}
+{"id": "Q404", "intent": "modify_ambiguous", "route": "clarify", "utterance": "尽量安排得合理一些", "constraint_types": []}
+{"id": "Q405", "intent": "modify_ambiguous", "route": "clarify", "utterance": "明天只有3个人能出海", "constraint_types": []}
+{"id": "Q406", "intent": "modify_ambiguous", "route": "clarify", "utterance": "如果有人请假怎么办", "constraint_types": []}
+{"id": "Q407", "intent": "modify_ambiguous", "route": "clarify", "utterance": "船可能坏了，你看着调", "constraint_types": []}
+{"id": "Q420", "intent": "query", "route": "not_change", "utterance": "现在库存够不够", "constraint_types": []}
+{"id": "Q421", "intent": "query", "route": "not_change", "utterance": "窗口03什么时候开始", "constraint_types": []}
+{"id": "Q422", "intent": "query", "route": "not_change", "utterance": "电价最高是哪天", "constraint_types": []}
+{"id": "Q423", "intent": "query", "route": "not_change", "utterance": "完成率是多少", "constraint_types": []}
+{"id": "Q424", "intent": "query", "route": "not_change", "utterance": "为什么任务005排在最后", "constraint_types": []}
+{"id": "Q425", "intent": "query", "route": "not_change", "utterance": "这版和上版成本差多少", "constraint_types": []}
+{"id": "Q426", "intent": "query", "route": "not_change", "utterance": "帮我解释一下目标函数", "constraint_types": []}
+{"id": "Q427", "intent": "query", "route": "not_change", "utterance": "模型里有哪些约束", "constraint_types": []}
+{"id": "Q428", "intent": "query", "route": "not_change", "utterance": "船租是怎么算的", "constraint_types": []}
+{"id": "Q429", "intent": "query", "route": "not_change", "utterance": "哪个方案最省钱", "constraint_types": []}
+{"id": "Q430", "intent": "query", "route": "not_change", "utterance": "未来五天海况怎么样", "constraint_types": []}
+{"id": "Q431", "intent": "query", "route": "not_change", "utterance": "现在几个人可用", "constraint_types": []}
