@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">随声译</string>
+    <string name="title_activity_main">随声译</string>
+    <string name="package_name">com.voicebridge.app</string>
+    <string name="custom_url_scheme">com.voicebridge.app</string>
+</resources>

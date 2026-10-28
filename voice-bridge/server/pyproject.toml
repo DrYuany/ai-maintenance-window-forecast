@@ -1,0 +1,5 @@
+[project]
+name = "voice-bridge-server"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1", "python-multipart>=0.0.9", "pydantic-settings>=2.5", "httpx>=0.27", "itsdangerous>=2.2", "imageio-ffmpeg>=0.5"]

@@ -1,0 +1,1 @@
+export function readRms(analyser: AnalyserNode) { const data = new Uint8Array(analyser.fftSize); analyser.getByteTimeDomainData(data); let total = 0; for (const value of data) { const centered = (value - 128) / 128; total += centered * centered; } return Math.sqrt(total / data.length); }
