@@ -44,12 +44,15 @@ def run(
     strategy: str = "成本最低优先",
     mode: str = "分层",
     max_tasks: int | None = None,
+    partial: bool = False,
 ) -> dict[str, Any]:
     """校验 DSL → 注入求解 → 返回 {报告, dsl, 求解信息}。
 
     max_tasks：原型测试用的小规模任务子集（完整 25 任务模型单线程 CP-SAT 在
     短时限内证明不了可行/不可行，生产默认 300s；golden 用例用 8~10 个任务
     验证约束语义，规模性能是主项目已有能力，不属于本原型验证范围）。
+    partial：部分排程模式（允许丢任务），exclude/must/cardinality 等
+    "选择类"原语只在部分模式下有意义（完整模式所有任务强制排入）。
     """
     from .compiler import constraints_builder, stages_builder
     from .validator import validate_dsl
@@ -84,6 +87,7 @@ def run(
         strategy=strategy,
         mode=mode,
         hint=hint,
+        partial=partial,
         extra_constraints=extra,
         custom_stages=stages,
     )

@@ -1,0 +1,8 @@
+{"id":"tpl-001","utterance":"任务001和任务002不能在同一天出海维修","dsl":{"constraints":[{"type":"co_occur","mode":"diff_day","tasks":["任务001","任务002"]}]}}
+{"id":"tpl-002","utterance":"先修任务001再修任务022","dsl":{"constraints":[{"type":"precedence","before":"任务001","after":"任务022"}]}}
+{"id":"tpl-003","utterance":"任务018最早11月5日开工","dsl":{"constraints":[{"type":"earliest","task":"任务018","time":"2026-11-05T08:00:00+08:00"}]}}
+{"id":"tpl-004","utterance":"任务005必须修","dsl":{"constraints":[{"type":"must","task":"任务005"}]}}
+{"id":"tpl-005","utterance":"别排任务003","dsl":{"constraints":[{"type":"exclude","task":"任务003"}]}}
+{"id":"tpl-006","utterance":"任务018只能上2号船","dsl":{"constraints":[{"type":"fix","task":"任务018","line":2}]}}
+{"id":"tpl-007","utterance":"任务001最晚11月6日前修完","dsl":{"constraints":[{"type":"deadline","task":"任务001","time":"2026-11-06T08:00:00+08:00"}]}}
+{"id":"tpl-008","utterance":"11月3号不要开工","dsl":{"constraints":[{"type":"forbidden_dates","dates":["2026-11-03T08:00:00+08:00"]}]}}
