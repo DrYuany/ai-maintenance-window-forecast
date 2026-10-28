@@ -388,6 +388,9 @@ def _patch_text(patch: dict[str, Any]) -> str:
 def _format_value(operation: dict[str, Any]) -> str:
     after = operation["after"]
     before = operation["before"]
+    if after is None:
+        # 多轮纠错把旧口径改掉时，该键在新请求里不存在
+        return "取消该设置（继承当前方案）"
     if operation["kind"] == "data_patch":
         text = _patch_text(after)
         if before is None:

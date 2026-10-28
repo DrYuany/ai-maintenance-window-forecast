@@ -294,6 +294,16 @@ class PlanningIntentCompiler:
             seconds = int(solve_seconds.group(1))
         seconds = min(1800, max(30, seconds))
 
+        # 多轮上下文：同一参数本轮新说的口径取代旧口径（绝对 vs 相对不叠加）。
+        prev_overrides = dict(request.overrides)
+        prev_relative = dict(request.relative_overrides)
+        new_abs = {key for key, value in overrides.items() if prev_overrides.get(key) != value}
+        new_rel = {key for key, value in relative_overrides.items() if prev_relative.get(key) != value}
+        for key in new_abs:
+            relative_overrides.pop(key, None)
+        for key in new_rel:
+            overrides.pop(key, None)
+
         return CompiledIntent(
             request=replace(
                 request,

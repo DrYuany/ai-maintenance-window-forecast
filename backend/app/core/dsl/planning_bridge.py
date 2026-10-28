@@ -110,8 +110,11 @@ def dsl_to_request(
         field = to_registry_name(spec["field"])  # 接受注册表名或内部键
         field = PARAM_NAME_TO_KEY.get(field, field)
         if spec.get("op") == "*":
+            # 本轮新口径取代旧口径：相对倍率替换掉同参数的绝对覆盖
+            overrides.pop(field, None)
             relative[field] = float(spec["value"])
         else:
+            relative.pop(field, None)
             overrides[field] = spec["value"]
     request = replace(request, overrides=overrides, relative_overrides=relative)
 
@@ -149,3 +152,50 @@ def custom_objectives(dsl: dict[str, Any]) -> list[dict[str, Any]]:
         spec for spec in (dsl.get("objectives") or [])
         if spec.get("type") not in ("strategy", "weighted")
     ]
+
+
+def _canonical(spec: dict[str, Any]) -> str:
+    import json
+
+    return json.dumps(spec, ensure_ascii=False, sort_keys=True)
+
+
+def merge_dsl(*dsls: dict[str, Any] | None) -> dict[str, Any]:
+    """多轮 DSL 累加：后说的覆盖先说的，约束/数据按内容去重。
+
+    - parameters：按 field 覆盖（同一参数后说优先）
+    - constraints/data：按内容去重后追加
+    - objectives：新的一轮有目标就整体替换（目标语义不适合拼接）
+    - solver：合并，后者覆盖
+    """
+    merged: dict[str, Any] = {}
+    parameters: dict[str, dict[str, Any]] = {}
+    constraints: list[dict[str, Any]] = []
+    data: list[dict[str, Any]] = []
+    objectives: list[dict[str, Any]] = []
+    solver: dict[str, Any] = {}
+    for dsl in dsls:
+        if not dsl:
+            continue
+        for spec in dsl.get("parameters") or []:
+            parameters[str(spec.get("field"))] = spec
+        for spec in dsl.get("constraints") or []:
+            if _canonical(spec) not in {_canonical(item) for item in constraints}:
+                constraints.append(spec)
+        for spec in dsl.get("data") or []:
+            if _canonical(spec) not in {_canonical(item) for item in data}:
+                data.append(spec)
+        if dsl.get("objectives"):
+            objectives = list(dsl["objectives"])
+        solver.update(dsl.get("solver") or {})
+    if parameters:
+        merged["parameters"] = list(parameters.values())
+    if constraints:
+        merged["constraints"] = constraints
+    if data:
+        merged["data"] = data
+    if objectives:
+        merged["objectives"] = objectives
+    if solver:
+        merged["solver"] = solver
+    return merged

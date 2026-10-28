@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
@@ -307,6 +308,7 @@ class AgentRuntime:
                     dsl=pending.get("dsl") or {},
                     content=str(pending.get("sourcePrompt") or content),
                     memory=memory,
+                    base_version_id=pending.get("baseVersionId"),
                 )
             try:
                 request = PlanningRequest(**pending["request"])
@@ -480,7 +482,72 @@ class AgentRuntime:
                 and dsl_result.route == "dsl"
                 and dsl_result.dsl is not None
             ):
+                current = self._planning_request_from_context(memory, selected_version)
+                pending_for_merge = filters.get("pendingChange")
+                if isinstance(pending_for_merge, dict) and pending_for_merge.get("request"):
+                    try:
+                        current = PlanningRequest(**pending_for_merge["request"])
+                    except (KeyError, TypeError, ValueError):
+                        pass
                 base_version_id = selected_version.id if selected_version else memory.latestResultId
+                from app.core.dsl.planning_bridge import (
+                    custom_objectives,
+                    dsl_to_request,
+                    merge_dsl,
+                    request_to_dsl,
+                )
+                from app.core.model_change import _diff_requests, _format_preview
+
+                updated, residual, timeline = dsl_to_request(dsl_result.dsl, current)
+                expressible = not (residual or timeline or custom_objectives(dsl_result.dsl))
+                operations = _diff_requests(current, updated)
+                pending_dsl = (
+                    pending_for_merge.get("dsl")
+                    if isinstance(pending_for_merge, dict)
+                    and pending_for_merge.get("kind") == "dsl"
+                    else None
+                )
+                if pending_dsl:
+                    # 已有未确认的 DSL 约束：把新修改并进来，而不是静默覆盖
+                    merged = merge_dsl(pending_dsl, request_to_dsl(updated), dsl_result.dsl)
+                    filters["pendingChange"] = {
+                        "kind": "dsl",
+                        "dsl": merged,
+                        "source": dsl_result.source,
+                        "baseVersionId": base_version_id,
+                        "sourcePrompt": content,
+                        "preview": self._format_dsl_preview(merged),
+                    }
+                    self.memories.apply_patch(memory, {
+                        "currentIntent": "dsl_change",
+                        "activeFilters": filters,
+                    })
+                    return self._finalize_response(
+                        conversation_id,
+                        filters["pendingChange"]["preview"],
+                        "dsl_preview",
+                        memory.activeView,
+                        [],
+                    )
+                if expressible and operations:
+                    filters["pendingChange"] = {
+                        "baseVersionId": base_version_id,
+                        "request": updated.to_payload(),
+                        "operations": operations,
+                        "preview": _format_preview(operations, base_version_id),
+                        "sourcePrompt": content,
+                    }
+                    self.memories.apply_patch(memory, {
+                        "activeFocusTag": updated.strategy,
+                        "activeFilters": filters,
+                    })
+                    return self._finalize_response(
+                        conversation_id,
+                        filters["pendingChange"]["preview"],
+                        "change_preview",
+                        memory.activeView,
+                        [],
+                    )
                 filters["pendingChange"] = {
                     "kind": "dsl",
                     "dsl": dsl_result.dsl,
@@ -544,6 +611,13 @@ class AgentRuntime:
 
         current = self._planning_request_from_context(memory, selected_version)
         base_version_id = selected_version.id if selected_version else memory.latestResultId
+        # 多轮上下文：未确认的变更继续作为基准累加（"船租涨20%"后再补"最多两条线"）
+        if isinstance(pending, dict) and pending.get("request"):
+            try:
+                current = PlanningRequest(**pending["request"])
+                base_version_id = pending.get("baseVersionId") or base_version_id
+            except (KeyError, TypeError, ValueError):
+                pass
         # 第三期：统一解析器优先（旧正则作为其规则层），DSL 表达不了的再回退旧规划器。
         change_plan = self._change_plan_from_dsl(
             content, current, base_version_id,
@@ -558,18 +632,33 @@ class AgentRuntime:
             )
         elif change_plan.operations:
             # DSL 里含 PlanningRequest 表达不了的约束/目标（co_occur 等）→ 走 DSL 待确认
-            from app.core.dsl.planning_bridge import custom_objectives, dsl_to_request
+            from app.core.dsl.planning_bridge import (
+                custom_objectives,
+                dsl_to_request,
+                merge_dsl,
+                request_to_dsl,
+            )
 
             dsl = self._try_dsl_parse(content)
             if dsl is not None and dsl.dsl:
                 residual, timeline = dsl_to_request(dsl.dsl, current)[1:]
-                if residual or timeline or custom_objectives(dsl.dsl):
+                pending_dsl = (
+                    pending.get("dsl")
+                    if isinstance(pending, dict) and pending.get("kind") == "dsl"
+                    else None
+                )
+                if residual or timeline or custom_objectives(dsl.dsl) or pending_dsl:
+                    merged = merge_dsl(
+                        pending_dsl,
+                        request_to_dsl(change_plan.request),
+                        dsl.dsl,
+                    )
                     dsl_pending = {
                         "kind": "dsl",
-                        "dsl": dsl.dsl,
+                        "dsl": merged,
                         "baseVersionId": base_version_id,
                         "sourcePrompt": content,
-                        "preview": self._format_dsl_preview(dsl.dsl),
+                        "preview": self._format_dsl_preview(merged),
                     }
         if dsl_pending is not None:
             filters["pendingChange"] = dsl_pending
@@ -761,7 +850,18 @@ class AgentRuntime:
             lines.append(f"{index}. {text}")
             index += 1
         for spec in dsl.get("objectives") or []:
-            if spec.get("type") == "lexmin":
+            if spec.get("type") == "strategy":
+                mode = spec.get("mode")
+                suffix = f"（{mode}）" if mode else ""
+                lines.append(f"{index}. 优化策略：{spec.get('name')}{suffix}")
+                index += 1
+            elif spec.get("type") == "weighted":
+                weights = "、".join(
+                    f"{name} {value:.2f}" for name, value in (spec.get("weights") or {}).items()
+                )
+                lines.append(f"{index}. 加权目标：{weights}")
+                index += 1
+            elif spec.get("type") == "lexmin":
                 stages = " → ".join(
                     f"{'最小化' if s.get('dir') == 'minimize' else '最大化'}{s.get('q')}"
                     for s in spec.get("stages", [])
@@ -828,12 +928,13 @@ class AgentRuntime:
         dsl: dict[str, Any],
         content: str,
         memory,
+        base_version_id: str | None = None,
     ) -> AgentResponse:
-        """DSL 变更确认后的求解：默认配置 + 注入 DSL 约束/目标。"""
-        latest = None
-        if memory.latestResultId:
-            latest = self.versions.get(memory.latestResultId)
-        request = self._planning_request_from_context(memory, latest)
+        """DSL 变更确认后的求解：绑定预览时的基版，注入 DSL 约束/目标。"""
+        base_version = self.versions.get(base_version_id) if base_version_id else None
+        if base_version is None and memory.latestResultId:
+            base_version = self.versions.get(memory.latestResultId)
+        request = self._planning_request_from_context(memory, base_version)
         return self._start_planning_solve(
             conversation_id=conversation_id,
             content=content,
