@@ -54,12 +54,34 @@ def run(
     partial：部分排程模式（允许丢任务），exclude/must/cardinality 等
     "选择类"原语只在部分模式下有意义（完整模式所有任务强制排入）。
     """
-    from .compiler import constraints_builder, stages_builder
+    from .compiler import (
+        compile_data,
+        compile_parameters,
+        constraints_builder,
+        stages_builder,
+    )
     from .validator import validate_dsl
 
     load_project, candidates, heuristic, solve = _solver_modules()
 
-    data = load_project(PROJECT_ROOT, base_id=base_id, as_of=as_of)
+    # 基座先读一次：相对参数倍率（op="*"）要按基座值换算
+    base_data = load_project(PROJECT_ROOT, base_id=base_id, as_of=as_of)
+    overrides = None
+    if dsl.get("parameters"):
+        overrides = compile_parameters(dsl["parameters"], base_data)
+    data_patches = None
+    timeline_patches = None
+    if dsl.get("data"):
+        data_patches, timeline_patches = compile_data(dsl["data"], base_data)
+
+    data = load_project(
+        PROJECT_ROOT,
+        base_id=base_id,
+        as_of=as_of,
+        overrides=overrides,
+        data_patches=data_patches,
+        timeline_patches=timeline_patches,
+    )
     if max_tasks:
         data.tasks = data.tasks[:max_tasks]
 

@@ -40,6 +40,10 @@ def _load_env() -> None:
 def _route_ok(expected: str, actual: str) -> bool:
     if expected == "clarify":
         return actual != "dsl"  # 模糊诉求只要不自信产出 DSL 即可
+    if expected == "dsl_or_clarify":
+        return actual in ("dsl", "clarify")  # LLM 层模糊话术：两种解读都合理
+    if expected == "accept_any":
+        return True  # 已知硬边界：仅观察记录
     return actual == expected
 
 

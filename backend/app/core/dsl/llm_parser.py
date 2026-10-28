@@ -43,6 +43,80 @@ def _month_day(year: str | None, month: str, day: str) -> str:
     return f"2026-{int(month):02d}-{int(day):02d}T08:00:00+08:00"
 
 
+_CN_NUM = {"一": 1, "两": 2, "二": 2, "三": 3}
+_SEVERITY_MAP = {"严重故障": "高", "高严重": "高", "高危": "高",
+                 "中等故障": "中", "中严重": "中", "低严重": "低"}
+
+
+def _cn_int(value: str) -> int:
+    """中文数字转整数；默认值急求值陷阱（dict.get(key, int(x))）需绕过。"""
+    if value in _CN_NUM:
+        return _CN_NUM[value]
+    return int(value)
+
+
+def _parameter_dsl(kind: str, groups: list[str]) -> dict[str, Any]:
+    """参数类规则 → DSL parameters 段（字段名 = 122 项注册表参数名称）。"""
+    if kind == "param_ship_rent_rel":
+        return {"parameters": [{"field": "船舶日租金", "op": "*", "value": 1 + float(groups[0]) / 100}]}
+    if kind == "param_ship_rent_abs":
+        value = float(groups[0])
+        if groups[1] == "万":
+            value *= 10_000
+        return {"parameters": [{"field": "船舶日租金", "op": "=", "value": value}]}
+    if kind == "param_labor":
+        return {"parameters": [{"field": "维修人工单价", "op": "=", "value": float(groups[0])}]}
+    if kind == "param_lines":
+        return {"parameters": [{"field": "最大作业线", "op": "=", "value": _cn_int(groups[0])}]}
+    if kind == "param_daily_hours":
+        return {"parameters": [{"field": "每日有效维修上限", "op": "=", "value": float(groups[0])}]}
+    if kind == "param_headcount":
+        return {"parameters": [{"field": "可调动人员总数", "op": "=", "value": int(groups[0])}]}
+    if kind == "param_transfer":
+        return {"parameters": [{"field": "风机间转移", "op": "=", "value": float(groups[0])}]}
+    if kind == "param_work_start":
+        return {"parameters": [{"field": "每天开始维修", "op": "=", "value": f"{int(groups[0]):02d}:00"}]}
+    if kind == "param_work_end":
+        return {"parameters": [{"field": "每天结束维修", "op": "=", "value": f"{int(groups[0]):02d}:00"}]}
+    return {}
+
+
+def _data_dsl(kind: str, groups: list[str], text: str) -> dict[str, Any]:
+    """数据补丁/时序假设规则 → DSL data 段。"""
+    def _date(month: str, day: str) -> str:
+        return f"2026-{int(month):02d}-{int(day):02d}"
+
+    if kind == "data_arrival":
+        part = (groups[0] or "").strip().rstrip("备件")
+        spec: dict[str, Any] = {
+            "kind": "part_arrival", "part": part,
+            "at": _date(groups[1], groups[2]) + "T08:00:00+08:00",
+        }
+        if groups[3]:
+            spec["quantity"] = int(groups[3])
+        if re.search(r"(?:之前|前)(?:不能|不可|禁止|无法|不许|不得)(?:开工|修|用|施工|安排)", text):
+            spec["blockBefore"] = True
+        return {"data": [spec]}
+    if kind == "data_part_hours":
+        return {"data": [{
+            "kind": "part_hours", "part": (groups[0] or "").strip(),
+            "factor": 1 + float(groups[1]) / 100,
+        }]}
+    if kind == "data_deadline":
+        spec = {"kind": "task_deadline",
+                "at": _date(groups[1], groups[2]) + "T08:00:00+08:00"}
+        if groups[0]:
+            spec["severity"] = _SEVERITY_MAP.get(groups[0], groups[0])
+        return {"data": [spec]}
+    if kind == "data_weather_wind":
+        return {"data": [{"kind": "weather", "day": _date(groups[0], groups[1]),
+                          "wind": float(groups[2])}]}
+    if kind == "data_weather_state":
+        return {"data": [{"kind": "weather", "day": _date(groups[0], groups[1]),
+                          "state": groups[2]}]}
+    return {}
+
+
 _QUESTION_HINTS = re.compile(r"[吗么呢][?？]?$|是不是|能不能|行不行|什么时候|多久|怎么")
 
 
@@ -56,6 +130,24 @@ _DIR_ALIASES = {"最小化": "minimize", "降低": "minimize", "压缩": "minimi
 # ── 规则层：修改类正则 + slot 抽取 ────────────────────────────────────────────
 
 RULE_PATTERNS: list[tuple[str, str]] = [
+    # ── 参数类（parameters 段；字段名 = 122 项注册表的参数名称）──
+    (r"船租(?:上涨|上调|涨)\s*(\d+(?:\.\d+)?)\s*%", "param_ship_rent_rel"),
+    (r"船租(?:改成|改为|设为)\s*(\d+(?:\.\d+)?)\s*(万|元)?", "param_ship_rent_abs"),
+    (r"人工(?:单价|成本|费用)\s*(?:改成|改为|设为|调整为|涨到|降到)\s*(\d+(?:\.\d+)?)\s*元", "param_labor"),
+    (r"(?:最多|不超过|限定|只上|只剩)\s*([\d一两二三]+)\s*条(?:作业)?(?:线|船)", "param_lines"),
+    (r"每天.{0,4}(?:最多|只能|干|工作)\s*(\d+(?:\.\d+)?)\s*小时", "param_daily_hours"),
+    (r"人员(?:总)?(?:上限|总数).{0,4}(?:改成|设为|为)?\s*(\d+)\s*人", "param_headcount"),
+    (r"(?:最多|不超过|限定|只有)\s*(\d+)\s*人", "param_headcount"),
+    (r"(?:风机间转移|转移时间|转移).{0,4}(?:改成|要|用)?\s*(\d+(?:\.\d+)?)\s*小时", "param_transfer"),
+    (r"每天\s*(\d{1,2})点(?:开工|开始|干活)", "param_work_start"),
+    (r"每天\s*(\d{1,2})点(?:收工|结束|下班)", "param_work_end"),
+    # ── 数据补丁（data 段；行级）──
+    (r"(.{0,6}?)(\d{1,2})月(\d{1,2})[日号](?:之前|前)?(?:才|能)?到货(?:(\d+)\s*(?:套|个|件))?", "data_arrival"),
+    (r"(.{0,6})维修工时(?:上涨|上调|增加|提高|翻倍)\s*(\d+(?:\.\d+)?)\s*%", "data_part_hours"),
+    # ── 时序假设（data 段；第二期核心新增）──
+    (r"(\d{1,2})月(\d{1,2})[日号].{0,4}风速\s*(\d+(?:\.\d+)?)\s*(?:米每秒|米/秒|m/s)?", "data_weather_wind"),
+    (r"(\d{1,2})月(\d{1,2})[日号].{0,6}(?:海况|天气).{0,6}(不可作业|恶劣但安全|常态)", "data_weather_state"),
+    # ── 约束/目标类（原有）──
     # 自定义分层目标："先最小化完工时间和，再最小化成本"（lexmin，不是批量）
     (rf"(?:先|首先|优先).*?(最小化|最大化|降低|压缩).*?{_METRIC}.*?(?:再|然后|接着).*?(最小化|最大化|降低|压缩).*?{_METRIC}", "lexmin"),
     # 互斥：不能/别/不要 同一天、同时
@@ -73,9 +165,10 @@ RULE_PATTERNS: list[tuple[str, str]] = [
     # 固定作业线：只能上 N 号船/线；用 N 号线
     (rf"{_TASK}.*?只能.{{0,6}}(\d+)号(?:船|线)", "fix"),
     (rf"{_TASK}.*?(?:用|上)(\d+)号(?:船|线)", "fix"),
-    # 期限：最晚 X 月 Y 日前修完；X 月 Y 日前修完
+    # 期限：最晚 X 月 Y 日前修完；X 月 Y 日前修完（带任务引用的走约束，不带走数据补丁）
     (rf"{_TASK}.*?(?:最晚|最迟).*?{_MONTH_DAY}.*?(?:前|之前).*?(?:修完|完成|修好)", "deadline"),
     (rf"{_TASK}.*?{_MONTH_DAY}.*?(?:前|之前).*?(?:修完|完成|修好|搞定)", "deadline"),
+    (r"(严重故障|高严重|高危|中等故障|中严重|低严重)?(\d{1,2})月(\d{1,2})[日号](?:前|之前)(?:必须|得|要)?(?:修完|完成|修好|搞定)", "data_deadline"),
     # 禁开工日期
     (rf"{_MONTH_DAY}.*?(?:别开工|不要开工|禁止开工)", "forbidden_dates"),
     # 预算（时间量）：完工时间和/完成数 + 不超过/最多/压到 + 数值
@@ -95,6 +188,10 @@ def parse_by_rules(message: str) -> dict[str, Any] | None:
         if not match:
             continue
         groups = list(match.groups())
+        if kind.startswith("param_"):
+            return _parameter_dsl(kind, groups)
+        if kind.startswith("data_"):
+            return _data_dsl(kind, groups, text)
         if kind == "lexmin":
             dir1, metric1, dir2, metric2 = groups
             stages = [
@@ -203,6 +300,7 @@ _ILLEGAL_RE = re.compile(
 _CLARIFY_RE = re.compile(
     r"预算.{0,6}(?:不超过|控制在|别超过|压到)\s*\d"
     r"|台风|保安全|应急模式"
+    r"|(?:明天|今天|后天|周[一二三四五六日天]).{0,6}(?:只有|只剩|就)\s*[\d一两二三]+\s*(?:个)?人"
 )
 
 NON_CHANGE_PATTERNS: list[tuple[str, str]] = [
@@ -294,6 +392,17 @@ _PARSE_SYSTEM = """你是检修排程 DSL 生成器。把用户的排程约束�
 
 任务编号写全称"任务018"（三位）。日期必须带时区。只输出 JSON，不要解释。
 
+除 constraints/objectives 外，还有两段（按需输出，不要编造参数名）：
+- parameters：全局参数覆盖，{"field": "122项注册表参数名", "op": "="|"*", "value": 数值}，
+  例如 {"field":"船舶日租金","op":"*","value":1.2}、{"field":"最大作业线","op":"=","value":2}。
+- data：行级补丁与时序假设：
+  {"kind":"part_arrival","part":"叶片","at":"2026-11-05T08:00:00+08:00","quantity":2,"blockBefore":true}
+  {"kind":"part_hours","part":"齿轮箱","factor":1.2}
+  {"kind":"task_deadline","severity":"高","at":"2026-11-08T08:00:00+08:00"}
+  {"kind":"weather","day":"2026-11-03","wind":15.0} 或 {"kind":"weather","day":"2026-11-04","state":"不可作业"}
+  {"kind":"hourly","time":"2026-11-03T12:00:00+08:00","price":400}
+  {"kind":"window","window":"窗口02","start":"2026-11-01T00:00:00+08:00"}
+
 如果这句话不是排程修改诉求（闲聊、查询、解释、对比），输出 {"route": "not_change"}；
 如果是非线性、无意义或越界诉求（如"最小化成本的平方""改颜色"），输出 {"route": "reject"}。"""
 
@@ -365,7 +474,11 @@ def parse_with_llm(
     ).strip()
     # 容忍 markdown 代码围栏
     content = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.MULTILINE).strip()
-    payload = json.loads(content)
+    try:
+        payload = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        # LLM 产出空/坏 JSON → 澄清（低置信），不静默不崩溃
+        return ParseResult(dsl=None, source="llm", route="clarify", confidence=0.5)
     if payload.get("route") in ("not_change", "reject"):
         return ParseResult(dsl=None, source="llm", route=payload["route"], confidence=1.0)
     errors = validate_dsl(payload)
@@ -383,10 +496,12 @@ def parse_with_llm(
 
 
 def parse(message: str, library: list[dict] | None = None, client=None) -> ParseResult:
-    """三层解析入口：规则 → 意图门控 → 向量(few-shot) → LLM。
+    """三层解析入口：批量 → 规则 → 意图门控 → 向量(few-shot) → LLM。
 
-    路由结果：dsl / batch / data_patch / reject / not_change。
+    路由结果：dsl / batch / data_patch / parameter / strategy / reject / not_change / clarify。
     """
+    if _BATCH_RE.search(message):
+        return ParseResult(dsl=None, source="rule", route="batch", confidence=1.0)
     ruled = parse_by_rules(message)
     if ruled is not None:
         return ParseResult(dsl=ruled, source="rule", route="dsl", confidence=1.0)

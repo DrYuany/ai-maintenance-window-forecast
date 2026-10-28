@@ -204,6 +204,60 @@ def _add_op(model, expr, op: str, bound: int) -> None:
 
 # ── 注入闭包 ──────────────────────────────────────────────────────────────────
 
+def compile_parameters(specs: list[dict[str, Any]], base_data) -> dict[str, Any]:
+    """DSL parameters 段 → load_project 的 overrides（绝对参数值）。
+
+    相对倍率（op="*"）按基座参数快照换算成绝对值；注册表参数名翻译成
+    模型内部键（船舶日租金 → 船租（元每艘每天））；字段合法性由校验器保证。
+    """
+    from .registry.parameters import to_internal_key
+
+    overrides: dict[str, Any] = {}
+    for spec in specs:
+        field = to_internal_key(spec["field"])
+        if spec["op"] == "*":
+            if field not in base_data.params:
+                raise ValueError(f"无法对未知参数执行相对调整：{field}")
+            overrides[field] = float(base_data.params[field]) * float(spec["value"])
+        else:
+            overrides[field] = spec["value"]
+    return overrides
+
+
+def compile_data(specs: list[dict[str, Any]], base_data=None) -> tuple[list[dict], list[dict]]:
+    """DSL data 段 → (data_patches, timeline_patches)。
+
+    data_patches 沿用现有行级补丁格式（part_hours/part_arrival/task_deadline）；
+    部件引用（名称/编号）翻译成 partId。timeline_patches 是第二期新增的
+    时序假设（weather/hourly/window）。
+    """
+    data_patches: list[dict] = []
+    timeline_patches: list[dict] = []
+    for spec in specs:
+        kind = spec["kind"]
+        if kind in ("part_hours", "part_arrival"):
+            translated = dict(spec)
+            part_ref = translated.pop("part", None)
+            if base_data is not None and part_ref:
+                part_id = None
+                for pid, row in base_data.parts.items():
+                    if part_ref in (pid, row["部件名称"]):
+                        part_id = pid
+                        break
+                if part_id is None:
+                    raise ValueError(f"部件 {part_ref} 不存在于部件库")
+                translated["partId"] = part_id
+                translated["partName"] = base_data.parts[part_id]["部件名称"]
+            data_patches.append(translated)
+        elif kind == "task_deadline":
+            data_patches.append(dict(spec))
+        elif kind in ("weather", "hourly", "window"):
+            timeline_patches.append(dict(spec))
+        else:  # pragma: no cover - 校验器已拦
+            raise ValueError(f"未知数据补丁类型 {kind}")
+    return data_patches, timeline_patches
+
+
 def constraints_builder(
     dsl_constraints: list[dict[str, Any]],
     data,

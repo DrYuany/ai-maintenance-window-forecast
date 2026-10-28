@@ -44,6 +44,24 @@ SELECTION_LAYER: frozenset[str] = frozenset({
 })
 
 
+# 122 项注册表的"参数名称" → 模型内部参数键（系统参数表键名）。
+# 注册表面向业务（船舶日租金），模型内部用另一套键（船租（元每艘每天））。
+PARAM_NAME_TO_KEY: dict[str, str] = {
+    "船舶日租金": "船租（元每艘每天）",
+    "维修人工单价": "人工单价（元每人时）",
+    "最大作业线": "最多作业线数",
+    "可调动人员总数": "人员总上限",
+    "每日有效维修上限": "每天最多维修小时数",
+    "风机间转移": "风机间转移小时数",
+    "每天开始维修": "每天维修开始时间",
+    "每天结束维修": "每天维修结束时间",
+}
+
+
+def to_internal_key(name: str) -> str:
+    return PARAM_NAME_TO_KEY.get(name, name)
+
+
 @lru_cache(maxsize=1)
 def _rows() -> tuple[dict[str, Any], ...]:
     with _CSV_PATH.open(encoding="utf-8-sig", newline="") as f:

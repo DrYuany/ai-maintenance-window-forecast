@@ -188,7 +188,82 @@ def _apply_task_patches(tasks, patches, base):
             )
 
 
-def load_project(project, base_id='基座01', as_of=None, overrides=None, input_file=None, run_mode=None, data_patches=None):
+def _apply_timeline_patches(data, patches, cfg):
+    """时序/结构数据的假设修改（第二期）：海况/逐时/窗口，只改快照不改源文件。
+
+    weather：按日设风速/波高（联动重算海况类别与可用小时）或直接设海况类别；
+    hourly：按时设电价/风速（联动重算功率）或直接设功率；
+    window：按窗口编号改起止（假设对比，不表示获得新的海事许可）。
+    """
+    if not patches:
+        return
+    threshold = cfg['基座生成参数']
+    curve = cfg['功率曲线']
+    vi = finite(curve['切入风速米每秒'], '切入风速', 0)
+    vr = finite(curve['额定风速米每秒'], '额定风速', 0)
+    vo = finite(curve['切出风速米每秒'], '切出风速', 0)
+    rated = finite(curve['额定功率兆瓦'], '额定功率', 0)
+    for patch in patches:
+        kind = patch.get('kind')
+        if kind == 'weather':
+            target = str(patch['day'])
+            row = next(
+                (r for i, r in enumerate(data.weather) if data.stamp(i * 1440).startswith(target)),
+                None,
+            )
+            if row is None:
+                raise ValueError(f'海况补丁日期 {target} 不在规划期内')
+            wind = patch.get('wind')
+            wave = patch.get('wave')
+            hours = patch.get('hours')
+            state = patch.get('state')
+            if wind is not None or wave is not None:
+                wind = finite(wind if wind is not None else 0, '风速', 0)
+                wave = finite(wave if wave is not None else 0, '波高', 0)
+                state = ('不可作业' if wind > threshold['不可作业风速阈值'] or wave > threshold['不可作业波高阈值']
+                         else '恶劣但安全' if wind > threshold['恶劣海况风速阈值'] or wave > threshold['恶劣海况波高阈值']
+                         else '常态')
+            if state is not None:
+                if state not in ('常态', '恶劣但安全', '不可作业'):
+                    raise ValueError(f'海况类别 {state} 不合法')
+                row['海况类别'] = state
+                base_hours = float(hours) if hours is not None else row['可用小时']
+                row['可用小时'] = 0 if state == '不可作业' else min(
+                    finite(base_hours, '可用小时', 0),
+                    data.params['每天最多维修小时数'],
+                )
+        elif kind == 'hourly':
+            hour_index = data.minute(str(patch['time'])) // 60
+            if not 0 <= hour_index < len(data.hourly):
+                raise ValueError(f'逐时补丁时刻 {patch["time"]} 不在规划期内')
+            row = data.hourly[hour_index]
+            if 'price' in patch:
+                row['电价'] = finite(patch['price'], '电价', 0)
+            if 'wind' in patch:
+                wind = finite(patch['wind'], '风速', 0)
+                row['风速'] = wind
+                row['功率'] = (0 if wind < vi or wind >= vo
+                               else rated if wind >= vr
+                               else rated * (wind**3 - vi**3) / (vr**3 - vi**3))
+            if 'power' in patch:
+                row['功率'] = finite(patch['power'], '功率', 0)
+        elif kind == 'window':
+            target = str(patch['window'])
+            matched = False
+            for w in data.observation_windows:
+                if w['编号'] == target:
+                    if 'start' in patch:
+                        w['开始'] = data.minute(str(patch['start']))
+                    if 'end' in patch:
+                        w['结束'] = data.minute(str(patch['end']))
+                    matched = True
+            if not matched:
+                raise ValueError(f'窗口 {target} 不存在')
+        else:
+            raise ValueError(f'未知时序补丁类型 {kind}')
+
+
+def load_project(project, base_id='基座01', as_of=None, overrides=None, input_file=None, run_mode=None, data_patches=None, timeline_patches=None):
     project = Path(project).resolve()
     source = project / 'data/phase1-demo/初版完整数据.json'
     raw = read_json(input_file or source)
@@ -396,6 +471,7 @@ def load_project(project, base_id='基座01', as_of=None, overrides=None, input_
             data.locked[t['任务编号']] = t['锁定']
         data.tasks.append(t)
     _apply_task_patches(data.tasks, patches, base)
+    _apply_timeline_patches(data, timeline_patches or [], cfg)
     meta['告警水位线'] = max((data.stamp(t['接收分钟']) for t in data.tasks),default=data.stamp(data.now))
     data.end=target['结束']
     meta['运行哈希'] = digest({'输入哈希':meta['输入哈希'],'时点':data.now,'覆盖':overrides,

@@ -132,3 +132,45 @@ def test_parse_prefers_rule_layer(monkeypatch) -> None:
     result = parse("任务001和任务002不能在同一天出海维修")
     assert result.source == "rule"
     assert result.confidence == 1.0
+
+
+# ── 第二期：参数/数据/时序假设规则 → DSL 段 ─────────────────────────────────
+
+def test_rule_parameter_ship_rent_relative() -> None:
+    dsl = parse_by_rules("船租上涨20%")
+    assert dsl == {"parameters": [{"field": "船舶日租金", "op": "*", "value": 1.2}]}
+
+
+def test_rule_parameter_lines() -> None:
+    dsl = parse_by_rules("最多两条作业线")
+    assert dsl["parameters"] == [{"field": "最大作业线", "op": "=", "value": 2}]
+
+
+def test_rule_parameter_daily_hours() -> None:
+    dsl = parse_by_rules("每天最多8小时")
+    assert dsl["parameters"] == [{"field": "每日有效维修上限", "op": "=", "value": 8.0}]
+
+
+def test_rule_data_arrival_with_block() -> None:
+    dsl = parse_by_rules("叶片备件11月5日到货，11月5日之前不能开工")
+    spec = dsl["data"][0]
+    assert spec["kind"] == "part_arrival"
+    assert spec["part"] == "叶片"
+    assert spec["blockBefore"] is True
+
+
+def test_rule_data_deadline_with_severity() -> None:
+    dsl = parse_by_rules("严重故障11月8日前必须修完")
+    spec = dsl["data"][0]
+    assert spec["kind"] == "task_deadline"
+    assert spec["severity"] == "高"
+
+
+def test_rule_weather_wind_assumption() -> None:
+    dsl = parse_by_rules("11月3日风速15米每秒")
+    assert dsl["data"] == [{"kind": "weather", "day": "2026-11-03", "wind": 15.0}]
+
+
+def test_rule_weather_state_assumption() -> None:
+    dsl = parse_by_rules("11月4日海况不可作业")
+    assert dsl["data"] == [{"kind": "weather", "day": "2026-11-04", "state": "不可作业"}]

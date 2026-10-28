@@ -102,3 +102,35 @@ def test_unknown_top_level_field_rejected() -> None:
 def test_tasks_list_needs_at_least_two() -> None:
     errors = validate_dsl({"constraints": [{"type": "co_occur", "mode": "diff_day", "tasks": ["任务001"]}]})
     assert any("至少两个" in e for e in errors)
+
+
+# ── 第二期：parameters/data 段校验 ───────────────────────────────────────────
+
+def test_parameter_section_validates_registry() -> None:
+    errors = validate_dsl({"parameters": [{"field": "船舶日租金", "op": "*", "value": 1.2}]})
+    assert errors == []
+
+
+def test_parameter_unknown_field_rejected() -> None:
+    errors = validate_dsl({"parameters": [{"field": "不存在的参数", "op": "=", "value": 1}]})
+    assert any("不在 122 项" in e for e in errors)
+
+
+def test_parameter_unchangeable_field_rejected() -> None:
+    errors = validate_dsl({"parameters": [{"field": "人工审批", "op": "=", "value": "否"}]})
+    assert any("不可改" in e for e in errors)
+
+
+def test_parameter_bad_op_rejected() -> None:
+    errors = validate_dsl({"parameters": [{"field": "船舶日租金", "op": "+", "value": 1}]})
+    assert any("op 必须是" in e for e in errors)
+
+
+def test_data_weather_requires_day() -> None:
+    errors = validate_dsl({"data": [{"kind": "weather", "wind": 15}]})
+    assert any("缺少必需字段 day" in e for e in errors)
+
+
+def test_data_unknown_kind_rejected() -> None:
+    errors = validate_dsl({"data": [{"kind": "magic_patch"}]})
+    assert any("未知数据补丁类型" in e for e in errors)

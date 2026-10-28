@@ -16,18 +16,97 @@ from .registry import entities as entity_reg
 from .registry import primitives as prim_reg
 from .registry import quantities as qty_reg
 
+# data 段各补丁类型的必需字段（第二期）
+_DATA_PATCH_REQUIRED: dict[str, tuple[str, ...]] = {
+    "part_hours": ("part", "factor"),
+    "part_arrival": ("part", "at"),
+    "task_deadline": ("at",),
+    "weather": ("day",),
+    "hourly": ("time",),
+    "window": ("window",),
+}
+
 
 def validate_dsl(dsl: dict[str, Any], data=None) -> list[str]:
     errors: list[str] = []
     if not isinstance(dsl, dict):
         return ["DSL 必须是 JSON 对象"]
     for key, item in dsl.items():
-        if key not in ("constraints", "objectives"):
+        if key not in ("constraints", "objectives", "parameters", "data"):
             errors.append(f"未知字段: {key}")
     for index, spec in enumerate(dsl.get("constraints") or []):
         errors.extend(_validate_constraint(spec, data, f"constraints[{index}]"))
     for index, spec in enumerate(dsl.get("objectives") or []):
         errors.extend(_validate_objective(spec, data, f"objectives[{index}]"))
+    for index, spec in enumerate(dsl.get("parameters") or []):
+        errors.extend(_validate_parameter(spec, f"parameters[{index}]"))
+    for index, spec in enumerate(dsl.get("data") or []):
+        errors.extend(_validate_data_patch(spec, data, f"data[{index}]"))
+    return errors
+
+
+def _validate_parameter(spec: Any, where: str) -> list[str]:
+    """parameters 段：全局参数覆盖，字段必须在 122 项参数注册表且可改。"""
+    from .registry import parameters as param_reg
+
+    errors: list[str] = []
+    if not isinstance(spec, dict):
+        return [f"{where}: 参数必须是 JSON 对象"]
+    field = spec.get("field")
+    if not isinstance(field, str) or param_reg.lookup(field) is None:
+        errors.append(f"{where}: 参数 {field!r} 不在 122 项参数注册表")
+        return errors
+    if not param_reg.is_changeable(field):
+        errors.append(f"{where}: 参数 {field!r} 登记为待扩展/固定，不可改")
+    op = spec.get("op")
+    if op not in ("=", "*"):
+        errors.append(f"{where}: op 必须是 '='（绝对）或 '*'（相对倍率）")
+    if "value" not in spec:
+        errors.append(f"{where}: 缺少 value")
+    else:
+        errors.extend(_check_bound(spec["value"], where, "value", minimum=0))
+    return errors
+
+
+def _validate_data_patch(spec: Any, data, where: str) -> list[str]:
+    """data 段：行级数据补丁 + 时序假设修改（第二期）。"""
+    errors: list[str] = []
+    if not isinstance(spec, dict):
+        return [f"{where}: 数据补丁必须是 JSON 对象"]
+    kind = spec.get("kind")
+    if kind not in _DATA_PATCH_REQUIRED:
+        return [f"{where}: 未知数据补丁类型 {kind!r}，允许 {tuple(_DATA_PATCH_REQUIRED)}"]
+    for field_name in _DATA_PATCH_REQUIRED[kind]:
+        if field_name not in spec:
+            errors.append(f"{where}: 补丁 {kind} 缺少必需字段 {field_name}")
+    if kind == "part_hours":
+        if "factor" in spec:
+            errors.extend(_check_bound(spec["factor"], where, "factor", minimum=0))
+    if kind == "part_arrival":
+        if "quantity" in spec:
+            errors.extend(_check_bound(spec["quantity"], where, "quantity", integer=True, minimum=1))
+        if "at" in spec and data is not None:
+            from .registry.entities import resolve_minute
+
+            if resolve_minute(data, spec["at"]) is None:
+                errors.append(f"{where}: 到货时间 {spec['at']!r} 不在规划范围内")
+    if kind == "task_deadline":
+        if "at" in spec and data is not None:
+            from .registry.entities import resolve_minute
+
+            if resolve_minute(data, spec["at"]) is None:
+                errors.append(f"{where}: 期限 {spec['at']!r} 不在规划范围内")
+    if kind == "weather":
+        if not any(key in spec for key in ("wind", "wave", "hours", "state")):
+            errors.append(f"{where}: weather 补丁至少要给 wind/wave/hours/state 之一")
+        if "state" in spec and spec["state"] not in ("常态", "恶劣但安全", "不可作业"):
+            errors.append(f"{where}: 海况类别 {spec['state']!r} 不合法")
+    if kind == "hourly":
+        if not any(key in spec for key in ("price", "wind", "power")):
+            errors.append(f"{where}: hourly 补丁至少要给 price/wind/power 之一")
+    if kind == "window":
+        if not any(key in spec for key in ("start", "end")):
+            errors.append(f"{where}: window 补丁至少要给 start/end 之一")
     return errors
 
 

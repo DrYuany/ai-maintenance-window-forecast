@@ -367,16 +367,19 @@ LLM 只能在注册表内引用、校验器只放行线性表达式，从而**�
 
 ### 11.1 分期
 
-- **第一期**：
-  1. 编译器接入 build_model 的 metrics——解锁成本/完工时间类指标引用
+- **第一期（已完成 ✅）**：
+  1. ✅ 编译器接入 build_model 的 metrics——解锁成本/完工时间类指标引用
      （budget 总经济成本、weighted、lexmin 最后完工时间）；
-  2. DSL 包合并回主项目（`git mv` → `backend/app/core/dsl/`，历史完整保留）；
-  3. 接线 agent_runtime：修改类意图二次分流（planning_intent 命中走老路零回归，
+  2. ✅ DSL 包合并回主项目（`backend/app/core/dsl/`，git 历史保留）；
+  3. ✅ 接线 agent_runtime：修改类意图二次分流（planning_intent 零回归，
      DSL 命中走预览→确认→求解，编译产物走 extra_constraints/custom_stages）；
-  4. 证据链（DSL 进方案快照/模型指纹）+ 评测成为发布闸门。
-- **第二期**：输入数据注册表统一化——overrides + data_patches + 时序数据
-  统一为"表 × 字段"注册表，补上海况/逐时/窗口的假设修改（"明天风变大"）。
-- **第三期**：生成层规则参数化（时间粒度、海况判定、跨窗口），
+  4. ✅ 证据链（DSL 进决策指纹/任务载荷/方案快照）+ 评测成为发布闸门
+     （135 条提问库，快测 218 项 30 秒，慢测 -m slow 单独跑）。
+- **第二期（已完成 ✅）**：输入数据注册表统一化——`registry/data_fields.py`
+  六张表 × 字段；DSL 补 `parameters`/`data` 段；求解内核支持时序假设
+  （`timeline_patches`：海况/逐时/窗口，改快照不改源文件）；
+  规则层产出参数/数据/时序话术的 DSL（船租上涨→parameters，11月3日风速15米→data weather）。
+- **第三期（未开始）**：生成层规则参数化（时间粒度、海况判定、跨窗口），
   以及"待扩展"的风险/天气条件/备件预留构件；收拢解析管道（见 11.3）。
 
 ### 11.2 终态架构：一条管道

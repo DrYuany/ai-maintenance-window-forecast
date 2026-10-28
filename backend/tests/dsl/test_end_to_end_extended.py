@@ -177,3 +177,51 @@ def test_full_pipeline_nl_to_solve() -> None:
     assert selected is not None
     days = {c["任务编号"]: c["开始"] // 1440 for c in selected}
     assert days["任务001"] != days["任务002"]
+
+
+# ── 第二期：parameters/data 段端到端（真求解）──────────────────────────────
+
+def test_weather_patch_forces_no_work_on_storm_day() -> None:
+    """'11月3日风速15米每秒' → 该日海况重算为不可作业 → 无任务开工。"""
+    report = run({
+        "data": [{"kind": "weather", "day": "2026-11-03", "wind": 15.0}],
+    }, seconds=60, max_tasks=10)
+    selected = report["排程"]
+    assert selected is not None
+    from pathlib import Path
+    from product_data import load_project
+
+    data = load_project(
+        Path(__file__).resolve().parents[3], base_id="基座01",
+        as_of="2026-10-23T18:00:00+08:00",
+        timeline_patches=[{"kind": "weather", "day": "2026-11-03", "wind": 15.0}],
+    )
+    storm_day = data.minute("2026-11-03T00:00:00+08:00") // 1440
+    assert all(c["开始"] // 1440 != storm_day for c in selected)
+
+
+def test_weather_state_patch_blocks_work() -> None:
+    """'11月3日海况不可作业'（直接设类别）→ 同样无任务开工。"""
+    report = run({
+        "data": [{"kind": "weather", "day": "2026-11-03", "state": "不可作业"}],
+    }, seconds=60, max_tasks=10)
+    selected = report["排程"]
+    assert selected is not None
+    from pathlib import Path
+    from product_data import load_project
+
+    data = load_project(Path(__file__).resolve().parents[3], base_id="基座01",
+                        as_of="2026-10-23T18:00:00+08:00")
+    storm_day = data.minute("2026-11-03T00:00:00+08:00") // 1440
+    assert all(c["开始"] // 1440 != storm_day for c in selected)
+
+
+def test_parameter_override_via_dsl() -> None:
+    """'船租上涨20%' → 参数覆盖进入快照且求解成功。"""
+    report = run({
+        "parameters": [{"field": "船舶日租金", "op": "*", "value": 1.2}],
+    }, seconds=60, max_tasks=10)
+    selected = report["排程"]
+    assert selected is not None
+    overrides = report["数据"].get("参数覆盖") or {}
+    assert overrides.get("船租（元每艘每天）") == 14400.0

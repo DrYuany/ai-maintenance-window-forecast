@@ -1,7 +1,12 @@
 # dsl-prototype：受控 DSL 原型
 
 设计文档：[docs/2026-10-29-milp-controlled-dsl-design.md](../docs/2026-10-29-milp-controlled-dsl-design.md)（v0.3）
-状态：**第一、二阶段完成**——校验/生成/编译全链 + 三层解析器（规则→向量→LLM），golden 判分可跑。
+状态：**已合并回主项目（第一期）+ 输入数据注册表与参数/数据段（第二期）**。
+
+第一期：DSL 包并入 backend/app/core/dsl，agent_runtime 接线（预览→确认→求解），
+编译器接入 build_model metrics（成本/完工时间指标可引用），DSL 进证据链。
+第二期：parameters/data 段 + 时序假设修改（海况/逐时/窗口，见 registry/data_fields.py
+与 product_data 的 timeline_patches），规则层产出参数/数据/时序话术的 DSL。
 
 ## 目录结构
 
