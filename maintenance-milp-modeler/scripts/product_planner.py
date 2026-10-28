@@ -211,7 +211,7 @@ def account(data, schedule):
             '现金支出':round(rent+labor+material+other,2),'复核通过':True,'排程':sorted(schedule,key=lambda s:(s['开始'],s['作业线']))}
 
 
-def build_model(data, options, partial=False, strategy='成本最低优先', mode='分层', weights=None, limits=None):
+def build_model(data, options, partial=False, strategy='成本最低优先', mode='分层', weights=None, limits=None, extra_constraints=None, custom_stages=None):
     m=cp_model.CpModel();choices=[];task_vars={};cost_terms=[];cash_terms=[];constant=0
     line_count=min(data.params['最多作业线数'],data.params['人员总上限'])
     line_intervals=defaultdict(list); turbine_intervals=defaultdict(list)
@@ -296,37 +296,47 @@ def build_model(data, options, partial=False, strategy='成本最低优先', mod
     for tid in limits.get('必修任务',[]):
         if tid not in task_vars: raise ValueError('必修任务不存在于当前告警快照')
         m.Add(sum(x for c,x in task_vars[tid])==1)
-    registry=json.loads((Path(__file__).resolve().parents[1]/'references/四种目标模板.json').read_text(encoding='utf-8'))
-    template=next(t for t in registry['模板'] if t['模板编号']==strategy)
-    stages=[]
-    if partial:
-        stages.extend([(level+'严重完成数','maximize',metrics[level+'严重完成数']) for level in ('高','中','低')])
-    if mode=='分层':
-        stages.extend((s['指标'],s['方向'],metrics[s['指标']]) for s in template['分层目标']
-                      if partial or not s['指标'].endswith('完成数'))
-    elif mode=='加权':
-        weights=weights if weights is not None else template['加权默认值']
-        if not weights or set(weights)-set(metrics) or any(not isinstance(v,(int,float)) or not math.isfinite(v) or v<0 for v in weights.values()) or not any(weights.values()):
-            raise ValueError('权重需非负有限、至少一项为正，并使用已登记指标')
-        terms=[]
-        # Bound-based normalization coefficients, rounded with explicitly recorded precision.
-        ranges={'总经济成本':max(1,abs(constant)+sum(abs(round(data.revenue(c['开始'],c['完成'])*MONEY)) for c,x in choices)+data.end//1440*line_count*round(data.params['船租（元每艘每天）']*MONEY)),
-                '现金支出':max(1,data.end//1440*line_count*round(data.params['船租（元每艘每天）']*MONEY)+sum(data.parts[t['部件编号']]['维修包成本（元每套）']*MONEY for t in data.tasks)),
-                '完成任务数':max(1,len(tasks)),'最后完工时间':data.end,'完工时间和':max(1,len(tasks))*data.end}
-        for level in ('高','中','低'):
-            ranges[level+'严重完成数']=max(1,sum(t['严重等级']==level for t in data.tasks))
-            ranges[level+'严重完工时间和']=ranges[level+'严重完成数']*data.end
-        for name,w in weights.items():
-            coeff=round(1000000000000000*w/ranges[name])
-            if w and coeff==0: raise ValueError('权重经整数缩放后为零，请提高加权精度或调整权重')
-            terms.append((-1 if '完成数' in name or name=='完成任务数' else 1)*coeff*metrics[name])
-        stages.append(('标准化加权目标','minimize',sum(terms)))
-    else: raise ValueError('目标模式只能为分层或加权')
+    # DSL 附加约束：调用方给的闭包，在 choices/metrics 构建后执行。
+    # 签名 (m, choices, task_vars, metrics) -> 错误列表；默认 None 时行为不变。
+    if extra_constraints is not None:
+        hook_errors = extra_constraints(m, choices, task_vars, metrics)
+        if hook_errors:
+            raise ValueError('；'.join(str(error) for error in hook_errors))
+    if custom_stages is not None:
+        # DSL 自定义目标：闭包返回分层阶段列表 [(名称, 方向, 表达式), ...]，绕过四模板。
+        stages = list(custom_stages(m, choices, metrics))
+    else:
+        registry=json.loads((Path(__file__).resolve().parents[1]/'references/四种目标模板.json').read_text(encoding='utf-8'))
+        template=next(t for t in registry['模板'] if t['模板编号']==strategy)
+        stages=[]
+        if partial:
+            stages.extend([(level+'严重完成数','maximize',metrics[level+'严重完成数']) for level in ('高','中','低')])
+        if mode=='分层':
+            stages.extend((s['指标'],s['方向'],metrics[s['指标']]) for s in template['分层目标']
+                          if partial or not s['指标'].endswith('完成数'))
+        elif mode=='加权':
+            weights=weights if weights is not None else template['加权默认值']
+            if not weights or set(weights)-set(metrics) or any(not isinstance(v,(int,float)) or not math.isfinite(v) or v<0 for v in weights.values()) or not any(weights.values()):
+                raise ValueError('权重需非负有限、至少一项为正，并使用已登记指标')
+            terms=[]
+            # Bound-based normalization coefficients, rounded with explicitly recorded precision.
+            ranges={'总经济成本':max(1,abs(constant)+sum(abs(round(data.revenue(c['开始'],c['完成'])*MONEY)) for c,x in choices)+data.end//1440*line_count*round(data.params['船租（元每艘每天）']*MONEY)),
+                    '现金支出':max(1,data.end//1440*line_count*round(data.params['船租（元每艘每天）']*MONEY)+sum(data.parts[t['部件编号']]['维修包成本（元每套）']*MONEY for t in data.tasks)),
+                    '完成任务数':max(1,len(tasks)),'最后完工时间':data.end,'完工时间和':max(1,len(tasks))*data.end}
+            for level in ('高','中','低'):
+                ranges[level+'严重完成数']=max(1,sum(t['严重等级']==level for t in data.tasks))
+                ranges[level+'严重完工时间和']=ranges[level+'严重完成数']*data.end
+            for name,w in weights.items():
+                coeff=round(1000000000000000*w/ranges[name])
+                if w and coeff==0: raise ValueError('权重经整数缩放后为零，请提高加权精度或调整权重')
+                terms.append((-1 if '完成数' in name or name=='完成任务数' else 1)*coeff*metrics[name])
+            stages.append(('标准化加权目标','minimize',sum(terms)))
+        else: raise ValueError('目标模式只能为分层或加权')
     return m,choices,stages,cost
 
 
-def solve(data, options, output, seconds=60, strategy='成本最低优先', mode='分层', weights=None, limits=None, partial=False, hint=None, on_solver=None, cancelled=None, model_fingerprint=None):
-    model,choices,stages,cost=build_model(data,options,partial,strategy,mode,weights,limits)
+def solve(data, options, output, seconds=60, strategy='成本最低优先', mode='分层', weights=None, limits=None, partial=False, hint=None, on_solver=None, cancelled=None, model_fingerprint=None, extra_constraints=None, custom_stages=None):
+    model,choices,stages,cost=build_model(data,options,partial,strategy,mode,weights,limits,extra_constraints,custom_stages)
     if hint:
         keys={(c['任务编号'],c['开始'],c['作业线']) for c in hint}
         for c,x in choices: model.AddHint(x,int((c['任务编号'],c['开始'],c['作业线']) in keys))
