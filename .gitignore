@@ -37,3 +37,9 @@ data/*.db-shm
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 调试/本地数据库
+backend/data/
+*.db
+*.db-wal
+*.db-shm
