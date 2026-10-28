@@ -774,7 +774,7 @@ def _parameter_search(
     *,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Search the 115-row model-parameter catalog by name or short label."""
+    """Search the 122-row model-parameter catalog by name or short label."""
     params = snapshot.params or {}
     rows: list[dict[str, Any]] = []
     for item in _read_csv(PROJECT_ROOT / "data" / "模型参数" / "参数总表.csv"):

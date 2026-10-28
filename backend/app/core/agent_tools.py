@@ -347,7 +347,7 @@ class AgentToolbox:
                             "type": "string",
                             "description": (
                                 "scope=parameters 时按参数名搜索，例如“船租”“候选开工粒度”"
-                                "“最多作业线数”；会在 115 项建模参数总表中匹配。"
+                                "“最多作业线数”；会在 122 项建模参数总表中匹配。"
                             ),
                         },
                         "limit": {
