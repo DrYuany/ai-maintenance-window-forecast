@@ -134,3 +134,18 @@ def test_data_weather_requires_day() -> None:
 def test_data_unknown_kind_rejected() -> None:
     errors = validate_dsl({"data": [{"kind": "magic_patch"}]})
     assert any("未知数据补丁类型" in e for e in errors)
+
+
+def test_strategy_objective_valid() -> None:
+    errors = validate_dsl({"objectives": [{"type": "strategy", "name": "成本最低优先"}]})
+    assert errors == []
+
+
+def test_strategy_objective_unknown_name_rejected() -> None:
+    errors = validate_dsl({"objectives": [{"type": "strategy", "name": "随便"}]})
+    assert any("未知优化策略" in e for e in errors)
+
+
+def test_solver_seconds_bounds() -> None:
+    assert validate_dsl({"solver": {"seconds": 60}}) == []
+    assert any("最大 1800" in e for e in validate_dsl({"solver": {"seconds": 9999}}))

@@ -225,3 +225,45 @@ def test_parameter_override_via_dsl() -> None:
     assert selected is not None
     overrides = report["数据"].get("参数覆盖") or {}
     assert overrides.get("船租（元每艘每天）") == 14400.0
+
+
+# ── 第三期：生成层规则参数化端到端 ──────────────────────────────────────────
+
+def test_granularity_30_minutes_changes_candidate_starts() -> None:
+    """'候选开工粒度改成30分钟' → 所有任务开工时刻都是 30 分钟整数倍。"""
+    report = run({
+        "parameters": [{"field": "候选开工粒度", "op": "=", "value": 30}],
+    }, seconds=60, max_tasks=8)
+    selected = report["排程"]
+    assert selected is not None
+    assert all(c["开始"] % 30 == 0 for c in selected)
+
+
+def test_no_multiday_splits() -> None:
+    """'不允许跨天暂停' → 每个任务的作业段都在同一天内。"""
+    report = run({
+        "parameters": [{"field": "允许跨天暂停", "op": "=", "value": "否"}],
+    }, seconds=60, max_tasks=8)
+    selected = report["排程"]
+    assert selected is not None
+    for c in selected:
+        days = {a // 1440 for a, b in c["作业段"]}
+        assert len(days) == 1, f"{c['任务编号']} 跨了 {len(days)} 天"
+
+
+def test_weather_threshold_override_reclassifies_day() -> None:
+    """'安全风速上限改成9' → 11月3日(基座01风速9.19)重算为不可作业，该日无开工。"""
+    report = run({
+        "parameters": [{"field": "安全风速上限", "op": "=", "value": 9}],
+    }, seconds=60, max_tasks=8)
+    selected = report["排程"]
+    assert selected is not None
+    from pathlib import Path
+    from product_data import load_project
+
+    data = load_project(Path(__file__).resolve().parents[3], base_id="基座01",
+                        as_of="2026-10-23T18:00:00+08:00",
+                        overrides={"安全风速上限": 9})
+    storm_day = data.minute("2026-11-03T00:00:00+08:00") // 1440
+    assert data.weather[storm_day]["海况类别"] == "不可作业"
+    assert all(c["开始"] // 1440 != storm_day for c in selected)

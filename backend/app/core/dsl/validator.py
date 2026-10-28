@@ -32,8 +32,20 @@ def validate_dsl(dsl: dict[str, Any], data=None) -> list[str]:
     if not isinstance(dsl, dict):
         return ["DSL 必须是 JSON 对象"]
     for key, item in dsl.items():
-        if key not in ("constraints", "objectives", "parameters", "data"):
+        if key not in ("constraints", "objectives", "parameters", "data", "solver"):
             errors.append(f"未知字段: {key}")
+    solver = dsl.get("solver")
+    if solver is not None:
+        if not isinstance(solver, dict):
+            errors.append("solver 必须是 JSON 对象")
+        else:
+            if set(solver) - {"seconds"}:
+                errors.append(f"solver 不允许字段 {set(solver) - {'seconds'}}")
+            if "seconds" in solver:
+                errors.extend(_check_bound(solver["seconds"], "solver", "seconds",
+                                           minimum=30, integer=True))
+                if solver["seconds"] > 1800:
+                    errors.append("solver.seconds 最大 1800")
     for index, spec in enumerate(dsl.get("constraints") or []):
         errors.extend(_validate_constraint(spec, data, f"constraints[{index}]"))
     for index, spec in enumerate(dsl.get("objectives") or []):
@@ -64,7 +76,13 @@ def _validate_parameter(spec: Any, where: str) -> list[str]:
     if "value" not in spec:
         errors.append(f"{where}: 缺少 value")
     else:
-        errors.extend(_check_bound(spec["value"], where, "value", minimum=0))
+        value = spec["value"]
+        if isinstance(value, bool) or isinstance(value, str):
+            # 开关类（是/否）与时刻类（HH:MM）参数：取值由 load_project 校验
+            if isinstance(value, str) and not value.strip():
+                errors.append(f"{where}: value 不能为空")
+        else:
+            errors.extend(_check_bound(value, where, "value", minimum=0))
     return errors
 
 
@@ -183,6 +201,15 @@ def _validate_objective(spec: Any, data, where: str) -> list[str]:
             errors.append(f"{where}: 目标 {otype} 缺少必需字段 {field}")
     if otype not in prim_reg.COMPILED_OBJECTIVES:
         errors.append(f"{where}: 目标 {otype} 已登记但原型未实现")
+    if otype == "strategy":
+        from app.core import objective_catalog
+
+        name = spec.get("name")
+        if not name or name not in objective_catalog.strategies():
+            errors.append(f"{where}: 未知优化策略 {name!r}，允许 {objective_catalog.strategies()}")
+        mode = spec.get("mode")
+        if mode is not None and mode not in ("分层", "加权"):
+            errors.append(f"{where}: 目标模式只能是 分层/加权，收到 {mode!r}")
     if otype in ("minimize", "maximize"):
         errors.extend(_check_quantity(spec.get("q"), where))
     if otype == "lexmin":

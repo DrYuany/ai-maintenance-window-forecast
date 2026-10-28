@@ -544,12 +544,46 @@ class AgentRuntime:
 
         current = self._planning_request_from_context(memory, selected_version)
         base_version_id = selected_version.id if selected_version else memory.latestResultId
-        change_plan = build_change_plan(
-            content,
-            current,
-            base_version_id,
-            self.intent_compiler,
+        # 第三期：统一解析器优先（旧正则作为其规则层），DSL 表达不了的再回退旧规划器。
+        change_plan = self._change_plan_from_dsl(
+            content, current, base_version_id,
         )
+        dsl_pending: dict[str, Any] | None = None
+        if change_plan is None:
+            change_plan = build_change_plan(
+                content,
+                current,
+                base_version_id,
+                self.intent_compiler,
+            )
+        elif change_plan.operations:
+            # DSL 里含 PlanningRequest 表达不了的约束/目标（co_occur 等）→ 走 DSL 待确认
+            from app.core.dsl.planning_bridge import custom_objectives, dsl_to_request
+
+            dsl = self._try_dsl_parse(content)
+            if dsl is not None and dsl.dsl:
+                residual, timeline = dsl_to_request(dsl.dsl, current)[1:]
+                if residual or timeline or custom_objectives(dsl.dsl):
+                    dsl_pending = {
+                        "kind": "dsl",
+                        "dsl": dsl.dsl,
+                        "baseVersionId": base_version_id,
+                        "sourcePrompt": content,
+                        "preview": self._format_dsl_preview(dsl.dsl),
+                    }
+        if dsl_pending is not None:
+            filters["pendingChange"] = dsl_pending
+            self.memories.apply_patch(memory, {
+                "currentIntent": "dsl_change",
+                "activeFilters": filters,
+            })
+            return self._finalize_response(
+                conversation_id,
+                dsl_pending["preview"],
+                "dsl_preview",
+                memory.activeView,
+                [],
+            )
         if not change_plan.operations:
             return self._finalize_response(
                 conversation_id,
@@ -756,6 +790,36 @@ class AgentRuntime:
             return dsl_parse(content)
         except (ParseUnavailable, Exception):  # noqa: BLE001 - 解析失败回退现有路径
             return None
+
+    def _change_plan_from_dsl(self, content: str, current, base_version_id):
+        """统一解析器 → 变更计划（第三期）。DSL 表达不了或没有变化时返回 None 走旧路径。"""
+        parsed = self._try_dsl_parse(content)
+        if parsed is None or parsed.route != "dsl" or not parsed.dsl:
+            return None
+        try:
+            from app.core.dsl.planning_bridge import dsl_to_request
+            from app.core.model_change import ModelChangePlan, _diff_requests, _format_preview
+
+            updated, residual, timeline = dsl_to_request(parsed.dsl, current)
+        except Exception:  # pragma: no cover - 桥接失败回退旧路径
+            return None
+        operations = _diff_requests(current, updated)
+        if not operations and not residual and not timeline:
+            return None
+        preview = (
+            self._format_dsl_preview(parsed.dsl)
+            if (residual or timeline)
+            else _format_preview(operations, base_version_id)
+        )
+        return ModelChangePlan(
+            request=updated,
+            operations=operations,
+            preview=preview,
+            source_prompt=content,
+            base_version_id=base_version_id,
+            notes=[],
+            errors=[],
+        )
 
     def _start_dsl_solve(
         self,

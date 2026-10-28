@@ -111,7 +111,23 @@ class Snapshot:
 
 
 OVERRIDES = {'船租（元每艘每天）', '人工单价（元每人时）', '最多作业线数', '人员总上限',
-             '每天最多维修小时数', '风机间转移小时数', '每天维修开始时间', '每天维修结束时间'}
+             '每天最多维修小时数', '风机间转移小时数', '每天维修开始时间', '每天维修结束时间',
+             # 生成层规则参数（第三期）：改了需要重新生成候选
+             '时间步长（小时）', '候选开工粒度',
+             '常态最大风速（米每秒）', '常态最大有效波高（米）',
+             '安全最大风速（米每秒）', '安全最大有效波高（米）',
+             '跨天暂停', '允许夜间转移'}
+
+# 注册表/自然语言口径 → 系统参数表口径
+PARAM_ALIASES = {
+    '常态风速上限': '常态最大风速（米每秒）',
+    '常态浪高上限': '常态最大有效波高（米）',
+    '安全风速上限': '安全最大风速（米每秒）',
+    '安全浪高上限': '安全最大有效波高（米）',
+    '允许跨天暂停': '跨天暂停',
+}
+_YES_VALUES = {'是', '允许', '允许并保留进度', True}
+_NO_VALUES = {'否', '不允许', '禁止', False}
 
 
 def _patched_business(business, patches, base, end):
@@ -300,12 +316,25 @@ def load_project(project, base_id='基座01', as_of=None, overrides=None, input_
     # 规划时点跟着“今天”走，数据覆盖期内不再钉死在起点当天。
     as_of, as_of_source = resolve_planning_as_of(as_of, base, int(cfg['规划天数']), meta.get('数据性质'))
     params = {r['参数名称']:r['参数值'] for r in business['系统参数']}
-    overrides = overrides or {}
+    overrides = {PARAM_ALIASES.get(key, key): value for key, value in (overrides or {}).items()}
     if set(overrides) - OVERRIDES:
         raise ValueError('未支持参数：'+str(set(overrides)-OVERRIDES))
     params.update(overrides)
+    # 生成层参数归一化：候选开工粒度（分钟）与时间步长（小时）互为别名
+    if '候选开工粒度' in overrides:
+        params['时间步长（小时）'] = float(overrides['候选开工粒度']) / 60
+    params.setdefault('时间步长（小时）', 1)
+    params.setdefault('跨天暂停', '是')
+    params.setdefault('允许夜间转移', '是')
+    granularity = float(params['时间步长（小时）']) * 60
+    if granularity <= 0 or granularity > 1440 or (1440 % granularity != 0):
+        raise ValueError('候选开工粒度必须是能整除一天的正数分钟')
+    params['候选开工粒度'] = int(granularity)
+    for flag in ('跨天暂停', '允许夜间转移'):
+        if params[flag] not in _YES_VALUES | _NO_VALUES:
+            raise ValueError(f'{flag}必须为是或否或允许/不允许')
     business, block_frozen = _patched_business(business, patches, base, end)
-    for name in OVERRIDES - {'每天维修开始时间','每天维修结束时间'}:
+    for name in OVERRIDES - {'每天维修开始时间','每天维修结束时间','跨天暂停','允许夜间转移'}:
         params[name] = finite(params[name], name, 0)
     for name in ('最多作业线数','人员总上限'):
         if not params[name].is_integer() or not 1 <= params[name] <= 100:
@@ -381,13 +410,28 @@ def load_project(project, base_id='基座01', as_of=None, overrides=None, input_
     if len(weather_rows) != end//1440 or len(hour_rows) != end//60:
         raise ValueError('天气或逐时预测覆盖不完整')
     threshold = cfg['基座生成参数']
+    # 海况判定阈值参数化（第三期）：显式覆盖时用系统参数，否则沿用基座生成参数（零回归）
+    weather_override = any(
+        key in overrides for key in ('常态最大风速（米每秒）', '常态最大有效波高（米）',
+                                     '安全最大风速（米每秒）', '安全最大有效波高（米）')
+    )
+    if weather_override:
+        wind_stop = float(params['安全最大风速（米每秒）'])
+        wave_stop = float(params['安全最大有效波高（米）'])
+        wind_harsh = float(params['常态最大风速（米每秒）'])
+        wave_harsh = float(params['常态最大有效波高（米）'])
+    else:
+        wind_stop = threshold['不可作业风速阈值']
+        wave_stop = threshold['不可作业波高阈值']
+        wind_harsh = threshold['恶劣海况风速阈值']
+        wave_harsh = threshold['恶劣海况波高阈值']
     for day, r in enumerate(weather_rows):
         if r['日期'] != (base+timedelta(days=day)).date().isoformat():
             raise ValueError('每日预测时间不连续或重复')
         wind = finite(r['作业环境风速（米每秒）'], '环境风速', 0)
         wave = finite(r['有效波高（米）'], '波高', 0)
-        state = ('不可作业' if wind > threshold['不可作业风速阈值'] or wave > threshold['不可作业波高阈值']
-                 else '恶劣但安全' if wind > threshold['恶劣海况风速阈值'] or wave > threshold['恶劣海况波高阈值'] else '常态')
+        state = ('不可作业' if wind > wind_stop or wave > wave_stop
+                 else '恶劣但安全' if wind > wind_harsh or wave > wave_harsh else '常态')
         data.weather.append({'海况类别':state, '可用小时':min(float(r['允许维修小时数（小时）']),params['每天最多维修小时数']) if state!='不可作业' else 0})
     curve = cfg['功率曲线']
     vi, vr, vo, rated = [finite(curve[k], k, 0) for k in ('切入风速米每秒','额定风速米每秒','切出风速米每秒','额定功率兆瓦')]

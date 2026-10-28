@@ -37,10 +37,14 @@ def candidates(data, task):
                  for s in ('常态','恶劣但安全')}
     deadline = task['截止分钟'] if task['截止分钟'] is not None else data.end
     release = max(data.now, task['接收分钟'], task['发生分钟'], 0)
+    # 生成层规则参数（第三期）：候选开工粒度、是否允许跨天暂停、是否允许夜间转移
+    step = int(data.params.get('候选开工粒度', 60))
+    allow_multi_day = data.params.get('跨天暂停', '是') not in ('否', '不允许', '禁止', False)
+    allow_night_transfer = data.params.get('允许夜间转移', '是') not in ('否', '不允许', False)
     result = []
     for window in data.windows:
         lo, hi = window['开始'], min(window['结束'], deadline)
-        for start in range(max(lo, (release+59)//60*60), hi, 60):
+        for start in range(max(lo, (release+step-1)//step*step), hi, step):
             day = start//1440
             if not clock(data.params['每天维修开始时间']) <= start%1440 < work_end(data, day):
                 continue
@@ -64,13 +68,27 @@ def candidates(data, task):
                 cur+=duration
             if remain>0:
                 continue
+            if not allow_multi_day and len({a//1440 for a,b in work})>1:
+                continue
             ready, transfer = cur, int(data.params['风机间转移小时数']*60)
             while transfer>0 and ready<window['结束']:
                 day=ready//1440
-                duration=min((day+1)*1440,window['结束'])-ready
-                if data.weather[day]['海况类别']!='不可作业':
-                    duration=min(duration,transfer)
-                    transfer-=duration
+                if data.weather[day]['海况类别']=='不可作业':
+                    ready=min((day+1)*1440, window['结束'])
+                    continue
+                seg_hi=min((day+1)*1440, window['结束'])
+                if not allow_night_transfer:
+                    w_lo=day*1440+clock(data.params['每天维修开始时间'])
+                    w_hi=min(day*1440+work_end(data,day), window['结束'])
+                    if ready<w_lo:
+                        ready=w_lo
+                        continue
+                    if ready>=w_hi:
+                        ready=min((day+1)*1440+clock(data.params['每天维修开始时间']), window['结束'])
+                        continue
+                    seg_hi=min(seg_hi,w_hi)
+                duration=min(seg_hi-ready,transfer)
+                transfer-=duration
                 ready+=duration
             result.append({'任务编号':task['任务编号'],'风机编号':task['风机编号'],
                 '部件编号':task['部件编号'],'部件名称':part['部件名称'],'严重等级':task['严重等级'],

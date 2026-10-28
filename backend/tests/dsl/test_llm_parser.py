@@ -174,3 +174,37 @@ def test_rule_weather_wind_assumption() -> None:
 def test_rule_weather_state_assumption() -> None:
     dsl = parse_by_rules("11月4日海况不可作业")
     assert dsl["data"] == [{"kind": "weather", "day": "2026-11-04", "state": "不可作业"}]
+
+
+# ── 第三期：生成层参数规则 ──────────────────────────────────────────────────
+
+def test_rule_granularity() -> None:
+    assert parse_by_rules("候选开工粒度改成30分钟")["parameters"] == [
+        {"field": "候选开工粒度", "op": "=", "value": 30}
+    ]
+
+
+def test_rule_no_multiday() -> None:
+    assert parse_by_rules("不允许跨天暂停")["parameters"] == [
+        {"field": "允许跨天暂停", "op": "=", "value": "否"}
+    ]
+
+
+def test_rule_weather_threshold() -> None:
+    assert parse_by_rules("安全风速上限改成11")["parameters"] == [
+        {"field": "安全风速上限", "op": "=", "value": 11.0}
+    ]
+
+
+def test_rule_no_night_transfer() -> None:
+    assert parse_by_rules("禁止夜间转移")["parameters"] == [
+        {"field": "允许夜间转移", "op": "=", "value": "否"}
+    ]
+
+
+def test_legacy_language_bridged_to_dsl() -> None:
+    from app.core.dsl.llm_parser import parse_by_legacy
+
+    dsl = parse_by_legacy("船租上涨20%")
+    assert dsl is not None
+    assert any(p["field"] == "船舶日租金" and p["op"] == "*" for p in dsl["parameters"])

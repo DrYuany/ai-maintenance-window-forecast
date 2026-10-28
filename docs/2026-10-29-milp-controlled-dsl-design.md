@@ -379,8 +379,13 @@ LLM 只能在注册表内引用、校验器只放行线性表达式，从而**�
   六张表 × 字段；DSL 补 `parameters`/`data` 段；求解内核支持时序假设
   （`timeline_patches`：海况/逐时/窗口，改快照不改源文件）；
   规则层产出参数/数据/时序话术的 DSL（船租上涨→parameters，11月3日风速15米→data weather）。
-- **第三期（未开始）**：生成层规则参数化（时间粒度、海况判定、跨窗口），
-  以及"待扩展"的风险/天气条件/备件预留构件；收拢解析管道（见 11.3）。
+- **第三期（已完成 ✅，风险/天气条件/备件预留构件按业务决定不做）**：
+  1. ✅ 生成层规则参数化：候选开工粒度、跨天暂停、夜间转移、海况判定阈值
+     （常态/安全最大风速与有效波高），经 DSL parameters 修改后重算候选；
+  2. ✅ 收拢解析管道：`planning_bridge.py` 把旧规划语言编译产物转成统一 DSL
+     （strategy/mode/weights→objectives，overrides→parameters，limits→constraints，
+     data_patches→data，seconds→solver），旧正则作为统一解析器的规则层保留；
+     执行器按 DSL 全段编译，只有 PlanningRequest 表达不了的约束/目标走注入闭包。
 
 ### 11.2 终态架构：一条管道
 

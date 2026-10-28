@@ -78,6 +78,20 @@ def _parameter_dsl(kind: str, groups: list[str]) -> dict[str, Any]:
         return {"parameters": [{"field": "每天开始维修", "op": "=", "value": f"{int(groups[0]):02d}:00"}]}
     if kind == "param_work_end":
         return {"parameters": [{"field": "每天结束维修", "op": "=", "value": f"{int(groups[0]):02d}:00"}]}
+    if kind == "param_granularity":
+        return {"parameters": [{"field": "候选开工粒度", "op": "=", "value": int(groups[0])}]}
+    if kind == "param_no_multiday":
+        return {"parameters": [{"field": "允许跨天暂停", "op": "=", "value": "否"}]}
+    if kind == "param_multiday":
+        return {"parameters": [{"field": "允许跨天暂停", "op": "=", "value": "是"}]}
+    if kind == "param_no_night_transfer":
+        return {"parameters": [{"field": "允许夜间转移", "op": "=", "value": "否"}]}
+    if kind == "param_weather_threshold":
+        level, metric, value = groups
+        field = ("常态" if level == "常态" else "安全") + (
+            "风速上限" if "风速" in metric else "浪高上限"
+        )
+        return {"parameters": [{"field": field, "op": "=", "value": float(value)}]}
     return {}
 
 
@@ -136,11 +150,17 @@ RULE_PATTERNS: list[tuple[str, str]] = [
     (r"人工(?:单价|成本|费用)\s*(?:改成|改为|设为|调整为|涨到|降到)\s*(\d+(?:\.\d+)?)\s*元", "param_labor"),
     (r"(?:最多|不超过|限定|只上|只剩)\s*([\d一两二三]+)\s*条(?:作业)?(?:线|船)", "param_lines"),
     (r"每天.{0,4}(?:最多|只能|干|工作)\s*(\d+(?:\.\d+)?)\s*小时", "param_daily_hours"),
-    (r"人员(?:总)?(?:上限|总数).{0,4}(?:改成|设为|为)?\s*(\d+)\s*人", "param_headcount"),
+    (r"(?:人员|人手|工人|施工人员|作业人员)(?:总)?(?:人数|人员|人力|上限)\s*(?:改成|设为|为)?\s*(\d+)\s*人", "param_headcount"),
     (r"(?:最多|不超过|限定|只有)\s*(\d+)\s*人", "param_headcount"),
     (r"(?:风机间转移|转移时间|转移).{0,4}(?:改成|要|用)?\s*(\d+(?:\.\d+)?)\s*小时", "param_transfer"),
     (r"每天\s*(\d{1,2})点(?:开工|开始|干活)", "param_work_start"),
     (r"每天\s*(\d{1,2})点(?:收工|结束|下班)", "param_work_end"),
+    # ── 生成层规则参数（第三期）──
+    (r"(?:候选)?开工粒度(?:\s*(?:改成|设为|调整为|为)\s*)?(\d+)\s*分钟", "param_granularity"),
+    (r"(?:不允许|禁止|不能)跨天(?:暂停|施工|维修)?", "param_no_multiday"),
+    (r"允许跨天(?:暂停|施工|维修)?", "param_multiday"),
+    (r"(?:不能|禁止|不允许)夜间转移", "param_no_night_transfer"),
+    (r"(常态|安全)(?:最大)?(风速|浪高|波高).{0,4}(?:改成|设为|调到|调整为|为)\s*(\d+(?:\.\d+)?)", "param_weather_threshold"),
     # ── 数据补丁（data 段；行级）──
     (r"(.{0,6}?)(\d{1,2})月(\d{1,2})[日号](?:之前|前)?(?:才|能)?到货(?:(\d+)\s*(?:套|个|件))?", "data_arrival"),
     (r"(.{0,6})维修工时(?:上涨|上调|增加|提高|翻倍)\s*(\d+(?:\.\d+)?)\s*%", "data_part_hours"),
@@ -311,6 +331,15 @@ NON_CHANGE_PATTERNS: list[tuple[str, str]] = [
     (r"对比|比较|差在哪|差多少|区别|哪个更|哪版更", "compare"),
     (r"多少|哪些|怎么样|如何|有没有|够不够|什么时候|哪天|还剩|当前|现在|最近", "query"),
 ]
+
+
+def _classify_not_change_only(text: str) -> str | None:
+    """只判"非修改类"（闲聊/解释/对比/查询）——必须先于旧语言桥接，
+    否则"经济优先和风险优先差多少"这类比较问句会被当成策略修改。"""
+    for pattern, _kind in NON_CHANGE_PATTERNS:
+        if re.search(pattern, text.strip()):
+            return "not_change"
+    return None
 
 
 def _classify_non_change(message: str) -> str | None:
@@ -495,8 +524,38 @@ def parse_with_llm(
     )
 
 
+_LEGACY_COMPILER = None
+
+
+def _legacy_compiler():
+    """旧规划语言编译器（正则规则层，第三期并入统一解析器）。"""
+    global _LEGACY_COMPILER
+    if _LEGACY_COMPILER is None:
+        from app.core.planning_intent import PlanningIntentCompiler
+
+        _LEGACY_COMPILER = PlanningIntentCompiler()
+    return _LEGACY_COMPILER
+
+
+def parse_by_legacy(message: str) -> dict[str, Any] | None:
+    """旧规划语言 → 统一 DSL（规则层迁移，不是重写正则）。
+
+    完整策略/权重/参数/约束/数据补丁/时限由 planning_intent 的成熟正则
+    解析，再经 planning_bridge 转成 DSL schema。
+    """
+    from app.core.dsl.planning_bridge import request_to_dsl
+
+    compiler = _legacy_compiler()
+    if not compiler.is_planning_request(message):
+        return None
+    compiled = compiler.compile_detailed(message)
+    if compiled.blocked:
+        return None
+    return request_to_dsl(compiled.request)
+
+
 def parse(message: str, library: list[dict] | None = None, client=None) -> ParseResult:
-    """三层解析入口：批量 → 规则 → 意图门控 → 向量(few-shot) → LLM。
+    """三层解析入口：批量 → 规则 → 旧规划语言桥接 → 意图门控 → 向量 → LLM。
 
     路由结果：dsl / batch / data_patch / parameter / strategy / reject / not_change / clarify。
     """
@@ -505,6 +564,11 @@ def parse(message: str, library: list[dict] | None = None, client=None) -> Parse
     ruled = parse_by_rules(message)
     if ruled is not None:
         return ParseResult(dsl=ruled, source="rule", route="dsl", confidence=1.0)
+    if _classify_not_change_only(message) is not None:
+        return ParseResult(dsl=None, source="rule", route="not_change", confidence=0.9)
+    bridged = parse_by_legacy(message)
+    if bridged is not None:
+        return ParseResult(dsl=bridged, source="rule", route="dsl", confidence=1.0)
     classified = _classify_non_change(message)
     if classified is not None:
         return ParseResult(dsl=None, source="rule", route=classified, confidence=0.9)

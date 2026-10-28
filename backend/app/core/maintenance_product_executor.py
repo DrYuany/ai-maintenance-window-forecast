@@ -81,12 +81,26 @@ class MaintenanceProductExecutor:
                     raise MaintenanceProductExecutionError(
                         "DSL 校验失败：" + "；".join(dsl_errors)
                     )
+                # 第三期：DSL 全段编译——参数/数据/目标并入 PlanningRequest，
+                # 只剩 PlanningRequest 表达不了的约束/目标走注入闭包。
                 from app.core.dsl.compiler import constraints_builder, stages_builder
+                from app.core.dsl.planning_bridge import custom_objectives, dsl_to_request
 
-                if dsl.get("constraints"):
-                    extra_constraints = constraints_builder(dsl["constraints"], data)
-                if dsl.get("objectives"):
-                    custom_stages = stages_builder(dsl["objectives"], data)
+                request, residual, timeline = dsl_to_request(dsl, request)
+                if request.relative_overrides:
+                    request, _ = self.prepare(request)
+                data = load_project(
+                    self.project_root,
+                    request.base,
+                    overrides=request.overrides,
+                    data_patches=request.data_patches,
+                    timeline_patches=timeline or None,
+                )
+                if residual:
+                    extra_constraints = constraints_builder(residual, data)
+                customs = custom_objectives(dsl)
+                if customs:
+                    custom_stages = stages_builder(customs, data)
             suffix = model_fingerprint or job_id
             base_output = self.project_root / "product-output" / f"agent-model-{suffix[:16]}"
             output = base_output

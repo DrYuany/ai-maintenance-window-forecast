@@ -68,7 +68,7 @@
 {"id": "Q113", "intent": "modify_parameter", "route": "parameter", "utterance": "少干点，每天6小时", "constraint_types": []}
 {"id": "Q114", "intent": "modify_parameter", "route": "parameter", "utterance": "人手砍一半", "constraint_types": []}
 {"id": "Q115", "intent": "modify_parameter", "route": "parameter", "utterance": "风机之间挪动要3小时", "constraint_types": []}
-{"id": "Q116", "intent": "modify_parameter", "route": "parameter", "utterance": "早上8点开始干活", "constraint_types": []}
+{"id": "Q116", "intent": "modify_parameter", "route": "dsl", "utterance": "早上8点开始干活", "constraint_types": []}
 {"id": "Q117", "intent": "modify_parameter", "route": "dsl", "utterance": "人员上限设为2人", "constraint_types": []}
 {"id": "Q120", "intent": "modify_data", "route": "dsl", "utterance": "叶片备件11月5日到货", "constraint_types": []}
 {"id": "Q121", "intent": "modify_data", "route": "dsl", "utterance": "叶片备件11月5日到货，之前不能开工", "constraint_types": []}
@@ -100,7 +100,7 @@
 {"id": "Q159", "intent": "modify_constraint", "route": "dsl", "utterance": "完成数不要低于8个", "constraint_types": ["cardinality"]}
 {"id": "Q160", "intent": "modify_constraint", "route": "clarify", "utterance": "同一条船干完一个活要歇2小时", "constraint_types": ["precedence"]}
 {"id": "Q161", "intent": "modify_constraint", "route": "clarify", "utterance": "2号船周三那天别排它", "constraint_types": []}
-{"id": "Q170", "intent": "modify_objective", "route": "strategy", "utterance": "按高风险优先抢修", "constraint_types": [], "objective_types": ["strategy"]}
+{"id": "Q170", "intent": "modify_objective", "route": "dsl", "utterance": "按高风险优先抢修", "constraint_types": [], "objective_types": ["strategy"]}
 {"id": "Q171", "intent": "modify_objective", "route": "strategy", "utterance": "先修严重的", "constraint_types": [], "objective_types": ["strategy"]}
 {"id": "Q172", "intent": "modify_objective", "route": "strategy", "utterance": "改成成本最低优先", "constraint_types": [], "objective_types": ["strategy"]}
 {"id": "Q173", "intent": "modify_objective", "route": "strategy", "utterance": "省钱优先", "constraint_types": [], "objective_types": ["strategy"]}
@@ -108,8 +108,8 @@
 {"id": "Q175", "intent": "modify_objective", "route": "strategy", "utterance": "权重改一下，严重故障占六成", "constraint_types": [], "objective_types": ["weighted"]}
 {"id": "Q176", "intent": "modify_objective", "route": "dsl", "utterance": "先最小化完工时间和，再最小化成本", "constraint_types": [], "objective_types": ["lexmin"]}
 {"id": "Q177", "intent": "modify_objective", "route": "clarify", "utterance": "尽量让大家都早点干完", "constraint_types": [], "objective_types": ["lexmin"]}
-{"id": "Q178", "intent": "modify_objective", "route": "strategy", "utterance": "最短完成优先", "constraint_types": [], "objective_types": ["strategy"]}
-{"id": "Q179", "intent": "modify_objective", "route": "strategy", "utterance": "检修最多器件优先", "constraint_types": [], "objective_types": ["strategy"]}
+{"id": "Q178", "intent": "modify_objective", "route": "dsl", "utterance": "最短完成优先", "constraint_types": [], "objective_types": ["strategy"]}
+{"id": "Q179", "intent": "modify_objective", "route": "dsl", "utterance": "检修最多器件优先", "constraint_types": [], "objective_types": ["strategy"]}
 {"id": "Q190", "intent": "modify_batch", "route": "batch", "utterance": "先按默认方法算一遍，再按每天8小时算一遍，然后对比", "constraint_types": []}
 {"id": "Q191", "intent": "modify_batch", "route": "batch", "utterance": "算两个场景：船租涨20%和最多两条线，对比一下", "constraint_types": []}
 {"id": "Q192", "intent": "modify_batch", "route": "batch", "utterance": "先算成本优先再算风险优先，看看差多少", "constraint_types": []}
@@ -133,3 +133,7 @@
 {"id": "Q221", "intent": "modify_data", "route": "dsl", "utterance": "11月4日海况不可作业", "constraint_types": []}
 {"id": "Q222", "intent": "modify_data", "route": "clarify", "utterance": "未来三天电价上涨20%"}
 {"id": "Q223", "intent": "modify_data", "route": "accept_any", "utterance": "窗口02提前两天开始"}
+{"id": "Q230", "intent": "modify_parameter", "route": "dsl", "utterance": "候选开工粒度改成30分钟", "constraint_types": []}
+{"id": "Q231", "intent": "modify_parameter", "route": "dsl", "utterance": "不允许跨天暂停", "constraint_types": []}
+{"id": "Q232", "intent": "modify_parameter", "route": "dsl", "utterance": "安全风速上限改成11", "constraint_types": []}
+{"id": "Q233", "intent": "modify_parameter", "route": "dsl", "utterance": "禁止夜间转移", "constraint_types": []}

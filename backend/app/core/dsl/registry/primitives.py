@@ -49,6 +49,8 @@ COMPILED_CO_OCCUR_MODES: frozenset[str] = frozenset({"same_day", "diff_day"})
 # ── 目标原语（本质 2 个 + 加权糖）───────────────────────────────────────────
 
 OBJECTIVE_PRIMITIVES: dict[str, dict] = {
+    # 策略快捷方式（第三期：四模板策略并入 DSL，mode 可选 分层/加权）
+    "strategy": {"required": ["name"], "optional": ["mode"]},
     "minimize": {"required": ["q"]},
     "maximize": {"required": ["q"]},
     "lexmin":   {"required": ["stages"]},   # stages: [{"q":..., "dir":"minimize|maximize"}, ...]
@@ -56,4 +58,4 @@ OBJECTIVE_PRIMITIVES: dict[str, dict] = {
 }
 
 # 原型已实现编译的目标原语：minimize/maximize/lexmin（q 限于已实现形式的量）
-COMPILED_OBJECTIVES: frozenset[str] = frozenset({"minimize", "maximize", "lexmin"})
+COMPILED_OBJECTIVES: frozenset[str] = frozenset({"strategy", "weighted", "minimize", "maximize", "lexmin"})
