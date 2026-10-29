@@ -19,6 +19,13 @@ from model_artifact import build_model_artifact, export_model_file, write_model_
 MONEY = 1000000  # micro-yuan; all costs are reported in yuan
 STRATEGIES = ('成本最低优先','高风险优先抢修','最短完成优先','检修最多器件优先')
 
+# 阶段数没有硬上限，也不该有：它是两段拼出来的
+#   业务阶段 = 目标模板 references/四种目标模板.json 声明的顺序（按指标去重后），
+#              当前四套模板分别 4/8/4/6 段，加 partial 前置最多 8 段；
+#   决胜阶段 = 每 60 个选择变量一段，随任务数×候选数×作业线数增长，可以几十段。
+# 控制手段不是"限条数"而是"限总时限"：所有阶段共用同一个 seconds，
+# 前一段花超了，后一段会以 TIME_LIMIT 收工并如实记录，不会假装最优。
+
 
 def _worker_count():
     """求解线程数。默认 min(8, CPU)：多线程实测比单线程快两个数量级。
@@ -344,12 +351,17 @@ def build_model(data, options, partial=False, strategy='成本最低优先', mod
     else:
         registry=json.loads((Path(__file__).resolve().parents[1]/'references/四种目标模板.json').read_text(encoding='utf-8'))
         template=next(t for t in registry['模板'] if t['模板编号']==strategy)
-        stages=[]
+        declared=[]
         if partial:
-            stages.extend([(level+'严重完成数','maximize',metrics[level+'严重完成数']) for level in ('高','中','低')])
+            # 允许少修时，"先多修几个"本身要排在最前面，否则部分排程会挑最便宜的几项。
+            declared.extend([(level+'严重完成数','maximize',metrics[level+'严重完成数']) for level in ('高','中','低')])
         if mode=='分层':
-            stages.extend((s['指标'],s['方向'],metrics[s['指标']]) for s in template['分层目标']
-                          if partial or not s['指标'].endswith('完成数'))
+            # 按模板声明的优先级逐条优化，一条不改、一条不删。
+            # 曾经的写法是 `if partial or not 指标.endswith('完成数')`——本意是躲开
+            # 上面那三段的重复，实际效果是：非部分排程时把"高严重完成数"这类
+            # 最核心的阶段整段删掉，高风险优先抢修退化成"高危早完工优先"，
+            # 而模板里明明写着先修高危。去重必须按指标名做，不能按名字后缀猜。
+            declared.extend((s['指标'],s['方向'],metrics[s['指标']]) for s in template['分层目标'])
         elif mode=='加权':
             weights=weights if weights is not None else template['加权默认值']
             if not weights or set(weights)-set(metrics) or any(not isinstance(v,(int,float)) or not math.isfinite(v) or v<0 for v in weights.values()) or not any(weights.values()):
@@ -366,8 +378,13 @@ def build_model(data, options, partial=False, strategy='成本最低优先', mod
                 coeff=round(1000000000000000*w/ranges[name])
                 if w and coeff==0: raise ValueError('权重经整数缩放后为零，请提高加权精度或调整权重')
                 terms.append((-1 if '完成数' in name or name=='完成任务数' else 1)*coeff*metrics[name])
-            stages.append(('标准化加权目标','minimize',sum(terms)))
+            declared.append(('标准化加权目标','minimize',sum(terms)))
         else: raise ValueError('目标模式只能为分层或加权')
+        # 同一指标只优化一次：先出现的那条优先（partial 前置的三段排在模板之前）。
+        stages=[];seen=set()
+        for item in declared:
+            if item[0] in seen: continue
+            seen.add(item[0]);stages.append(item)
     return m,choices,stages,cost
 
 
@@ -433,9 +450,24 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
         for c,x in choices:
             model.AddHint(x,int((c['任务编号'],c['开始'],c['作业线']) in keys))
 
+    # 阶段计划可见化：跑了几段、跳了几段、为什么跳。
+    # 只做"可证明"的跳过——没有依据就不跳，宁可多算一段也不许悄悄换目标。
+    stage_upper={'完成任务数':len(data.tasks)}
+    for level in ('高','中','低'):
+        stage_upper[level+'严重完成数']=sum(t['严重等级']==level for t in data.tasks)
+    plan=[];done_metrics=set();skipped=0;business_logs=[]
     for name,sense,expression in stages:
         if cancelled and cancelled():
             termination_reason='USER_CANCELLED';break
+        skip=None
+        if name in done_metrics:
+            skip='同一指标已在前面优化过，重复跑不会改变结果'
+        elif name in stage_upper and stage_upper[name]==0:
+            skip='当前没有该类别的任务，该阶段没有可优化内容'
+        if skip:
+            skipped+=1;plan.append({'目标':name,'结果':'跳过','原因':skip});continue
+        done_metrics.add(name)
+        plan.append({'目标':name,'结果':'执行'})
         remaining=seconds-(time.monotonic()-started)
         if remaining<=0:
             termination_reason='TIME_LIMIT';break
@@ -447,7 +479,7 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
         status=solver.Solve(model);last_status=status
         log={'目标':name,'方向':sense,'状态':solver.StatusName(status),'耗时秒':solver.WallTime(),
              '模型文件':stage_model_name}
-        logs.append(log)
+        logs.append(log);business_logs.append(log)
         if status not in (cp_model.OPTIMAL,cp_model.FEASIBLE):
             if status==cp_model.UNKNOWN: termination_reason='TIME_LIMIT'
             break
@@ -460,7 +492,8 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
             termination_reason='TIME_LIMIT';break
         model.Add(expression==round(val))
         _rehint()
-    business_complete=len(logs)==len(stages) and all(r['状态']=='OPTIMAL' for r in logs)
+    planned=len(stages)-skipped
+    business_complete=len(business_logs)==planned and all(r['状态']=='OPTIMAL' for r in business_logs)
     if business_complete:
         ordered=sorted(choices,key=lambda item:(item[0]['任务编号'],item[0]['开始'],item[0]['作业线']))
         chunks=[ordered[index:index+60] for index in range(0,len(ordered),60)]
@@ -501,6 +534,7 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
         '有解':selected is not None,'解状态':solve_status,'终止原因':termination_reason,
         '方案来源':'CP_SAT' if logs and any(r['状态'] in ('OPTIMAL','FEASIBLE') for r in logs) else ('HEURISTIC_FALLBACK' if fallback else None),
         '分层全部最优':solve_status=='OPTIMAL','确定性决胜完成':tie_complete,
+        '阶段计划':plan,'计划阶段数':len(stages),'跳过阶段数':skipped,
         '阶段':logs,'总耗时秒':time.monotonic()-started,'模型成本':last_cost,'诊断模型':partial,
         '模型产物文件':artifact['artifactFile'],'模型产物指纹':artifact_fingerprint}
 

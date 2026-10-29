@@ -11,6 +11,8 @@
 判分口径：
   - expect 是对象 → route 必须 dsl，且 parameters/constraints 覆盖期望项
   - expect 是字符串（clarify/reject/not_change）→ route 必须一致
+  - status=not_implemented → 该参数已经登记但系统改不动，不计入准确率，
+    单独列出。这类用例留在文件里当"待实现清单"，删掉等于把窟窿藏起来。
 """
 from __future__ import annotations
 
@@ -179,7 +181,12 @@ def main(argv: list[str] | None = None) -> int:
     passed = 0
     failed: list[str] = []
     skipped = 0
+    pending: list[str] = []
     for row in rows:
+        if row.get("status") == "not_implemented":
+            # 参数还没接入，考它只会得到"系统报错"——记下来，不当作模型答错。
+            pending.append(f"{row['id']} [{row['param']}] {row['utterance']}")
+            continue
         try:
             result = parse(
                 row["utterance"], library=library,
@@ -194,12 +201,14 @@ def main(argv: list[str] | None = None) -> int:
         else:
             failed.append(f"{row['id']} [{row['param']}] {reason} ｜ {row['utterance']}")
 
-    scored = len(rows) - skipped
+    scored = len(rows) - skipped - len(pending)
     mode = "旧手写提示词（基线）" if legacy else "注册表槽位说明书"
     print("=" * 72)
     print(f"对抗槽位评测：{len(rows)} 条，{mode}")
     if skipped:
         print(f"LLM 不可用跳过 {skipped} 条")
+    if pending:
+        print(f"参数未接入、暂不计分 {len(pending)} 条（见 status=not_implemented）")
     print(f"准确率：{passed}/{scored} = {passed / max(1, scored):.1%}")
     if failed:
         print(f"\n失败明细（前 25 条）：")

@@ -69,7 +69,23 @@ def _validate_parameter(spec: Any, where: str) -> list[str]:
         errors.append(f"{where}: 参数 {field!r} 不在 122 项参数注册表")
         return errors
     if not param_reg.is_changeable(field):
-        errors.append(f"{where}: 参数 {field!r} 登记为待扩展/固定，不可改")
+        if param_reg.is_unsupported(field):
+            errors.append(
+                f"{where}: 参数 {field!r} 已登记但尚未接入，当前改不动"
+                f"（{param_reg.unsupported_reason(field)}）"
+            )
+        else:
+            errors.append(f"{where}: 参数 {field!r} 登记为固定值，不可改")
+        return errors
+    route = param_reg.route_of(field)
+    if route != "parameters":
+        # 一个参数只有一个正确位置。写错位置就是确定性错误——过去这里放行，
+        # 结果一路走到 load_project 才报"未支持参数"，把错误推给了执行期。
+        errors.append(
+            f"{where}: {field!r} 不能写进 parameters；"
+            f"{param_reg.ROUTE_LABELS.get(route, '请写到别的段')}"
+        )
+        return errors
     op = spec.get("op")
     if op not in ("=", "*"):
         errors.append(f"{where}: op 必须是 '='（绝对）或 '*'（相对倍率）")

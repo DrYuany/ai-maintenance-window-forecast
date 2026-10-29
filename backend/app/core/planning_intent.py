@@ -234,9 +234,15 @@ class PlanningIntentCompiler:
             if clock_value:
                 overrides[key] = clock_value
 
-        budget = re.search(r"(?:总成本|预算)(?:最多|不超过|控制在)\s*(\d+(?:\.\d+)?)\s*万", text)
+        # 口径按参数总表：说"总成本"才卡含发电损失的总经济成本；
+        # 只说"预算"按"费用预算上限"的默认口径卡现金支出（发电损失是机会成本，不是花出去的钱）。
+        budget = re.search(r"总成本(?:最多|不超过|控制在|上限)\s*(\d+(?:\.\d+)?)\s*万", text)
         if budget:
             limits["最大总成本"] = float(budget.group(1)) * 10_000
+
+        fee_budget = re.search(r"预算(?:最多|不超过|控制在|上限)?\s*(\d+(?:\.\d+)?)\s*万", text)
+        if fee_budget and "最大总成本" not in limits:
+            limits["现金预算"] = float(fee_budget.group(1)) * 10_000
 
         cash = re.search(r"现金支出(?:最多|不超过|控制在|上限)?\s*(\d+(?:\.\d+)?)\s*万", text)
         if not cash:

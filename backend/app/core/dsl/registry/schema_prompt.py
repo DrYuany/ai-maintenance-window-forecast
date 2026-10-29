@@ -4,10 +4,11 @@
 
   系统提示词（静态）回答四件事：
     1. 有什么        —— 实体 + 6 张数据表（entity_block / data_block）
-    2. 什么能改      —— 51 个可改参数（L0 目录）+ 16 原语 + 5 目标
-    3. 改成什么格式  —— DSL 字段 / 单位 / 取值约束
+    2. 什么能改      —— 有落点的参数（L0 目录）+ 4 项换节写的 + 16 原语 + 5 目标
+    3. 什么改不动    —— unsupported_block（明说边界，防止模型硬写）
+    4. 改成什么格式  —— DSL 字段 / 单位 / 取值约束
   上下文（动态，每轮拼）回答：
-    4. 现在是什么状态 —— 快照清单（snapshot_block）+ 当前方案（context_block）
+    5. 现在是什么状态 —— 快照清单（snapshot_block）+ 当前方案（context_block）
 
 分层注入（控制 prompt 体积）：
   L0 目录     所有可改参数一行一个（名称+单位+取值约束），约 2k 字符，永远在
@@ -28,6 +29,7 @@ from . import primitives as prim_reg
 from . import parameters as param_reg
 
 # 高频槽位：用户最常改；检索未命中时也保底带上详解，避免"明明很常见却没细节"。
+# 只放真正落得了地的；否则详解块会替不支持的功能背书。
 CORE_PARAMS: tuple[str, ...] = (
     "每日有效维修上限",
     "每天开始维修",
@@ -36,20 +38,13 @@ CORE_PARAMS: tuple[str, ...] = (
     "可调动人员总数",
     "船舶日租金",
     "维修人工单价",
-    "电价整体倍率",
-    "检修期间停机比例",
     "候选开工粒度",
 )
 
-# 易错的列表/边界槽位给一条写法示例（只影响 L1 详解，不额外膨胀目录）。
+# 易错的边界槽位给一条写法示例（只影响 L1 详解，不额外膨胀目录）。
+# 只给 route=parameters 的参数配示例：给"写不进去"的参数配示例，等于教模型踩坑。
 _PARAM_EXAMPLES: dict[str, str] = {
-    "候选风机": '只看风机001和风机002 → {"field":"候选风机","op":"=","value":["风机001","风机002"]}',
-    "候选部件": '这次只排部件01和部件02 → {"field":"候选部件","op":"=","value":["部件01","部件02"]}',
-    "强制维修任务": '任务001和任务003必须修 → {"field":"强制维修任务","op":"=","value":["任务001","任务003"]}',
-    "禁止新开工风机": '风机005这几天不许开工 → {"field":"禁止新开工风机","op":"=","value":["风机005"]}',
-    "费用预算上限": '总预算控制在300万 → {"field":"费用预算上限","op":"=","value":3000000}',
     "安全风速上限": '风速上限放宽到14米每秒 → {"field":"安全风速上限","op":"=","value":14}',
-    "补库延期量": '备件到货统一延后24小时 → {"field":"补库延期量","op":"=","value":24}',
 }
 
 
@@ -104,36 +99,62 @@ def _compact_value(value: str, limit: int = 24) -> str:
 
 
 def param_names() -> list[str]:
-    """注册表里全部可改参数名（顺序稳定）。"""
+    """注册表里真正能改的参数名（有落点才算，顺序稳定）。"""
     return [row["参数名称"] for row in param_reg._rows() if param_reg.is_changeable(row["参数名称"])]
 
 
 def param_catalog() -> str:
-    """L0：每个可改参数一行（名称 + 单位 + 取值约束）。
+    """L0：每个真正能改的参数一行（名称 + 单位 + 取值约束 + 落点）。
 
-    有些名字虽然在注册表里，却不是"系统参数"，写进 parameters 会被拒。
-    这里当场标注该往哪写，比让模型去猜再报错便宜得多。
+    只列有落点的参数。"登记了但没接入"的不列在这里，另见 unsupported_block()
+    —— 让模型看得见边界，比让它写出去再报错便宜得多。
     """
-    lines = ["可改参数目录（名称｜单位｜取值约束；需要细节时会自动展开）："]
+    lines = ["可改参数目录（名称｜单位｜取值约束；写进 parameters）："]
     for row in param_reg._rows():
         name = row["参数名称"]
-        if not param_reg.is_changeable(name):
+        if param_reg.route_of(name) != "parameters":
             continue
         unit = row.get("单位", "") or "-"
         rule = _compact_value(row.get("取值约束", ""), 28) or "-"
-        note = _NOT_A_PARAM.get(name)
-        lines.append(f"- {name}｜{unit}｜{rule}" + (f"（{note}）" if note else ""))
+        lines.append(f"- {name}｜{unit}｜{rule}")
     return "\n".join(lines)
 
 
-# 写在 parameters 里会被拒的名字 → 正确写法。
-# 只登记"确实有别的出口"的那几个；其余不支持的不要在这里编造出口。
-_NOT_A_PARAM = {
-    "标准目标策略": "不是 parameters 项，写进 objectives：{type:strategy,name:四选一}",
-    "共同最低完成任务数": "不是 parameters 项，写进 constraints：cardinality",
-    "费用预算上限": "不是 parameters 项，写进 constraints：budget/总经济成本",
-    "强制维修任务": "不是 parameters 项，写进 constraints：must",
-}
+def redirect_block() -> str:
+    """有别的出口、但不能写进 parameters 的几项：给正确写法。"""
+    examples = {
+        "标准目标策略": '{"type":"strategy","name":"成本最低优先"}（→ objectives）',
+        "费用预算上限": '{"type":"budget","quantity":"现金支出","op":"<=","value":5000000}（→ constraints）',
+        "共同最低完成任务数": '{"type":"cardinality","filter":{},"op":">=","value":5}（→ constraints）',
+        "强制维修任务": '{"type":"must","task":"任务018"}（→ constraints，多个任务写多条）',
+    }
+    lines: list[str] = []
+    for name in param_names():
+        route = param_reg.route_of(name)
+        if route == "parameters":
+            continue
+        lines.append(f"- {name}：{examples.get(name, param_reg.ROUTE_LABELS.get(route, '写进别的段'))}")
+    return "\n".join(lines)
+
+
+def unsupported_block() -> str:
+    """当前改不动的参数：明说，别让模型猜。
+
+    这些名字在参数总表里存在，用户也可能这么问。模型需要知道"这件事现在做不到"，
+    并且在有替代出口时给出替代写法。
+    """
+    rows = [name for name in (row["参数名称"] for row in param_reg._rows())
+            if param_reg.is_unsupported(name)]
+    if not rows:
+        return ""
+    hints = [f"{name}→{param_reg.UNSUPPORTED_HINT[name]}"
+             for name in rows if name in param_reg.UNSUPPORTED_HINT]
+    plain = [name for name in rows if name not in param_reg.UNSUPPORTED_HINT]
+    lines = ["## 当前改不动（不要写进 parameters，也不要假装能改，直接说做不到）",
+             "、".join(plain)]
+    if hints:
+        lines.append("以下有替代写法：" + "；".join(hints))
+    return "\n".join(lines)
 
 
 def param_detail(name: str) -> str:
@@ -300,14 +321,17 @@ def _parse_contract() -> str:
 - 任务编号写全称"任务018"；风机"风机003"；窗口"窗口02"。
 - 时间一律 ISO 带时区，形如 2026-11-05T08:00:00+08:00；只说到"某日"默认 08:00。
 - 金额一律元（"500万"→5000000）。
-- parameters 的 field 只能用目录里没标注"不是 parameters 项"的名字。
+- parameters 的 field 只能用「可改参数目录」里列出的名字；目录外的名字一律不要写，
+  想改但不在目录里，就用 clarify 说明当前做不到。
 - parameters 每项必须写 op："="（绝对值）或 "*"（相对倍率，如"涨两成"→1.2）。
 - 取值形态：开关类写 "是"/"否"；时刻类写 "07:00"；数值类写数字。
 - 下面四类不写 parameters，各有专门位置：
   策略 → objectives：{"type":"strategy","name":"成本最低优先"}
-  成本上限 → constraints：{"type":"budget","quantity":"总经济成本","op":"<=","value":5000000}
+  预算 → constraints：{"type":"budget","quantity":"现金支出","op":"<=","value":5000000}
+        （默认口径是不含发电损失的现金支出；用户明确说"连发电损失一起算"才用 总经济成本）
   必修任务 → constraints：{"type":"must","task":"任务018"}
-  最低完成数 → constraints：{"type":"cardinality","op":">=","value":5}
+  最低完成数 → constraints：{"type":"cardinality","filter":{},"op":">=","value":5}
+        （filter 必填，不限条件时写空对象）
 - 标准目标策略四选一：高风险优先抢修 / 成本最低优先 / 最短完成优先 / 检修最多器件优先。
   用户说"按风险来排""重视安全"→高风险优先抢修；"省钱""成本优先"→成本最低优先。
 - 一句话里有多条诉求时，全部输出（不要只取第一条）。"""
@@ -318,14 +342,21 @@ def build_system_prompt(message: str | None = None, top_k: int = 6) -> str:
     detail_names: list[str] = []
     if message:
         for name in retrieve_params(message, top_k=top_k) + list(CORE_PARAMS):
-            if name not in detail_names:
+            # 换节写的四项在上面已有完整写法，这里不再重复占篇幅。
+            if name not in detail_names and param_reg.route_of(name) == "parameters":
                 detail_names.append(name)
 
     blocks = [
         "你是检修排程 DSL 生成器。把用户的话翻译成 DSL，不要解释。",
-        "## 你能改什么",
+        "## 你能改什么（parameters 段）",
         param_catalog(),
     ]
+    redirects = redirect_block()
+    if redirects:
+        blocks.extend(["## 这几项不能写 parameters，写到别处", redirects])
+    unsupported = unsupported_block()
+    if unsupported:
+        blocks.append(unsupported)
     if detail_names:
         blocks.append("## 本轮相关槽位详解")
         blocks.extend(param_detail(name) for name in detail_names if name)
