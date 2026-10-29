@@ -43,3 +43,6 @@ backend/data/
 *.db
 *.db-wal
 *.db-shm
+
+# 本地视觉自检产物（esbuild 打包 + headless 截图）
+.tmp-preview/
