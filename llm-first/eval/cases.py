@@ -6,7 +6,7 @@
 
 所以分两套：
 
-- `SUITE`（本文件手写的 65 条）：每条都写清"这一条在证明什么"，
+- `SUITE`（本文件手写的 67 条）：每条都写清"这一条在证明什么"，
   断言只用机器能判的东西——route、有没有退回、有没有丢数、DSL 里有没有那个参数/原语。
 - `backend_cases()`（`--suite backend`）：把 221 条按原标签跑一遍当压力测试，
   只看总体分布，不逐条判对错。
@@ -199,6 +199,12 @@ SUITE: tuple[dict, ...] = (
     {"id": "J11", "tag": "回归·能力缺口", "text": "严重故障11月8日前必须修完",
      "route_in": {"clarify", "reject"}, "forbid_constraints": ["deadline"],
      "note": "按严重级别批量截止要「全部」，没有这块积木；单独给一个任务写 deadline 是错的"},
+    {"id": "J12", "tag": "回归·口语日期", "text": "3号那天不要动工",
+     "route": "dsl", "constraints": ["forbidden_dates"],
+     "note": "修前：反问「是11月还是12月」。只说几号就取基准之后最近的那一个"},
+    {"id": "J13", "tag": "回归·口语日期", "text": "把4号和5号空出来",
+     "route": "dsl", "constraints": ["forbidden_dates"],
+     "note": "一次说几个号也一样；不要因为有两个日期就去问月份"},
 )
 
 

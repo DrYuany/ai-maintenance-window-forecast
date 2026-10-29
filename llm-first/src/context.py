@@ -114,6 +114,24 @@ class Context:
             )
         return block
 
+    def next_day(self, day: int) -> str:
+        """基准日之后**最近**的 day 号。
+
+        "只说几号没给月份"的说法只有一个答案：**最近**的那一个。
+        12月6日不是"另一种可能"，因为 11月6日已经比它近。
+        31号在小月不存在时老实说不存在，不往前也不往后凑。
+        """
+        for attempt in range(3):
+            month = (self.today.month - 1 + attempt) % 12 + 1
+            year = self.today.year + (self.today.month - 1 + attempt) // 12
+            try:
+                hit = _dt.date(year, month, day)
+            except ValueError:
+                continue
+            if hit >= self.today:
+                return hit.isoformat()
+        return f"{day}号不存在"
+
     def explain(self) -> str:
         """给提示词的一段：基准 + 换算表 + 换算不出怎么办。"""
         samples = []
@@ -129,6 +147,9 @@ class Context:
             f"能唯一算出来的：{'、'.join(samples)}；{tail}。\n\n"
             "**算出来的日期直接写进日期字段**，并在 `calc` 里写清怎么算的，"
             "例如 `calc=\"明天=2026-10-31\"`。\n\n"
+            "**只说「几号」没给月份的，取基准日之后最近的那个该日**："
+            f"基准 {self.iso} 时说\"六号\"就是 {self.next_day(6)}，"
+            "再往后的同号日子不算\"另一种可能\"。一次说几个号的，每个都按这一条取。\n\n"
             "**算不出来的不要猜。** \"下周\"\"月底\"\"下个月\"这类说法本身有歧义，"
             "落成任何具体日期都是编的——写进 `unassigned`，`reason=need_info`，"
             "让用户补一句具体日子。"

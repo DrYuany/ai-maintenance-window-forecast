@@ -215,3 +215,18 @@ def test_window_dates_are_available_for_relative_change():
 def test_param_block_falls_back_when_no_data():
     """没有现值就不要编一段。宁可提示词短一点，也不要出现"现值未知"这种空话。"""
     assert context.Context(today=datetime.date(2026, 10, 30)).param_block() == ""
+
+
+# ── 只说"几号"没给月份 ────────────────────────────────────────────────────
+
+def test_next_day_takes_the_nearest_after_base():
+    """基准 10-30 说"六号"→ 11月6日。不是 12月6日，也不是"不知道你说的哪个"。"""
+    assert CTX.next_day(6) == "2026-11-06"
+    assert CTX.next_day(31) == "2026-10-31"      # 当天所在月还有
+    assert CTX.next_day(30) == "2026-10-30"      # 就是今天
+
+
+def test_next_day_rolls_over_month_end():
+    """基准 11-30 说"1号"→ 跨到 12月1日。"""
+    ctx = context.Context(today=datetime.date(2026, 11, 30))
+    assert ctx.next_day(1) == "2026-12-01"
