@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 _CN_DIGIT = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7}
 _CN_WEEKDAY = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -49,6 +50,8 @@ class Context:
     today: _dt.date
     tz: str = "+08:00"
     base_id: str = "基座01"
+    # 当前场景的参数现值（参数名 → (值, 单位)）。空的就不给这一段提示词。
+    params: tuple[tuple[str, Any, str], ...] = ()
 
     # ── 展示 ────────────────────────────────────────────────────────────
     @property
@@ -87,6 +90,21 @@ class Context:
     def resolves(self, token: str) -> bool:
         return self.resolve(token) is not None
 
+    def param_block(self) -> str:
+        """现值表。**为什么要有这一段**：`船少一条看看` 这种相对改动，
+        没有现值就只能靠猜或者反问——而"现在几条"是系统自己知道的事，
+        让用户重复一遍是产品的问题，不是用户的问题。"""
+        if not self.params:
+            return ""
+        rows = "\n".join(f"| {name} | {value} | {unit} |" for name, value, unit in self.params)
+        return (
+            "# 现在是多少\n\n"
+            "下表是当前场景的参数值。用户说「少一条」「涨两成」「砍一半」这类**相对改动**时，\n"
+            "在这个基础上算出目标值，`op` 用 `=` 写绝对值，并在 `calc` 里写清算式\n"
+            "（例如 `calc=\"3-1=2\"`）。\n\n"
+            "| 参数 | 现值 | 单位 |\n|---|---|---|\n" + rows
+        )
+
     def explain(self) -> str:
         """给提示词的一段：基准 + 换算表 + 换算不出怎么办。"""
         samples = []
@@ -118,8 +136,48 @@ def from_iso(text: str | None, *, tz: str = "+08:00") -> Context:
     return Context(today=_dt.date.today(), tz=tz)
 
 
-def default() -> Context:
-    return Context(today=_dt.date.today())
+def default(with_params: bool = False) -> Context:
+    ctx = Context(today=_dt.date.today())
+    return with_params_for(ctx) if with_params else ctx
+
+
+def param_values() -> tuple[tuple[str, Any, str], ...]:
+    """读一遍参数快照。**失败就返回空**，让提示词少一段——不许因为读不到数据就报错。"""
+    try:
+        import paths  # noqa: F401  （挂 sys.path）
+        from pathlib import Path
+
+        from app.core.dsl.registry import parameters as param_reg
+        from product_data import load_project
+
+        root = Path(__file__).resolve().parents[2]
+        data = load_project(root, base_id="基座01")
+        out = []
+        for row in param_reg._rows():
+            if param_reg.route_of(row["参数名称"]) != "parameters":
+                continue
+            value = data.params.get(param_reg.to_internal_key(row["参数名称"]))
+            if value is None:
+                value = row.get("默认值")
+            out.append((row["参数名称"], value, row.get("单位", "")))
+        return tuple(out)
+    except Exception:
+        return ()
+
+
+_CACHE: dict[str, Context] = {}
+
+
+def with_params_for(ctx: Context) -> Context:
+    """给上下文接上现值。按"基准日 + 基座"缓存，同一进程里只读一次数据。"""
+    if ctx.params:
+        return ctx
+    key = f"{ctx.iso}|{ctx.base_id}"
+    hit = _CACHE.get(key)
+    if hit is None:
+        hit = Context(today=ctx.today, tz=ctx.tz, base_id=ctx.base_id, params=param_values())
+        _CACHE[key] = hit
+    return hit
 
 
 def find_relative(text: str) -> list[str]:

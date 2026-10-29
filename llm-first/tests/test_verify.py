@@ -387,3 +387,130 @@ def test_date_fields_accept_iso_and_month_day():
     }
     codes = _codes(verify.verify("任务003最晚11月9日修完", product))
     assert "A9" not in codes
+
+
+# ── 8. 数字对账的适用性 ─────────────────────────────────────────────────────
+
+def test_number_audit_is_not_applicable_without_dsl():
+    """正确拒绝的一句话，不许被记成"丢数"。
+
+    跑批跑出来的：`把风险降低50%` 判成 reject 是对的，但数字对账照跑，
+    报"丢数 50"——把"正确地拒绝"显示成"丢了用户的话"，这是最伤的一种假警报：
+    它看起来和真丢话一模一样，跑几轮人就不看这一列了。
+    """
+    audit = verify.audit_numbers("把风险降低50%", {}, route="reject")
+    assert audit["applicable"] is False
+    assert audit["missing"] == [] and audit["dropped"] == 0
+
+
+def test_number_audit_still_works_for_dsl():
+    audit = verify.audit_numbers("钱不超过300万",
+                                 {"constraints": [{"type": "budget", "op": "<=", "value": 3000000}]},
+                                 route="dsl")
+    assert audit["applicable"] is not False
+    assert audit["missing"] == []
+
+
+def test_percent_is_not_a_dropped_number():
+    """「上涨20%」落到 DSL 是 `*1.2`，20 本来就不该出现。"""
+    audit = verify.audit_numbers("船租上涨20%",
+                                 {"parameters": [{"field": "船舶日租金", "op": "*", "value": 1.2}]})
+    assert audit["missing"] == []
+
+    # 但它也不能变成"随便写个数就算对"：写成绝对值 12000（等于没改）仍然判丢
+    wrong = verify.audit_numbers("船租上涨20%",
+                                 {"parameters": [{"field": "船舶日租金", "op": "=", "value": 12000}]})
+    assert wrong["missing"] == [20.0]
+
+
+# ── 9. 时刻归一 ────────────────────────────────────────────────────────────
+
+def test_time_normalisation_is_accepted():
+    """`8点` 落成 `"08:00"` 是完全正确的写法，不该因为字面不同被判错。"""
+    product = {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "每天8点开工", "kind": "action"}],
+        "fills": [{"claim": 1, "row": "P02", "span": "8点", "from": "literal", "value": "08:00"}],
+        "unassigned": [],
+        "dsl": {"parameters": [{"field": "每天开始维修", "op": "=", "value": "08:00"}]},
+    }
+    report = verify.verify("每天8点开工", product)
+    assert "A4" not in _codes(report)
+
+
+def test_afternoon_hour_must_shift():
+    """反过来：「下午6点」写成 `06:00` 是错的，A4 要判死。
+
+    这条同时说明为什么时刻比对值得做——只按字符串比，
+    `06:00` 和 `18:00` 都会被判"推不出"，等于两种写法都不对。
+    """
+    product = {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "下午6点收工", "kind": "action"}],
+        "fills": [{"claim": 1, "row": "P03", "span": "下午6点", "from": "literal", "value": "06:00"}],
+        "unassigned": [],
+        "dsl": {"parameters": [{"field": "每天结束维修", "op": "=", "value": "06:00"}]},
+    }
+    assert "A4" in _codes(verify.verify("下午6点收工", product))
+
+
+# ── 10. A1 与切段器：连接词不该造成假警报 ───────────────────────────────────
+
+def test_claim_keeping_connective_still_covers():
+    """「同时」在切段时被当连接词剥掉，claim 照抄原文却还带着它。
+
+    这不是模型漏了一段，是两边形态不同：判据要把连接词从两边一起去掉再比。
+    修之前这条会 fail，整句被降级成 clarify——一句完全正确的话被退回。
+    """
+    product = {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "T01和T02不能同时修", "kind": "action"}],
+        "fills": [{"claim": 1, "row": "C04", "span": "T01和T02不能同时修", "from": "literal",
+                   "value": {"mode": "diff_day", "tasks": ["任务001", "任务002"]}}],
+        "unassigned": [],
+        "dsl": {"constraints": [{"type": "co_occur", "mode": "diff_day",
+                                 "tasks": ["任务001", "任务002"]}]},
+    }
+    assert "A1" not in _codes(verify.verify("T01和T02不能同时修", product))
+
+
+def test_pure_connective_segment_is_not_a_gap():
+    """只剩连接词的段没有内容可覆盖，不能因为它没有 claim 就报漏。"""
+    product = {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "船租涨到12万", "kind": "action"}],
+        "fills": [{"claim": 1, "row": "P13", "span": "12万", "from": "literal", "value": 120000}],
+        "unassigned": [],
+        "dsl": {"parameters": [{"field": "船舶日租金", "op": "=", "value": 120000}]},
+    }
+    assert "A1" not in _codes(verify.verify("船租涨到12万，另外", product))
+
+
+# ── 11. A6 单值：lexmin 天生一串，不是两个值打架 ───────────────────────────
+
+def test_lexmin_stages_are_not_a_clash():
+    """「先最小化A再最小化B」会在 O04 上填两条，那是两个阶段。
+
+    修之前 A6 把它当"同一行两个值"判死，一句完全正确的话被降级成 clarify。
+    """
+    product = {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "先最小化最后完工时间，再最小化总经济成本", "kind": "action"}],
+        "fills": [
+            {"claim": 1, "row": "O04", "span": "先最小化最后完工时间", "from": "literal",
+             "value": {"dir": "minimize", "q": "最后完工时间"}},
+            {"claim": 1, "row": "O04", "span": "再最小化总经济成本", "from": "literal",
+             "value": {"dir": "minimize", "q": "总经济成本"}},
+        ],
+        "unassigned": [],
+        "dsl": {"objectives": [{"type": "lexmin", "stages": [
+            {"dir": "minimize", "q": "最后完工时间"},
+            {"dir": "minimize", "q": "总经济成本"}]}]},
+    }
+    assert "A6" not in _codes(verify.verify("先最小化最后完工时间，再最小化总经济成本", product))
+
+
+def test_multi_value_kinds_come_from_registry():
+    """名单从注册表算，不手抄——不然加了同样形状的原语，判据会静默不认。"""
+    kinds = verify._multi_value_kinds()
+    assert "lexmin" in kinds

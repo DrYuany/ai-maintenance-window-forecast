@@ -155,7 +155,7 @@ def _finalize(outcome: Outcome, reason: str = "") -> Outcome:
         outcome.model_route = product.get("route")
     outcome.product = out
     outcome.route = out.get("route") or "clarify"
-    outcome.numbers = verify.audit_numbers(outcome.utterance, dsl)
+    outcome.numbers = verify.audit_numbers(outcome.utterance, dsl, outcome.route)
     if blocked:
         parts = [f"{c.code} {c.detail}" for c in outcome.report.failures]
         parts += [f"编译不过：{e}" for e in outcome.compile_errors[:2]]
@@ -168,7 +168,7 @@ def understand(utterance: str, *, use_cache: bool = True,
                ctx: "session.Context | None" = None) -> Outcome:
     text = (utterance or "").strip()
     started = time.monotonic()
-    ctx = ctx or session.default()
+    ctx = session.with_params_for(ctx or session.default())
 
     hit = guardrail.check(text)
     if hit is not None:

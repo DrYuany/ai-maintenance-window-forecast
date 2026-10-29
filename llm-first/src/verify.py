@@ -105,6 +105,35 @@ def _dates(text: str) -> list[tuple[int, int]]:
     return out
 
 
+_CLOCK_HHMM = re.compile(r"(\d{1,2})[:：](\d{2})")
+_CLOCK_POINT = re.compile(r"(上午|早上|早晨|下午|晚上|傍晚|中午|夜里)?\s*(\d{1,2})\s*[点時时]")
+_PM_WORDS = ("下午", "晚上", "傍晚", "夜里")
+_CN_HOUR = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+            "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _clock(text: str) -> list[int]:
+    """把文本里的时刻读成小时数。`08:00`、`8点`、`下午6点` 都要能读。
+
+    为什么要有这个：`每天8点开工` 落成 `"08:00"` 是完全正确的写法，
+    但字面上"08:00"确实不是"8点"的子串。第一版按字符串比，
+    于是每一条时刻改动都被 A4 判成"推不出出处"——这类假警报会让人
+    连真的编造也一起放过。
+    """
+    body = text or ""
+    out: list[int] = []
+    for hour, _minute in _CLOCK_HHMM.findall(body):
+        out.append(int(hour))
+    for word, raw in _CLOCK_POINT.findall(body):
+        hour = int(raw)
+        if word in _PM_WORDS and hour < 12:
+            hour += 12
+        out.append(hour)
+    for match in re.finditer(r"([零一二两三四五六七八九十])\s*[点時时]", body):
+        out.append(_CN_HOUR.get(match.group(1), -1))
+    return [h for h in out if 0 <= h <= 24]
+
+
 def _close(left: float, right: float) -> bool:
     return abs(left - right) <= max(1e-6, 1e-6 * abs(right))
 
@@ -150,14 +179,31 @@ def _same_value(left: Any, right: Any) -> bool:
 
 # ── A1 覆盖 ─────────────────────────────────────────────────────────────────
 
+def _content(text: str) -> str:
+    """去掉连接词之后的内容形态，只用于 A1 的两边比对。
+
+    切段器会把「同时/然后/另外」这类词换成逗号，段里就没有它们了；
+    而 claim 是**照抄原文**的，这些词还在。直接比字符串，就会出现
+    「T01和T02不能同时修」被判成"没被覆盖"——原文一字不差地抄了，却因为
+    切段时剥了一个"同时"而对不上。连接词不承载内容，两边都去掉再比。
+    """
+    body = text or ""
+    for word in segment.CONNECTIVES:
+        body = body.replace(word, "")
+    return segment.norm(body)
+
+
 def check_cover(utterance: str, product: dict[str, Any]) -> Check:
     pieces = segment.segments(utterance)
     claims = product.get("claims") or []
-    norms = [segment.norm(c.get("text") or "") for c in claims]
+    norms = [_content(c.get("text") or "") for c in claims]
 
     covered, missed = [], []
     for piece in pieces:
-        target = segment.norm(piece)
+        target = _content(piece)
+        if not target:          # 整段都是连接词，没有内容可覆盖
+            covered.append(piece)
+            continue
         rest = target
         for claim_norm in norms:
             if claim_norm and claim_norm in rest:
@@ -494,6 +540,9 @@ def check_source(product: dict[str, Any], utterance: str = "",
                 target = _dates(value)
                 if dates and target and any(d == t for d in dates for t in target):
                     continue
+                span_hours, value_hours = _clock(span), _clock(value)
+                if span_hours and value_hours and set(span_hours) & set(value_hours):
+                    continue
                 if _locate(value, span) is not None:
                     continue
                 if dates == [] and target:
@@ -612,6 +661,28 @@ def check_rows(utterance: str, product: dict[str, Any]) -> Check:
 
 # ── A6 单值 ─────────────────────────────────────────────────────────────────
 
+def _multi_value_kinds() -> set[str]:
+    """本身就要装一串值的原语，同一行出现多个值不是打架。
+
+    `lexmin` 的必填是 `stages`（一串阶段），"先最小化A再最小化B" 天然会在
+    同一行上填两条——那是两个阶段，不是两个互相矛盾的值。从注册表算，
+    不手抄名单：以后加了同样形状的原语（比如 `weights`），这里自动跟上。
+    """
+    try:
+        from app.core.dsl.registry import primitives as prim_reg
+    except Exception:                                    # 没挂上后端就退回保守名单
+        return {"lexmin"}
+    out = set()
+    for name, spec in prim_reg.OBJECTIVE_PRIMITIVES.items():
+        required = spec.get("required") or ()
+        if any(f in ("stages", "weights") for f in required):
+            out.add(name)
+    return out or {"lexmin"}
+
+
+_MULTI_VALUE = _multi_value_kinds()
+
+
 def check_single_value(product: dict[str, Any]) -> Check:
     fills = product.get("fills") or []
     if not fills:
@@ -622,8 +693,12 @@ def check_single_value(product: dict[str, Any]) -> Check:
         row_id = str(fill.get("row") or "")
         grouped.setdefault(row_id, []).append(fill)
 
-    clashes = []
+    clashes, skipped = [], []
     for row_id, items in grouped.items():
+        row = row_book.by_id(row_id)
+        if row is not None and row.kind in _MULTI_VALUE:
+            skipped.append(row_id)      # 这一行本来就是一串（lexmin 的阶段）
+            continue
         distinct: list[Any] = []
         for item in items:
             value = item.get("value")
@@ -633,12 +708,13 @@ def check_single_value(product: dict[str, Any]) -> Check:
             clashes.append({"row": row_id, "values": distinct,
                             "claims": [i.get("claim") for i in items]})
 
+    tail = f"；{len(skipped)} 行本来就要装一串（{'、'.join(skipped)}）" if skipped else ""
     if clashes:
         if product.get("route") == "clarify":
-            return Check("A6", "单值", "pass", "同一行多个值，已按 clarify 处理", clashes)
+            return Check("A6", "单值", "pass", "同一行多个值，已按 clarify 处理" + tail, clashes)
         return Check("A6", "单值", "fail",
-                     f"{len(clashes)} 个行号出现互相矛盾的值，却仍按 dsl 提交", clashes)
-    return Check("A6", "单值", "pass", f"{len(grouped)} 个行号各只有一个值")
+                     f"{len(clashes)} 个行号出现互相矛盾的值，却仍按 dsl 提交" + tail, clashes)
+    return Check("A6", "单值", "pass", f"{len(grouped) - len(skipped)} 个行号各只有一个值" + tail)
 
 
 # ── A7 必填 ─────────────────────────────────────────────────────────────────
@@ -881,6 +957,45 @@ def check_direction(utterance: str, product: dict[str, Any]) -> Check:
     return Check("A11", "方向", "pass", f"{checked} 处比较方向与原文一致")
 
 
+# ── A13 量词 ────────────────────────────────────────────────────────────────
+# 「高风险的必须全修完」被写成 `cardinality{">=",1}`——"至少修一个"，不是"全部"。
+# 这是错误分类学里的 E4.3（近似栏目顶替），也是本系统历史上真发生过的一次。
+#
+# 判据做得很窄，故意的：只认「claim 里出现『全部/所有/全修』」+「对应的 cardinality 值 <= 1」
+# 这一种组合。不窄就会误伤——"至少修5个"和"全部修完"在字面上都可能带"修"字。
+_ALL_WORDS = ("全部", "所有", "全修", "全都", "一个不落", "每一个")
+
+
+def check_quantifier(utterance: str, product: dict[str, Any]) -> Check:
+    if product.get("route") != "dsl":
+        return Check("A13", "量词", "na", f"route={product.get('route')}，没有可比的量词")
+
+    claims = {str(c.get("id")): c for c in product.get("claims") or []}
+    constraints = product["dsl"].get("constraints") or []
+    bad = []
+    for fill in product.get("fills") or []:
+        row = row_book.by_id(str(fill.get("row") or ""))
+        if row is None or row.kind not in ("cardinality", "must", "linear"):
+            continue
+        claim = claims.get(str(fill.get("claim"))) or {}
+        text = str(claim.get("text") or "")
+        if not any(word in text for word in _ALL_WORDS):
+            continue
+        for item in constraints:
+            if _item_type("constraints", item) != row.kind:
+                continue
+            value = item.get("value")
+            if row.kind == "cardinality" and isinstance(value, (int, float)) and value <= 1:
+                bad.append({"where": f"{row.id} {row.kind}", "claim": text,
+                            "wrote": f'op={item.get("op")} value={value}',
+                            "why": "原文说「全部」，却写成「至少 1 个」——这是拿近似的东西顶，"
+                                   "不是表达不了；表达不了应该进 unassigned"})
+    if bad:
+        return Check("A13", "量词", "fail",
+                     f"{len(bad)} 处把「全部」写成了「至少一个」", bad)
+    return Check("A13", "量词", "pass", "没有「全部」被降级成「至少一个」")
+
+
 # ── A12 reject 自查 ─────────────────────────────────────────────────────────
 # 整句拒掉、但原话里明明有表内的东西——这是 reject 最常见的滥用。
 # 工程上判不了"这段到底能不能做"（要判就得把 claim 文本对到 DSL 语义，
@@ -910,6 +1025,33 @@ def check_reject_scope(utterance: str, product: dict[str, Any]) -> Check:
                      "请自查是不是有哪一段其实能落表",
                      [{"hint": word} for word in hits])
     return Check("A12", "不轻拒", "pass", "整句拒，原文没有明显的表内线索")
+
+
+# ── A14 可执行性 ────────────────────────────────────────────────────────────
+# 登记了、能过校验、但执行时抛错的原语。这是"51 项宣称 / 16 项生效"的另一种形态：
+# 校验器认识 `weighted`，编译器却不认，于是它一路绿灯走到求解，然后在
+# `stages_builder` 里抛 "目标 weighted 已登记但原型未实现编译"。
+#
+# **这张表要能被证伪。** `tests/test_taxonomy.py` 里有一条测试会真去调编译器，
+# 编译器哪天实现了 weighted，那条测试就会失败，提醒把这里清空——
+# 而不是靠谁记得回来改。
+_UNCOMPILED_OBJECTIVES: dict[str, str] = {
+    "weighted": "原型未实现编译（compiler.stages_builder 会直接抛错）；"
+                "要权重改用 lexmin 或多个 minimize",
+}
+
+
+def check_executable(product: dict[str, Any]) -> Check:
+    objectives = product["dsl"].get("objectives") or []
+    bad = [{"where": f"objectives[{index}]", "type": item.get("type"),
+            "why": _UNCOMPILED_OBJECTIVES[item.get("type")]}
+           for index, item in enumerate(objectives)
+           if item.get("type") in _UNCOMPILED_OBJECTIVES]
+    if bad:
+        return Check("A14", "可执行", "fail",
+                     f"{len(bad)} 个目标原语执行时必然抛错：{'、'.join(b['type'] for b in bad)}",
+                     bad)
+    return Check("A14", "可执行", "pass", "没有已知的不可执行原语")
 
 
 # ── 汇总 ────────────────────────────────────────────────────────────────────
@@ -952,26 +1094,63 @@ def _dedupe(values: list[float]) -> list[float]:
     return sorted(kept)
 
 
-def audit_numbers(utterance: str, dsl: dict[str, Any]) -> dict[str, Any]:
+def audit_numbers(utterance: str, dsl: dict[str, Any], route: str = "dsl") -> dict[str, Any]:
     """数字对账：原文里出现的数，DSL 里有没有；DSL 里的数，原文有没有。
 
     这是两边（规则侧 / LLM 侧）**唯一完全共用**的判据，因为它不需要 claims/fills。
     "原文有、DSL 没有"就是丢话；"DSL 有、原文没有"就是编造或默认值。
     ISO 时间里的 08:00 会算作"多出"，属于已知噪声——所以结果给人看，不自动定罪。
+
+    **route 不是 dsl 时整个对账不适用。** 这一条是跑批跑出来的：
+    "把风险降低50%" 正确判成 reject，"只有风机003" 正确判成 reject，
+    结果两句话都被记了一笔"丢数 50 / 丢数 3"——把正确的拒绝报成了丢话。
+    没有 DSL 就没有"丢"这回事，硬对账只会制造一堆看起来很严重的假警报。
     """
     original = _dedupe(_numbers(utterance))
+    if route != "dsl":
+        return {"applicable": False, "route": route, "original": original, "produced": [],
+                "missing": [], "extra": [], "dropped": 0, "invented": 0,
+                "why": f"route={route}，没有 DSL 可对账"}
     produced = _dedupe(_dsl_numbers(dsl))
 
-    missing = [n for n in original if not any(_close(n, p) for p in produced)]
+    # 「上涨20%」落到 DSL 里是 `op:"*", value:1.2`——20 这个数**本来就不该出现**。
+    # 不认这件事，每个百分比改动都会被记一笔"丢数"，而这是最像假警报的那种假警报：
+    # 它天天出现、每次都对，看的人很快就学会无视整列。
+    # 两类"原文的数和 DSL 的数本来就该不同"的情况：
+    #   1. 百分比：上涨20% → `*1.2`，20 不该出现在 DSL 里；
+    #   2. 12 小时制：下午6点 → `18:00`，6 也不该出现。
+    # 不认这两件事，每一条都记一笔"丢数"——而这种假警报每次都对，
+    # 看的人几天就学会无视整列，真丢话也就跟着被无视了。
+    _PM = re.compile(r"(下午|晚上|傍晚|夜里|夜间|中午)\s*(\d{1,2})\s*[点時时]")
+    alternatives: dict[float, tuple[float, ...]] = {}
+    body = utterance or ""
+    for n in original:
+        raw = str(int(n)) if float(n).is_integer() else str(n)
+        alts: list[float] = []
+        if re.search(rf"{re.escape(raw)}\s*[%％]", body):
+            alts += [n / 100.0, 1 + n / 100.0]
+        if any(_close(float(m.group(2)), n) for m in _PM.finditer(body)):
+            alts.append(n + 12 if n < 12 else n)
+        if alts:
+            alternatives[n] = tuple(alts)
+
+    def _kept(n: float) -> bool:
+        if any(_close(n, p) for p in produced):
+            return True
+        alts = alternatives.get(n)
+        return bool(alts) and any(_close(alt, p) for alt in alts for p in produced)
+
+    missing = [n for n in original if not _kept(n)]
     extra = [n for n in produced if not any(_close(n, o) for o in original)]
-    return {"original": original, "produced": produced,
+    return {"applicable": True, "route": route,
+            "original": original, "produced": produced,
             "missing": missing, "extra": extra,
             "dropped": len(missing), "invented": len(extra)}
 
 
 def verify(utterance: str, raw: dict[str, Any],
            ctx: "session.Context | None" = None) -> Report:
-    """跑完 A1~A11，返回报告。raw 是模型原始产物（未归一化）。
+    """跑完 A1~A14，返回报告。raw 是模型原始产物（未归一化）。
 
     `ctx` 是会话基准（今天几号）。不给的话，相对时间一律按"没有基准"判——
     旧行为和旧测试都不变，这是有意的：判据不该偷偷读系统时钟。
@@ -992,6 +1171,8 @@ def verify(utterance: str, raw: dict[str, Any],
             check_route_consistency(product),
             check_direction(utterance, product),
             check_reject_scope(utterance, product),
+            check_quantifier(utterance, product),
+            check_executable(product),
         ],
         segments=pieces,
     )
