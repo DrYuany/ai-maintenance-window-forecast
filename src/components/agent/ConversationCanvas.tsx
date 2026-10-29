@@ -190,12 +190,8 @@ export function ConversationCanvas({
     <main className="agent-canvas" aria-label="Agent 对话">
       <header className="agent-topbar">
         <div>
-          <strong>检修排程 Agent</strong>
-          <span><i />规划数据已锁定 · 东海一号风场</span>
-        </div>
-        <div className="topbar-mode-group">
-          <span className="safe-mode"><ShieldCheck size={13} />审计模式</span>
-          <button type="button">本轮解释 <ChevronDown size={14} /></button>
+          <strong>一修</strong>
+          <span>风机检修排程 Agent</span>
         </div>
       </header>
 
@@ -225,7 +221,7 @@ export function ConversationCanvas({
               </div>
               <div className="message-stack">
                 <div className="message-author">
-                  {message.role === "assistant" ? "检修排程 Agent" : "你"}
+                  {message.role === "assistant" ? "一修" : "你"}
                 </div>
                 <div className="message-content">
                   <MessageBody
@@ -257,7 +253,7 @@ export function ConversationCanvas({
           <article className="thread-message assistant">
             <div className="message-avatar"><Bot size={17} /></div>
             <div className="message-stack">
-              <div className="message-author">检修排程 Agent</div>
+              <div className="message-author">一修</div>
               <div className="message-content">
                 以下方案已保存在本次会话中，但原对话记录没有留下关联标记。
               </div>
