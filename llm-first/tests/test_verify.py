@@ -613,3 +613,30 @@ def test_value_written_in_chinese_is_still_rejected():
         "dsl": {"parameters": [{"field": "每日有效维修上限", "op": "=", "value": "八小时"}]},
     }
     assert "A4" in _codes(verify.verify("每天只能干8小时", product))
+
+
+# ── 15. 数字对账：增减量被算掉了，不算丢数 ────────────────────────────────
+
+def test_relative_delta_is_not_a_dropped_number():
+    """「船少一条」→ 现值 3 减 1 得 2。DSL 里该出现的是 2，1 被算掉了。
+
+    要求这个 1 出现在 DSL 里，等于要求用户把算式写两遍——而它每次都对，
+    属于那种"看的人几天就学会无视整列"的假警报。
+    """
+    numbers = verify.audit_numbers(
+        "船少一条看看", {"parameters": [{"field": "最大作业线", "op": "=", "value": 2}]})
+    assert numbers["missing"] == []
+
+
+def test_chinese_delta_is_recognised_too():
+    """中文写法也一样：「多三个人」里的"三"是增减量，不是漏掉的数。"""
+    numbers = verify.audit_numbers(
+        "多三个人够不够", {"parameters": [{"field": "可调动人员总数", "op": "=", "value": 33}]})
+    assert numbers["missing"] == []
+
+
+def test_absolute_number_is_still_required():
+    """放宽的是"算掉了"，不是"全都别查"。用户直接给的数，DSL 里还是必须有。"""
+    numbers = verify.audit_numbers(
+        "每天只能干8小时", {"parameters": [{"field": "最大作业线", "op": "=", "value": 2}]})
+    assert 8 in numbers["missing"]

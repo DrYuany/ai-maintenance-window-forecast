@@ -1188,6 +1188,22 @@ def _dedupe(values: list[float]) -> list[float]:
     return sorted(kept)
 
 
+# 「少一条」「提前两天」这类**增减量**：它会被算进现值里，DSL 里出现的是
+# 算完之后的结果，增减量本身不出现是对的。中阿两种写法都要认——
+# 原文写"少一条"，图里的数是 1，按字符串找就是找不到。
+_DELTA_RE = re.compile(
+    r"(少|多|减|降|涨|加|增|提前|推[后迟]|推迟|延[期后]|拖后)[了掉]*\s*"
+    r"([零一二两三四五六七八九十]+|\d+(?:\.\d+)?)")
+
+
+def _consumed_by_arithmetic(n: float, body: str) -> bool:
+    for _word, raw in _DELTA_RE.findall(body or ""):
+        value = _cn_digits(raw) if not raw[0].isdigit() else float(raw)
+        if value is not None and _close(value, n):
+            return True
+    return False
+
+
 def audit_numbers(utterance: str, dsl: dict[str, Any], route: str = "dsl") -> dict[str, Any]:
     """数字对账：原文里出现的数，DSL 里有没有；DSL 里的数，原文有没有。
 
@@ -1217,6 +1233,7 @@ def audit_numbers(utterance: str, dsl: dict[str, Any], route: str = "dsl") -> di
     # 看的人几天就学会无视整列，真丢话也就跟着被无视了。
     _PM = re.compile(r"(下午|晚上|傍晚|夜里|夜间|中午)\s*(\d{1,2})\s*[点時时]")
     alternatives: dict[float, tuple[float, ...]] = {}
+    exempt: set[float] = set()
     body = utterance or ""
     for n in original:
         raw = str(int(n)) if float(n).is_integer() else str(n)
@@ -1227,8 +1244,14 @@ def audit_numbers(utterance: str, dsl: dict[str, Any], route: str = "dsl") -> di
             alts.append(n + 12 if n < 12 else n)
         if alts:
             alternatives[n] = tuple(alts)
+        elif _consumed_by_arithmetic(n, body):
+            # 「船少一条」→ 现值 3 减 1 得 2，DSL 里该出现的是 2；
+            # 1 被算掉了，不出现是对的。判它"丢数"等于要求用户把算式写两遍。
+            exempt.add(n)
 
     def _kept(n: float) -> bool:
+        if n in exempt:
+            return True
         if any(_close(n, p) for p in produced):
             return True
         alts = alternatives.get(n)
