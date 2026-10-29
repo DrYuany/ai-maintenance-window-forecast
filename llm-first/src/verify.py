@@ -1216,7 +1216,12 @@ def audit_numbers(utterance: str, dsl: dict[str, Any], route: str = "dsl") -> di
     结果两句话都被记了一笔"丢数 50 / 丢数 3"——把正确的拒绝报成了丢话。
     没有 DSL 就没有"丢"这回事，硬对账只会制造一堆看起来很严重的假警报。
     """
-    original = _dedupe(_numbers(utterance))
+    # 对账只读阿拉伯数字。**和 A4 不一样是有意的**：A4 比的是"这一条 fill 的 span
+    # 和它填的值"，范围窄，中文数字读对了收益很大（"两条作业线"→2）；
+    # 对账拿整句话比整套 DSL，范围宽到连"同一天""一天""一小时"都会被读成数——
+    # 上线当天就冒出三条假警报（Q302/Q309/Q340），而一次真丢话都没多抓到。
+    # 收益撑不住误报，只认阿拉伯数字。
+    original = _dedupe(_numbers(utterance, chinese=False))
     if route != "dsl":
         return {"applicable": False, "route": route, "original": original, "produced": [],
                 "missing": [], "extra": [], "dropped": 0, "invented": 0,

@@ -640,3 +640,21 @@ def test_absolute_number_is_still_required():
     numbers = verify.audit_numbers(
         "每天只能干8小时", {"parameters": [{"field": "最大作业线", "op": "=", "value": 2}]})
     assert 8 in numbers["missing"]
+
+
+# ── 16. 对账只需要阿拉伯数字 ─────────────────────────────────────────────
+
+def test_audit_ignores_words_that_only_look_like_numbers():
+    """「同一天」「一天」「一小时」不是用户给的数。
+
+    A4 读中文数字是必要的（那是"用户说了两条"），但整句对账的范围宽得多：
+    上线当天就冒出三条假警报（Q302/Q309/Q340），一次真丢话都没多抓到。
+    """
+    for text, dsl in (
+        ("一天只能干5小时",
+         {"parameters": [{"field": "每日有效维修上限", "op": "=", "value": 5}]}),
+        ("任务003和任务005不能安排在同一天",
+         {"constraints": [{"type": "co_occur", "mode": "diff_day",
+                           "tasks": ["任务003", "任务005"]}]}),
+    ):
+        assert verify.audit_numbers(text, dsl)["missing"] == []

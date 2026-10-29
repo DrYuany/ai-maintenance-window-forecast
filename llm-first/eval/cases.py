@@ -151,7 +151,9 @@ SUITE: tuple[dict, ...] = (
     {"id": "G03", "tag": "方向", "text": "任务003不能早于11月9日",
      "route": "dsl", "constraints": ["earliest"]},
     {"id": "G04", "tag": "方向", "text": "完工时间不能晚于11月20日",
-     "route": "dsl", "constraints": ["deadline"]},
+     "route_in": {"clarify", "reject"},
+     "note": "整体完工期限没有对应的积木：deadline 只能指着某个任务，量目录里也没有能做日期上界的量。"
+             "（原先标成 dsl+deadline 是错的——那等于要求模型捏造一个 task）"},
 
     # ── H 时间与量级：说错的代价最直接 ─────────────────────────────────────
     {"id": "H01", "tag": "时间", "text": "明天的风浪太大，别出海",
