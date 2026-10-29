@@ -83,6 +83,23 @@ npm install
 npm run dev
 ```
 
+## 给人演示
+
+一条命令起一个带口令的演示站，前后端同源，一个端口就够：
+
+```bash
+npm run build                    # 生成自包含单文件前端（build/index.html）
+python scripts/demo_serve.py     # 自动生成口令，打印邀请链接拼法
+```
+
+要给别人看，另开终端 `cloudflared tunnel --url http://127.0.0.1:8010`，
+把隧道地址接上 `/?k=口令` 就是邀请链接。换下一批人体验之前跑
+`python scripts/demo_reset.py` 恢复出厂数据。
+
+没设 `DEMO_ACCESS_CODE` 时后端行为与平时完全一致，所以 `demo_serve.py`
+也能当普通开发服务器用。完整操作、口令机制、版本标记和常见问题见
+[演示部署手册](docs/2026-10-30-演示部署手册.md)。
+
 ## 评测
 
 - 后端单元测试 **279 项**、前端测试 **29 项**、慢速真求解端到端 **22 项**（`-m slow`）全部通过

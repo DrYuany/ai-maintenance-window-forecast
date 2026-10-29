@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api import agent as agent_api
 from app.api import conversations as conversations_api
@@ -51,6 +54,65 @@ def load_local_env() -> None:
             key = key.strip()
             value = value.strip().strip('"').strip("'")
             os.environ.setdefault(key, value)
+
+
+logger = logging.getLogger(__name__)
+
+DEMO_PASS_COOKIE = "mwa_demo_pass"
+
+
+def _demo_access_code() -> str:
+    return os.environ.get("DEMO_ACCESS_CODE", "").strip()
+
+
+def _attach_demo_guard(app: FastAPI) -> None:
+    """演示模式：一组口令换一张七天有效的通行证。
+
+    没设 DEMO_ACCESS_CODE 时完全不生效，本地开发和自动化测试不受影响。
+    """
+    code = _demo_access_code()
+    if not code:
+        return
+
+    gate = """<!doctype html><meta charset="utf-8">
+<title>需要访问口令</title>
+<body style="font-family:system-ui,-apple-system,'Segoe UI',sans-serif;display:grid;
+place-items:center;height:100vh;margin:0;background:#fafafa;color:#1a1a1a">
+<div style="text-align:center;max-width:420px;padding:0 24px">
+<div style="width:40px;height:40px;border-radius:10px;background:#155fc5;margin:0 auto 20px"></div>
+<h1 style="font-size:18px;font-weight:500;margin:0 0 10px">这是一个受口令保护的演示</h1>
+<p style="font-size:14px;line-height:1.6;color:#666;margin:0">
+请使用收到的邀请链接打开。<br>链接失效时，在网址后加上
+<code style="background:#eee;padding:2px 5px;border-radius:4px">?k=口令</code> 即可。</p>
+</div></body>"""
+
+    @app.middleware("http")
+    async def demo_guard(request: Request, call_next):
+        path = request.url.path
+        if path == "/api/health":
+            return await call_next(request)
+        if request.cookies.get(DEMO_PASS_COOKIE) == code:
+            return await call_next(request)
+        if request.query_params.get("k") == code:
+            response = await call_next(request)
+            response.set_cookie(DEMO_PASS_COOKIE, code, max_age=7 * 24 * 3600,
+                                httponly=True, samesite="lax")
+            return response
+        if path.startswith("/api/"):
+            return JSONResponse({"detail": "演示口令无效，请使用邀请链接打开"}, status_code=403)
+        return HTMLResponse(gate, status_code=403)
+
+
+def _attach_static_site(app: FastAPI) -> None:
+    """演示模式：同源托管前端构建产物，一个端口同时出页面和接口。
+
+    必须挂在所有 API 路由之后，否则 mount("/") 会吞掉未匹配的接口请求。
+    """
+    build_dir = Path(__file__).resolve().parents[2] / "build"
+    if not (build_dir / "index.html").exists():
+        logger.warning("找不到前端构建产物 %s，本次只提供 API", build_dir)
+        return
+    app.mount("/", StaticFiles(directory=str(build_dir), html=True), name="site")
 
 
 def create_app() -> FastAPI:
@@ -107,6 +169,13 @@ def create_app() -> FastAPI:
     app.include_router(agent_api.router)
     app.include_router(dashboard_api.router)
     app.include_router(versions_api.router)
+
+    @app.get("/api/health")
+    def health() -> dict[str, object]:
+        return {"ok": True, "demo": bool(_demo_access_code())}
+
+    _attach_demo_guard(app)
+    _attach_static_site(app)
     return app
 
 

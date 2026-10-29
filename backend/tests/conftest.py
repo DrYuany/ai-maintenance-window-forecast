@@ -30,3 +30,5 @@ def clear_env() -> None:
     os.environ.pop("MINIMAX_API_KEY", None)
     os.environ.pop("MINIMAX_MODEL", None)
     os.environ.pop("MINIMAX_BASE_URL", None)
+    # 演示口令会让所有接口多一道拦截，测试里必须关掉，否则全部 403。
+    os.environ.pop("DEMO_ACCESS_CODE", None)

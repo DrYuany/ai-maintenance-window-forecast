@@ -53,6 +53,10 @@
     build: {
       target: 'esnext',
       outDir: 'build',
+      // 不清空输出目录：vite 默认会批量删除 build/assets 里的字体文件，
+      // 在带删除守卫的环境里会被拦下导致构建失败。改为覆盖写，
+      // 旧 hash 的资源留在目录里不影响使用（产物是自包含单文件）。
+      emptyOutDir: false,
     },
     server: {
       port: 3000,
