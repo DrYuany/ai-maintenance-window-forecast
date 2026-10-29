@@ -10,6 +10,12 @@ from anthropic import Anthropic
 
 from app.core import objective_catalog
 from app.core.agent_tools import AgentToolbox
+from app.core.conversation_memory import (
+    RECENT_MESSAGES,
+    SUMMARY_MAX_CHARS,
+    ConversationMemory,
+    render_memory_context,
+)
 from app.schemas.agent import Message, WorkingMemory, WindowVersion
 
 
@@ -79,6 +85,7 @@ class ConversationAgent:
         memory: WorkingMemory,
         toolbox: AgentToolbox,
         selected_version: WindowVersion | None,
+        snapshot: ConversationMemory | None = None,
         on_token: Callable[[str], None] | None = None,
         on_status: Callable[[str], None] | None = None,
     ) -> str:
@@ -96,7 +103,7 @@ class ConversationAgent:
         )
         client.auth_token = None
         messages = self._build_messages(message, history)
-        system = self._system_prompt(memory, toolbox, selected_version)
+        system = self._system_prompt(memory, toolbox, selected_version, snapshot)
         tools = toolbox.tool_specs()
         collected: list[str] = []
         tool_used = False
@@ -183,6 +190,43 @@ class ConversationAgent:
             return text
         raise ConversationAgentError("工具调用轮次已用完，仍未得到回答")
 
+    def summarize(self, messages: list[Message]) -> str | None:
+        """用 LLM 把旧消息压缩成自由文本摘要；未启用/失败返回 None，绝不抛。"""
+        if not self.enabled or len(messages) <= RECENT_MESSAGES:
+            return None
+        old = messages[:-RECENT_MESSAGES]
+        text = "\n".join(f"{item.role}: {item.content[:200]}" for item in old)
+        try:
+            client = Anthropic(
+                api_key=self.api_key,
+                auth_token="",
+                base_url=self.base_url,
+                timeout=30.0,
+            )
+            client.auth_token = None
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=400,
+                temperature=0.0,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            "用 2-3 句话总结这段对话里已确认的约束、已否决的方案、待办和关键结论；"
+                            "不要编造数字，不确定就不写：\n" + text
+                        ),
+                    }
+                ],
+            )
+            content = "".join(
+                block.text
+                for block in response.content
+                if getattr(block, "type", "") == "text"
+            ).strip()
+            return content[:SUMMARY_MAX_CHARS] or None
+        except Exception:  # pragma: no cover - LLM 摘要失败不阻断
+            return None
+
     @staticmethod
     def _build_messages(message: str, history: list[Message]) -> list[dict[str, Any]]:
         recent = history[-8:]
@@ -201,6 +245,7 @@ class ConversationAgent:
         memory: WorkingMemory,
         toolbox: AgentToolbox,
         selected_version: WindowVersion | None,
+        snapshot: ConversationMemory | None = None,
     ) -> str:
         plans = []
         for index, item in enumerate(toolbox.ordered, start=1):
@@ -221,6 +266,7 @@ class ConversationAgent:
             catalog_block = objective_catalog.catalog_markdown()
         except Exception:  # pragma: no cover - 目录缺失时降级，不阻断对话
             catalog_block = "（目标模板目录暂不可读）"
+        memory_block = render_memory_context(snapshot) if snapshot else ""
         return f"""你是海上风电检修排程产品的对话 Agent。你正在和生产环境中的检修计划员对话。
 
 当前时间：{datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M")}（Asia/Shanghai）
@@ -229,6 +275,9 @@ class ConversationAgent:
 
 本会话方案：
 {plan_block}
+
+本会话背景记忆（只读背景，具体数字仍以工具为准）：
+{memory_block}
 
 可配置的目标（能力目录，唯一来源是目标模板文件）：
 {catalog_block}

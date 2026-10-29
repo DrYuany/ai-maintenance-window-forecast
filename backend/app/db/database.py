@@ -164,6 +164,14 @@ class Database:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_decision_memories_conversation ON decision_memories(conversation_id)"
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversation_memory (
+                    conversation_id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL
+                )
+                """
+            )
 
     def fetch_all(self, query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
         with self.connection() as connection:
