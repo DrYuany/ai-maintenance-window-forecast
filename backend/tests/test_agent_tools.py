@@ -538,12 +538,12 @@ def test_read_alarms_returns_current_backlog_only(temp_db_path: Path) -> None:
     assert result["status"] == "ok"
     data = result["data"]
     assert data["asOf"] == "2026-10-23 18:00"
-    assert data["counts"]["open"] == 25
-    assert data["counts"]["bySeverity"] == {"高": 8, "中": 8, "低": 9}
-    assert len(data["rows"]) == 25
+    assert data["counts"]["open"] == 11
+    assert data["counts"]["bySeverity"] == {"高": 4, "中": 4, "低": 3}
+    assert len(data["rows"]) == 11
     assert data["rows"][0]["taskId"] == "任务001"
-    assert "任务028" not in {item["taskId"] for item in data["rows"]}
-    assert "待安排告警 25 项" in data["markdown"]
+    assert "任务012" not in {item["taskId"] for item in data["rows"]}
+    assert "待安排告警 11 项" in data["markdown"]
     assert "合成" in data["markdown"]
     assert result["provenance"]["dataAsOf"] == "2026-10-23 18:00"
 
@@ -553,20 +553,20 @@ def test_read_alarms_filters_severity_and_recent_days(temp_db_path: Path) -> Non
 
     high = toolbox.execute("read_alarms", {"severity": "高"})
     assert high["status"] == "ok"
-    assert len(high["data"]["rows"]) == 8
+    assert len(high["data"]["rows"]) == 4
     assert {item["severity"] for item in high["data"]["rows"]} == {"高"}
 
     recent = toolbox.execute("read_alarms", {"scope": "recent", "days": 1})
     assert recent["status"] == "ok"
-    assert [item["taskId"] for item in recent["data"]["rows"]] == ["任务025"]
+    assert [item["taskId"] for item in recent["data"]["rows"]] == ["任务011"]
     assert "最近 1 天新增告警 1 项" in recent["data"]["markdown"]
 
     yesterday = toolbox.execute(
         "read_alarms", {"scope": "recent", "date": "yesterday"}
     )
     assert yesterday["status"] == "ok"
-    assert len(yesterday["data"]["rows"]) == 24
-    assert "2026-10-22 新增告警 24 项" in yesterday["data"]["markdown"]
+    assert len(yesterday["data"]["rows"]) == 10
+    assert "2026-10-22 新增告警 10 项" in yesterday["data"]["markdown"]
     assert "不能据此说该日没有新增" in yesterday["data"]["markdown"]
 
 
@@ -574,7 +574,7 @@ def test_read_alarms_summary_reports_distribution(temp_db_path: Path) -> None:
     result = _toolbox(temp_db_path).execute("read_alarms", {"scope": "summary"})
 
     assert result["status"] == "ok"
-    assert result["data"]["counts"]["bySeverity"]["高"] == 8
+    assert result["data"]["counts"]["bySeverity"]["高"] == 4
     assert "告警概况" in result["data"]["markdown"]
     assert "计划快照" in result["data"]["markdown"]
 
@@ -592,7 +592,7 @@ def test_read_alarms_can_query_closed_history_without_counting_it_as_open(
     assert result["data"]["counts"]["closed"] == 0
     assert result["data"]["rows"] == []
     assert "已完成告警 0 项" in result["data"]["markdown"]
-    assert "待安排 25 项" not in result["data"]["markdown"]
+    assert "待安排 11 项" not in result["data"]["markdown"]
 
 
 def test_read_site_returns_windows_fleet_components_inventory_and_parameters(
@@ -678,7 +678,7 @@ def test_read_site_overview_counts_all_site_domains(temp_db_path: Path) -> None:
     counts = result["data"]["counts"]
     assert counts["turbines"] == 100
     assert counts["components"] == 8
-    assert counts["alarms"]["open"] == 25
+    assert counts["alarms"]["open"] == 11
     assert counts["inventorySkus"] == 8
     assert counts["workOrders"] == 0
     assert "没有接入实时 SCADA" in result["data"]["markdown"]

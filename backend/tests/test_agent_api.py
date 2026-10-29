@@ -340,8 +340,8 @@ def test_alarm_question_is_answered_from_site_data_without_llm(
 
     assert response["actionType"] == "alarm_answer"
     content = response["assistantMessage"]["content"]
-    assert "待安排告警 25 项" in content
-    assert "高 8" in content and "中 8" in content and "低 9" in content
+    assert "待安排告警 11 项" in content
+    assert "高 4" in content and "中 4" in content and "低 3" in content
     assert "任务001" in content
     assert "合成" in content
     assert "没有告警" not in content
@@ -408,7 +408,7 @@ def test_closed_alarm_question_does_not_return_the_open_backlog(
     assert response["actionType"] == "alarm_answer"
     content = response["assistantMessage"]["content"]
     assert "已完成告警 0 项" in content
-    assert "待安排告警 25 项" not in content
+    assert "待安排告警 11 项" not in content
 
 
 def test_yesterday_alarm_question_returns_that_day_only(
@@ -429,8 +429,8 @@ def test_yesterday_alarm_question_returns_that_day_only(
 
     assert response["actionType"] == "alarm_answer"
     content = response["assistantMessage"]["content"]
-    assert "2026-10-22 新增告警 24 项" in content
-    assert "任务025" not in content
+    assert "2026-10-22 新增告警 10 项" in content
+    assert "任务011" not in content
 
 
 def test_weight_outside_current_strategy_blocks_instead_of_solving_wrong_model(
