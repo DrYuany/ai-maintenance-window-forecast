@@ -1548,6 +1548,11 @@ class AgentRuntime:
             return None
         return self.jobs.latest_for_conversation(conversation_id)
 
+    def list_jobs(self, conversation_id: str):
+        if not self.jobs:
+            return []
+        return self.jobs.list_by_conversation(conversation_id)
+
     def control_job(self, job_id: str, action: str):
         if not self.jobs:
             raise ValueError("Solve jobs are not configured")

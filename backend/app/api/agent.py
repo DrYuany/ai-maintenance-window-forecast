@@ -107,6 +107,14 @@ def get_latest_solve_job(conversation_id: str, runtime: AgentRuntime = Depends(g
     return _with_batch_progress(runtime, job, SolveJobPayload(**job.model_dump())) if job else None
 
 
+@router.get("/conversations/{conversation_id}/jobs", response_model=list[SolveJobPayload])
+def list_solve_jobs(conversation_id: str, runtime: AgentRuntime = Depends(get_runtime)) -> list[SolveJobPayload]:
+    return [
+        _with_batch_progress(runtime, job, SolveJobPayload(**job.model_dump()))
+        for job in runtime.list_jobs(conversation_id)
+    ]
+
+
 @router.post("/jobs/{job_id}/actions", response_model=SolveJobPayload)
 def control_solve_job(
     job_id: str,
