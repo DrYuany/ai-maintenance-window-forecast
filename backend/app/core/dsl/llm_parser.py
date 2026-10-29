@@ -40,6 +40,16 @@ def _task_ref(value: str) -> str:
     return f"任务{int(plain):03d}"
 
 
+def _all_task_refs(text: str) -> list[str]:
+    """按出现顺序提取全部任务引用（去重）。"""
+    seen: list[str] = []
+    for raw in re.findall(_TASK, text):
+        ref = _task_ref(raw)
+        if ref not in seen:
+            seen.append(ref)
+    return seen
+
+
 def _month_day(year: str | None, month: str, day: str) -> str:
     return f"2026-{int(month):02d}-{int(day):02d}T08:00:00+08:00"
 
@@ -219,15 +229,47 @@ RULE_PATTERNS: list[tuple[str, str]] = [
 
 
 def parse_by_rules(message: str) -> dict[str, Any] | None:
-    """规则层：正则命中且不是问句则直出 DSL；未命中返回 None。"""
+    """规则层：单约束快速通道。
+
+    收集全部匹配：
+      - 只产出一个不同 DSL → 直接返回（高频、确定、零成本）
+      - 产出多个不同约束 → 视为复合句，返回 None 交给 LLM
+        （旧实现只取第一个匹配，会静默丢掉后面的约束）
+    """
     text = message.strip()
     if _QUESTION_HINTS.search(text):
         return None
+    results: list[tuple[int, int, dict[str, Any]]] = []
     for pattern, kind in RULE_PATTERNS:
         match = re.search(pattern, text)
         if not match:
             continue
-        groups = list(match.groups())
+        dsl = _rule_dsl(kind, list(match.groups()), text)
+        if dsl:
+            start, end = match.span()
+            results.append((start, end, dsl))
+    if not results:
+        return None
+    # 跨度包含剔除：「不允许跨天暂停」里同时命中「允许跨天暂停」（否定式包含肯定子串）
+    kept = [
+        item for item in results
+        if not any(
+            other[0] <= item[0] and item[1] <= other[1] and (other[1] - other[0]) > (item[1] - item[0])
+            for other in results
+        )
+    ]
+    unique: list[dict[str, Any]] = []
+    for *_span, dsl in kept:
+        if dsl not in unique:
+            unique.append(dsl)
+    if not unique:
+        return None
+    return unique[0] if len(unique) == 1 else None
+
+
+def _rule_dsl(kind: str, groups: list[str], text: str) -> dict[str, Any] | None:
+    """单个规则命中 → DSL 片段。"""
+    if True:
         if kind.startswith("param_"):
             return _parameter_dsl(kind, groups)
         if kind.startswith("data_"):
@@ -283,8 +325,14 @@ def parse_by_rules(message: str) -> dict[str, Any] | None:
                 "time": _month_day(year, month, day),
             }]}
         if kind == "must":
+            tasks = _all_task_refs(text)
+            if len(tasks) > 1:
+                return {"constraints": [{"type": "must", "task": task} for task in tasks]}
             return {"constraints": [{"type": "must", "task": _task_ref(groups[0])}]}
         if kind == "exclude":
+            tasks = _all_task_refs(text)
+            if len(tasks) > 1:
+                return {"constraints": [{"type": "exclude", "task": task} for task in tasks]}
             return {"constraints": [{"type": "exclude", "task": _task_ref(groups[0])}]}
         if kind == "fix":
             return {"constraints": [{
@@ -356,7 +404,7 @@ _ILLEGAL_RE = re.compile(
     r"平方|相乘|除以|绝对值|非线性|方差|标准差"
     r"|碳排放|碳足迹|颜色|外观|声音|噪音|振动|温度"
     r"|天气.{0,4}(?:改|变好|变差|调)"
-    r"|最大化.{0,12}距离|最小化.{0,12}距离"
+    r"|最大化.{0,12}距离|最小化.{0,12}距离|距离(?:最大|最小)"
     r"|删掉|删除|报废|卖掉"
 )
 
@@ -371,6 +419,10 @@ NON_CHANGE_PATTERNS: list[tuple[str, str]] = [
     (r"^(你好|您好|嗨|哈喽|hello|hi|在吗|在不在|谢谢|多谢|再见|拜拜)[!！。.～~ ]*$", "chitchat"),
     (r"你(?:叫什么|是谁|是啥|会什么|能干什么|能做什么)", "chitchat"),
     (r"(?:写首诗|讲个笑话|聊聊天|中午吃什么|今天天气|点外卖)", "chitchat"),
+    # 对话修复 / 元问题：用户在对"上一轮回答"表达不满或追问，不是排程修改
+    (r"没听懂|没听明白|没理解|不理解|你没看懂|说错了|答非所问|答偏了"
+     r"|我是说|我说的是|我问的是|我指的是|不是这个意思|你理解错|误会了"
+     r"|上一个问题|刚才那个问题|上面那个问题|你答的|你的回答", "repair"),
     (r"为什么|为啥|为何|怎么理解|如何理解|是什么|有哪些|能(?:不能|否)介绍|介绍一下|讲讲|解释一下|什么原理|什么算法|怎么建", "explain"),
     (r"对比|比较|差在哪|差多少|区别|哪个更|哪版更", "compare"),
     (r"多少|哪些|怎么样|如何|有没有|够不够|什么时候|哪天|还剩|当前|现在|最近", "query"),
@@ -525,8 +577,15 @@ def parse_with_llm(
     message: str,
     templates: list[dict[str, Any]],
     client=None,
+    system_prompt: str | None = None,
+    context_block: str | None = None,
 ) -> ParseResult:
-    """LLM 层：带 few-shot 的生成 + 校验。client 可注入（测试 mock）。"""
+    """LLM 层：带 few-shot 的生成 + 校验。client 可注入（测试 mock）。
+
+    system_prompt 缺省时用旧的手写 _PARSE_SYSTEM（对照基线）；
+    正常调用由 parse() 传入注册表自动生成的槽位说明书。
+    context_block 是每轮动态上下文（当前方案/待确认变更/快照清单）。
+    """
     config = _llm_config()
     if client is None and config is None:
         raise ParseUnavailable("未配置 MINIMAX_API_KEY，LLM 解析不可用")
@@ -552,14 +611,15 @@ def parse_with_llm(
         for entry in templates
     )
     user = (
-        f"以下是已通过校验和求解验证的相似例子：\n\n{examples}\n\n"
-        f"现在把这句话翻译成 DSL JSON：{message}"
+        (f"{context_block}\n\n" if context_block else "")
+        + f"以下是已通过校验和求解验证的相似例子：\n\n{examples}\n\n"
+        + f"现在把这句话翻译成 DSL JSON：{message}"
     )
     response = client.messages.create(
         model=model_name,
         max_tokens=1000,
         temperature=0.0,
-        system=_PARSE_SYSTEM,
+        system=system_prompt or _PARSE_SYSTEM,
         messages=[{"role": "user", "content": user}],
     )
     content = "".join(
@@ -599,6 +659,7 @@ def parse_with_llm(
     if not isinstance(dsl, dict):
         return ParseResult(dsl=None, source="llm", route="clarify", confidence=0.5,
                            source_scores={"llm": confidence})
+    dsl = _normalize_dsl(dsl)
     errors = validate_dsl(dsl)
     if errors:
         # 产物过不了校验 → 不静默也不抛异常，路由为"澄清"（低置信），
@@ -620,6 +681,24 @@ def parse_with_llm(
 
 
 _LEGACY_COMPILER = None
+
+
+def _normalize_dsl(dsl: dict[str, Any]) -> dict[str, Any]:
+    """LLM 产物确定性归一化（只补省字段，不猜语义）。
+
+    - parameters 缺 op → 默认 "="（绝对值）；带"涨/降 N%"语义的由提示词要求写 "*"。
+    - constraints/objectives/parameters/data 里的 None 值字段剔除。
+    """
+    out = dict(dsl)
+    params = []
+    for spec in out.get("parameters") or []:
+        if isinstance(spec, dict):
+            spec = {k: v for k, v in spec.items() if v is not None}
+            spec.setdefault("op", "=")
+        params.append(spec)
+    if params:
+        out["parameters"] = params
+    return out
 
 
 def _legacy_compiler():
@@ -654,12 +733,87 @@ def parse(
     library: list[dict] | None = None,
     client=None,
     on_stage: Callable[[str, str, str, str | None], None] | None = None,
+    system_prompt: str | None = None,
+    context_block: str | None = None,
 ) -> ParseResult:
-    """三层解析入口：批量 → 规则 → 旧规划语言桥接 → 意图门控 → 向量 → LLM。
+    """解析入口：先尝试复合句拆分合并，失败再走单句主链。"""
+    parts = _split_compounds(message)
+    if parts:
+        results: list[ParseResult] = []
+        for part in parts:
+            try:
+                results.append(
+                    _parse_core(
+                        part, library=library, client=client,
+                        system_prompt=system_prompt, context_block=context_block,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - 某一段解析失败 → 退回整句主链
+                results = []
+                break
+        if results and all(result.route == "dsl" and result.dsl for result in results):
+            merged = _merge_dsls([result.dsl for result in results])
+            if merged:
+                if on_stage:
+                    on_stage(
+                        "parse.compound",
+                        f"复合句拆成 {len(parts)} 条并合并",
+                        "done",
+                        " ／ ".join(parts)[:90],
+                    )
+                    on_stage("route", "判断意图路由", "done", "dsl")
+                return ParseResult(
+                    dsl=merged,
+                    source="compound",
+                    route="dsl",
+                    confidence=min(result.confidence for result in results),
+                    source_scores={"compound": 1.0},
+                )
+    return _parse_core(
+        message, library=library, client=client, on_stage=on_stage,
+        system_prompt=system_prompt, context_block=context_block,
+    )
+
+
+_SPLIT_RE = re.compile(r"[，,；;。\s]+")
+
+
+def _split_compounds(message: str) -> list[str]:
+    """按逗号/分号/句号切分；问句不拆。"""
+    if _QUESTION_HINTS.search(message):
+        return []
+    parts = [part.strip() for part in _SPLIT_RE.split(message) if len(part.strip()) >= 2]
+    return parts if len(parts) >= 2 else []
+
+
+def _merge_dsls(dsls: list[dict[str, Any]]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for dsl in dsls:
+        for key in ("constraints", "objectives", "parameters", "data"):
+            for item in dsl.get(key) or []:
+                bucket = merged.setdefault(key, [])
+                if item not in bucket:
+                    bucket.append(item)
+        if dsl.get("solver"):
+            merged["solver"] = dsl["solver"]
+    return merged
+
+
+def _parse_core(
+    message: str,
+    library: list[dict] | None = None,
+    client=None,
+    on_stage: Callable[[str, str, str, str | None], None] | None = None,
+    system_prompt: str | None = None,
+    context_block: str | None = None,
+) -> ParseResult:
+    """三层主链：批量 → 规则 → 旧规划语言桥接 → 意图门控 → 向量 → LLM。
 
     路由结果：dsl / batch / data_patch / parameter / strategy / reject / not_change / clarify。
 
     on_stage(id, label, status, detail) 在每层切换处回调（过程可视化 / 评测埋点）。
+    system_prompt 缺省时由注册表自动生成（registry/schema_prompt.py）；
+    传 None 不会退回手写提示词——只有显式传 "legacy" 才用旧的 _PARSE_SYSTEM。
     """
     def stage(stage_id: str, label: str, status: str = "running", detail: str | None = None) -> None:
         if on_stage:
@@ -689,10 +843,14 @@ def parse(
         return ParseResult(dsl=bridged, source="rule", route="dsl", confidence=1.0,
                            source_scores={"rule": 1.0}, latency_ms=_elapsed(t0))
     classified = _classify_non_change(message)
-    if classified is not None:
+    if classified in {"not_change", "reject", "clarify"}:
+        # 只有确定性能判死的路由才由门控直出。
         stage("route", "判断意图路由", "done", classified)
         return ParseResult(dsl=None, source="rule", route=classified, confidence=0.9,
                            source_scores={"rule": 0.9}, latency_ms=_elapsed(t0))
+    # parameter / strategy / data_patch 是旧规划器的职责，但走到这里说明
+    # parse_by_legacy 已经解析不了（否则上面就返回了）。继续截走只会让系统
+    # 退化成自由聊天；交给注册表驱动的 LLM 填槽才是正确行为。
     library = library if library is not None else load_library()
 
     # LLM 结果缓存：重复/接近重复的话术即时返回（EchoMind 的 LRU 缓存思路）。
@@ -723,7 +881,15 @@ def parse(
         return result
 
     stage("parse.llm", "调用大模型解析", "running")
-    result = parse_with_llm(message, templates, client=client)
+    if system_prompt is None:
+        # 注册表 → 槽位说明书（L0 目录 + L1 检索详解 + 原语/数据/实体 + 输出契约）
+        from .registry import schema_prompt as schema_sp
+
+        system_prompt = schema_sp.build_system_prompt(message)
+    result = parse_with_llm(
+        message, templates, client=client,
+        system_prompt=system_prompt, context_block=context_block,
+    )
     result.source_scores["vector"] = top_sim
     result.latency_ms = _elapsed(t0)
     stage("parse.llm", "调用大模型解析", "done",

@@ -269,9 +269,11 @@ class _WrapperClient:
 
     def __init__(self, payload: dict) -> None:
         self._payload = payload
+        self.last_request = None
         self.messages = self
 
     def create(self, **kwargs):
+        self.last_request = kwargs
         return _WrapperMessages(self._payload)
 
 
@@ -334,3 +336,80 @@ def test_llm_result_is_cached(monkeypatch) -> None:
     assert first.route == second.route == "dsl"
     assert len(calls) == 1  # 第二次走缓存，不再调 LLM
     llm_parser._PARSE_CACHE.clear()
+
+
+# ── 复合句 / 上下文注入（重构第 4、5 步）────────────────────────────────────
+
+def test_compound_sentence_is_handed_to_llm() -> None:
+    """规则层只做单约束快速通道；多约束句子不再静默丢后面的约束。"""
+    assert parse_by_rules("任务001和任务002不能同一天，另外船租涨20%") is None
+    assert parse_by_rules(
+        "任务005最早11月6日开工，任务006最晚11月20日前修完"
+    ) is None
+
+
+def test_negation_does_not_trigger_positive_substring_rule() -> None:
+    """「不允许跨天暂停」不应被「允许跨天暂停」的子串规则抢走。"""
+    dsl = parse_by_rules("不允许跨天暂停")
+    assert dsl == {"parameters": [{"field": "允许跨天暂停", "op": "=", "value": "否"}]}
+
+
+def test_single_constraint_still_handled_by_rules() -> None:
+    dsl = parse_by_rules("任务001和任务002不能在同一天出海维修")
+    assert dsl is not None
+    assert "constraints" in dsl
+
+
+def test_context_block_is_prepended_to_llm_prompt() -> None:
+    client = _WrapperClient({"route": "dsl", "confidence": 0.9,
+                             "dsl": {"constraints": [{"type": "must", "task": "任务001"}]}})
+    result = parse_with_llm(
+        "随便一句", [], client=client,
+        context_block="## 当前数据\n- 任务：任务001~任务011（共11个）",
+    )
+    assert result.route == "dsl"
+    assert "任务001~任务011" in client.last_request["messages"][0]["content"]
+
+
+# ── 对话修复 / 元问题（2026-10-29：不能被 DSL 澄清劫持）────────────────────
+
+def test_repair_utterance_routes_to_not_change() -> None:
+    for text in ["你没听懂我说的意思？", "我是说两版本的区别", "答非所问了吧"]:
+        result = parse(text, library=[])
+        assert result.route == "not_change", f"{text} -> {result.route}"
+
+
+# ── 复合句拆分合并（2026-10-29）─────────────────────────────────────────────
+
+def test_compound_splits_and_merges_two_constraints() -> None:
+    result = parse("任务005最早11月6日开工，任务006最晚11月20日前修完", library=[])
+    assert result.route == "dsl" and result.source == "compound"
+    types = {c["type"] for c in result.dsl["constraints"]}
+    assert types == {"earliest", "deadline"}
+
+
+def test_compound_merges_parameter_and_constraint() -> None:
+    result = parse("任务001和任务002不能同一天，另外船租涨20%", library=[])
+    assert result.route == "dsl"
+    assert result.dsl["constraints"][0]["type"] == "co_occur"
+    assert result.dsl["parameters"][0]["field"] == "船舶日租金"
+
+
+def test_compound_dedupes_identical_items() -> None:
+    result = parse("任务001最早11月5日开工，任务001最早11月5日开工", library=[])
+    assert result.route == "dsl"
+    assert len(result.dsl["constraints"]) == 1
+
+
+def test_question_is_not_split() -> None:
+    assert parse("任务001最早什么时候开工，任务002呢？", library=[]).route != "compound"
+
+
+def test_multi_task_must_expands_to_each_task() -> None:
+    dsl = parse_by_rules("任务001和任务003必须修")
+    assert [c["task"] for c in dsl["constraints"]] == ["任务001", "任务003"]
+
+
+def test_multi_task_exclude_expands_to_each_task() -> None:
+    dsl = parse_by_rules("别排任务001和任务002")
+    assert [c["task"] for c in dsl["constraints"]] == ["任务001", "任务002"]

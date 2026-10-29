@@ -146,6 +146,8 @@ class AgentToolbox:
                     "传 1 个给单方案事实；传 2 个及以上给同一张指标矩阵、相对基准的差值、"
                     "任务存在性变化和可比性限制，供你解读，不替你下结论。"
                     "include 按需追加：tasks、unscheduled、model、costs、parameters、constraints、status。"
+                    "多版同时读 model 时返回每版的结构化投影，并额外给出 modelDiffs"
+                    "（模型指纹、目标层级、约束分组差异），差异已算好，你只负责解读。"
                 ),
                 "input_schema": {
                     "type": "object",
@@ -928,6 +930,99 @@ class AgentToolbox:
             data["unresolved"] = unresolved
         return result
 
+    def _model_projection(self, version: WindowVersion) -> dict[str, Any]:
+        """单版模型的结构化投影（目标层级 / 约束分组 / 变量规模），用于 N 版对照。"""
+        artifact = self.model_artifacts.get(version.id) if self.model_artifacts else None
+        if not artifact:
+            return {
+                "available": False,
+                "modelFingerprint": getattr(version, "modelFingerprint", None),
+            }
+        stages = _list(_dict(artifact.get("objectives")).get("stages"))
+        groups = _list(_dict(artifact.get("constraints")).get("groups"))
+        variables = _dict(artifact.get("variables"))
+        return {
+            "available": True,
+            "modelFingerprint": getattr(version, "modelFingerprint", None),
+            "objective": [
+                {
+                    "priority": item.get("priority"),
+                    "name": item.get("name"),
+                    "sense": item.get("sense"),
+                    "terms": item.get("expressionTermCount"),
+                }
+                for item in stages[:10]
+            ],
+            "constraints": [
+                {
+                    "kind": item.get("kind") or item.get("id"),
+                    "count": item.get("count"),
+                    "meaning": item.get("meaning"),
+                }
+                for item in groups[:12]
+            ],
+            "variables": {
+                "total": variables.get("total"),
+                "groupCount": len(_list(variables.get("groups"))),
+            },
+        }
+
+    @staticmethod
+    def _model_diffs(projections: list[dict[str, Any]], baseline_index: int) -> list[dict[str, Any]]:
+        """模型层差异：目标层级、约束分组、模型指纹。差异在工具侧算好，模型只解读。"""
+        if len(projections) < 2:
+            return []
+        diffs: list[dict[str, Any]] = []
+
+        fingerprints = [item.get("modelFingerprint") for item in projections]
+        if len({fp for fp in fingerprints if fp}) > 1:
+            diffs.append({
+                "dimension": "model.fingerprint",
+                "key": "modelFingerprint",
+                "baselineValue": fingerprints[baseline_index],
+                "values": fingerprints,
+                "changed": True,
+            })
+
+        max_stages = max((len(item.get("objective") or []) for item in projections), default=0)
+        for index in range(max_stages):
+            values = []
+            for item in projections:
+                stages = item.get("objective") or []
+                stage = stages[index] if index < len(stages) else None
+                values.append(
+                    None if stage is None else
+                    {"name": stage.get("name"), "sense": stage.get("sense"), "terms": stage.get("terms")}
+                )
+            signatures = {
+                ((value or {}).get("name"), (value or {}).get("sense"), (value or {}).get("terms"))
+                for value in values if value is not None
+            }
+            if len(signatures) > 1:
+                diffs.append({
+                    "dimension": "model.objective",
+                    "key": f"priority{index + 1}",
+                    "baselineValue": values[baseline_index],
+                    "values": values,
+                    "changed": True,
+                })
+
+        kinds = sorted({item.get("kind") for proj in projections for item in (proj.get("constraints") or []) if item.get("kind")})
+        for kind in kinds:
+            counts = []
+            for proj in projections:
+                found = next((c for c in (proj.get("constraints") or []) if c.get("kind") == kind), None)
+                counts.append(found.get("count") if found else 0)
+            if len(set(counts)) > 1:
+                diffs.append({
+                    "dimension": "model.constraints",
+                    "key": kind,
+                    "baselineValue": counts[baseline_index],
+                    "values": counts,
+                    "changed": True,
+                })
+        return diffs
+
     def _read_many(
         self,
         versions: list[WindowVersion],
@@ -938,11 +1033,9 @@ class AgentToolbox:
     ) -> dict[str, Any]:
         facts = [self._facts(version) for version in versions]
         warnings: list[str] = []
-        if "model" in include:
-            warnings.append(
-                "多方案对比不返回完整模型；需要公式时请单独读取一个方案。"
-            )
         for fact, version in zip(facts, versions):
+            if "model" in include:
+                fact["model"] = self._model_projection(version)
             if "tasks" in include:
                 fact["tasks"] = [
                     {
@@ -983,6 +1076,11 @@ class AgentToolbox:
         )
         deltas = self._deltas_vs_baseline(matrix, facts, baseline_index)
         presence = self._task_presence(versions, facts)
+        model_diffs = (
+            self._model_diffs([fact.get("model") or {} for fact in facts], baseline_index)
+            if "model" in include
+            else []
+        )
         if unresolved:
             warnings.append("以下引用没有找到，已忽略：" + "、".join(unresolved))
         return self._envelope(
@@ -1019,6 +1117,7 @@ class AgentToolbox:
                 },
                 "comparability": comparability,
                 "deltasVsBaseline": deltas,
+                "modelDiffs": model_diffs,
                 "taskPresence": presence,
                 "unresolved": unresolved,
             },
@@ -1317,24 +1416,62 @@ class AgentToolbox:
                 version=base,
             )
         current = self._request_from(base)
-        plan = build_change_plan(
-            instruction,
-            current,
-            base.id if base else None,
-            self.planner,
-        )
-        if not plan.operations:
+        base_id = base.id if base else None
+
+        # DSL 优先：约束/目标类修改（互斥、先后、最早、预算、加权目标…）旧规划器表达不了。
+        from app.core.change_planning import plan_dsl_change
+
+        dsl_change = plan_dsl_change(instruction, current, base_id)
+        if dsl_change is not None and not dsl_change.expressible:
+            payload = {
+                "kind": "dsl",
+                "dsl": dsl_change.dsl,
+                "source": dsl_change.source,
+                "baseVersionId": base_id,
+                "sourcePrompt": instruction,
+                "preview": dsl_change.preview,
+            }
+            self.pending_change = payload
+            if self.on_pending_change:
+                self.on_pending_change(payload)
             return self._envelope(
-                "clarify",
-                {"message": plan.preview, "requiresUserConfirmation": False},
+                "needs_confirmation",
+                {
+                    "preview": dsl_change.preview,
+                    "basePlanNumber": self.plan_numbers.get(base.id) if base else None,
+                    "requiresUserConfirmation": True,
+                },
                 version=base,
+                next_actions=["等待用户确认；确认前不得声称已求解或已生成方案。"],
             )
+
+        if dsl_change is not None and dsl_change.operations:
+            from app.core.model_change import _format_preview
+
+            operations = dsl_change.operations
+            request = dsl_change.request
+            preview = _format_preview(operations, base_id)
+            source_prompt = instruction
+        else:
+            plan = build_change_plan(instruction, current, base_id, self.planner)
+            if not plan.operations:
+                return self._envelope(
+                    "clarify",
+                    {"message": plan.preview, "requiresUserConfirmation": False},
+                    version=base,
+                )
+            operations = plan.operations
+            request = plan.request
+            preview = plan.preview
+            source_prompt = plan.source_prompt
+            base_id = plan.base_version_id
+
         payload = {
-            "baseVersionId": plan.base_version_id,
-            "request": plan.request.to_payload(),
-            "operations": plan.operations,
-            "preview": plan.preview,
-            "sourcePrompt": plan.source_prompt,
+            "baseVersionId": base_id,
+            "request": request.to_payload(),
+            "operations": operations,
+            "preview": preview,
+            "sourcePrompt": source_prompt,
         }
         self.pending_change = payload
         if self.on_pending_change:
@@ -1342,8 +1479,8 @@ class AgentToolbox:
         return self._envelope(
             "needs_confirmation",
             {
-                "preview": plan.preview,
-                "operations": plan.operations,
+                "preview": preview,
+                "operations": operations,
                 "basePlanNumber": (
                     self.plan_numbers.get(base.id) if base else None
                 ),
@@ -1929,3 +2066,4 @@ class AgentToolbox:
             "参数取值与来源可在方案详情“数学模型”页核对；本回答不重建系数。",
         ])
         return "\n".join(lines)
+

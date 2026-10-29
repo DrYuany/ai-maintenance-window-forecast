@@ -71,6 +71,46 @@ from app.schemas.dashboard import DashboardResponse
 SHANGHAI_TZ = timezone(timedelta(hours=8))
 SKILL_NAME = "maintenance-milp-modeler"
 
+# 实体快照缓存：load_project 首次约 0.6s，之后内部缓存 0.01s；
+# 这里再缓存一层，避免每次解析都走 import/路径拼接。
+_ENTITY_SNAPSHOT_CACHE: dict[str, Any] = {}
+
+# 修改类信号：只有像"要改排程"的话术才吃 DSL 澄清，
+# 对话修复/元问题（"你没听懂""我是说"）交给对话 agent 处理。
+_MODIFY_HINTS = re.compile(
+    r"改|调|设|换|加|减|增|降|压|缩短|延长|提前|推迟|延后|顺延|不要|别|禁止|必须|只能"
+    r"|最多|至少|不超过|预算|优先|权重|粒度|上限|下限|阈值|放宽|收紧"
+)
+
+
+def _looks_like_modification(text: str) -> bool:
+    return bool(_MODIFY_HINTS.search(text or ""))
+
+
+_VERSION_REF_RE = re.compile(
+    r"这(?:两|2)版|这两个?方案|两版|最新两版|上一版|前一版|这版|这一版|方案\s*0*\d"
+)
+
+
+def _has_version_reference(text: str) -> bool:
+    return bool(_VERSION_REF_RE.search(text or ""))
+
+
+def _entity_snapshot() -> Any:
+    """给 LLM 的极简快照（只有实体清单，不含数值）。失败返回 None。"""
+    if "value" in _ENTITY_SNAPSHOT_CACHE:
+        return _ENTITY_SNAPSHOT_CACHE["value"]
+    snapshot = None
+    try:
+        from app.core.dsl.runner import PROJECT_ROOT, _solver_modules
+
+        load_project = _solver_modules()[0]
+        snapshot = load_project(PROJECT_ROOT, base_id="基座01", as_of=None)
+    except Exception:  # noqa: BLE001 - 快照缺失不阻塞解析
+        snapshot = None
+    _ENTITY_SNAPSHOT_CACHE["value"] = snapshot
+    return snapshot
+
 
 class StreamSink:
     """Small adapter so one runtime can both return JSON and stream SSE."""
@@ -356,7 +396,53 @@ class AgentRuntime:
                 memory=memory,
             )
 
+        # ── Agent-first：语义判断交给模型 ────────────────────────────────
+        # 读类/解释类/纠错类/改排程都由模型自己决定调哪个工具（read_* 或 solve）。
+        # 仍然确定性处理的只有：待确认/取消（上面）、求解命令（上面）、
+        # 版本切换与场景批量（状态与批量流程，下面）。
+        # agent 不可用（无 key / 调用失败）时回落到原来的确定性链路。
+        if (
+            self.conversation_agent.enabled
+            and not (is_version_switch_request(content) and selected_version)
+            and not is_scenario_batch(content)
+        ):
+            try:
+                reply = self._answer_with_conversation_agent(
+                    conversation_id=conversation_id,
+                    content=content,
+                    history=self.messages.list_by_conversation(conversation_id),
+                    memory=memory,
+                    selected_version=selected_version,
+                    sink=sink,
+                )
+                latest = self.memories.get_or_create(conversation_id)
+                pending_now = (latest.activeFilters or {}).get("pendingChange")
+                created_now = (
+                    isinstance(pending_now, dict)
+                    and pending_now.get("sourcePrompt") == content
+                )
+                return self._finalize_response(
+                    conversation_id,
+                    reply,
+                    "change_preview" if created_now else "assistant_reply",
+                    latest.activeView,
+                    [],
+                )
+            except ConversationAgentError:
+                pass  # 落到确定性兜底
+
+        compare_reply = self._compare_versions_reply(conversation_id, content, selected_version)
         model_question = detect_model_question(content)
+
+        if compare_reply is not None:
+            return self._finalize_response(
+                conversation_id,
+                compare_reply,
+                "version_compare",
+                memory.activeView,
+                [],
+            )
+
         if model_question:
             if model_question == "capability":
                 return self._answer_capability_question(
@@ -497,7 +583,10 @@ class AgentRuntime:
                     sink=sink,
                 )
             # DSL 增量（第一期）：约束/自定义目标类修改，走预览→确认→求解。
-            dsl_result = self._try_dsl_parse(content, sink=sink)
+            dsl_result = self._try_dsl_parse(
+                content, sink=sink,
+                context_block=self._dsl_context_block(conversation_id, memory, selected_version),
+            )
             if dsl_result is not None and dsl_result.route == "reject":
                 # 越界诉求：明确拒绝，不再回退旧 conversation_agent（避免二次 LLM）。
                 if sink:
@@ -514,7 +603,7 @@ class AgentRuntime:
                     memory.activeView,
                     [],
                 )
-            if dsl_result is not None and dsl_result.route == "clarify":
+            if dsl_result is not None and dsl_result.route == "clarify" and _looks_like_modification(content):
                 # 低置信/歧义诉求：直接澄清，不再回退旧 conversation_agent（避免二次 LLM）。
                 if sink:
                     sink.stage("route", "判断意图路由", "done", "clarify")
@@ -678,6 +767,7 @@ class AgentRuntime:
         # 第三期：统一解析器优先（旧正则作为其规则层），DSL 表达不了的再回退旧规划器。
         change_plan = self._change_plan_from_dsl(
             content, current, base_version_id, sink=sink,
+            context_block=self._dsl_context_block(conversation_id, memory, selected_version),
         )
         dsl_pending: dict[str, Any] | None = None
         if change_plan is None:
@@ -881,64 +971,20 @@ class AgentRuntime:
             [item for pair in pairs for item in pair],
         )
 
-    _DSL_LABELS = {
-        "co_occur": "互斥（不同天/同时）：{tasks}",
-        "precedence": "先后顺序：{before} → {after}",
-        "earliest": "最早开工：{task} 不早于 {time}",
-        "deadline": "最晚完工：{task} 不晚于 {time}",
-        "fix": "固定作业线：{task} 只上 {line} 号线",
-        "forbidden_dates": "禁止开工日期：{dates}",
-        "must": "必修：{task}",
-        "exclude": "排除：{task}",
-        "cardinality": "完成数 {op} {value}",
-        "budget": "预算：{quantity} {op} {value}",
-    }
+    _DSL_LABELS = None  # 兼容旧引用；渲染已下沉到 change_planning
 
     @classmethod
     def _format_dsl_preview(cls, dsl: dict[str, Any]) -> str:
-        lines = ["已基于当前配置准备自定义约束/目标，尚未求解。", "变更预览："]
-        index = 1
-        for spec in dsl.get("constraints") or []:
-            label = cls._DSL_LABELS.get(spec.get("type"), str(spec))
-            try:
-                text = label.format(**spec)
-            except (KeyError, IndexError):
-                text = json.dumps(spec, ensure_ascii=False)
-            lines.append(f"{index}. {text}")
-            index += 1
-        for spec in dsl.get("objectives") or []:
-            if spec.get("type") == "strategy":
-                mode = spec.get("mode")
-                suffix = f"（{mode}）" if mode else ""
-                lines.append(f"{index}. 优化策略：{spec.get('name')}{suffix}")
-                index += 1
-            elif spec.get("type") == "weighted":
-                weights = "、".join(
-                    f"{name} {value:.2f}" for name, value in (spec.get("weights") or {}).items()
-                )
-                lines.append(f"{index}. 加权目标：{weights}")
-                index += 1
-            elif spec.get("type") == "lexmin":
-                stages = " → ".join(
-                    f"{'最小化' if s.get('dir') == 'minimize' else '最大化'}{s.get('q')}"
-                    for s in spec.get("stages", [])
-                )
-                lines.append(f"{index}. 自定义分层目标：{stages}")
-                index += 1
-            else:
-                lines.append(f"{index}. 自定义目标：{json.dumps(spec, ensure_ascii=False)}")
-                index += 1
-        lines.extend([
-            "这次会生成独立沙盘版本，不覆盖现有方案。",
-            "回复“确认生成沙盘”执行；回复“取消”放弃本次变更。",
-        ])
-        return "\n".join(lines)
+        from app.core.change_planning import format_dsl_preview
 
-    def _try_dsl_parse(self, content: str, sink: StreamSink | None = None):
+        return format_dsl_preview(dsl)
+
+    def _try_dsl_parse(self, content: str, sink: StreamSink | None = None, context_block: str | None = None):
         """DSL 三层解析（增量能力）。解析不了/LLM 不可用返回 None，回退现有路径。
 
         规则层与门控是确定性的，不产生 API 调用；只有真正的新话术才走到 LLM。
         sink 用于把解析各阶段（规则/桥接/检索/LLM）作为 stage 事件推给前端。
+        context_block 是每轮动态上下文（快照清单 + 当前方案 + 待确认变更）。
 
         LLM 失败（超时/网络/坏响应）降级为 clarify，不再回退旧 conversation_agent
         二次调 LLM；只有「未配置 key」（ParseUnavailable）才返回 None 走旧路径。
@@ -953,7 +999,7 @@ class AgentRuntime:
                 sink.stage(stage_id, label, status, detail)
 
         try:
-            return dsl_parse(content, on_stage=on_stage)
+            return dsl_parse(content, on_stage=on_stage, context_block=context_block)
         except ParseUnavailable:
             return None
         except Exception:  # noqa: BLE001 - LLM 调用失败 → 澄清，不二次 LLM
@@ -964,9 +1010,54 @@ class AgentRuntime:
                 source_scores={"llm": 0.0},
             )
 
-    def _change_plan_from_dsl(self, content: str, current, base_version_id, sink: StreamSink | None = None):
+    def _dsl_context_block(self, conversation_id: str, memory, selected_version) -> str:
+        """把「现在是什么状态」拼成上下文：快照清单 + 当前方案 + 待确认变更 + 最近对话。"""
+        try:
+            from app.core.dsl.registry import schema_prompt as sp
+        except Exception:  # pragma: no cover
+            return ""
+
+        blocks = [sp.snapshot_block(_entity_snapshot())]
+        context: dict[str, Any] = {}
+        if selected_version is not None:
+            label = getattr(selected_version, "id", None)
+            try:
+                ordered = chronological_versions(
+                    self.versions.list_by_conversation(conversation_id)
+                )
+                for index, item in enumerate(ordered, start=1):
+                    if item.id == selected_version.id:
+                        label = f"方案{index:02d}（{selected_version.id}）"
+                        break
+            except Exception:  # noqa: BLE001
+                pass
+            context["plan_label"] = label
+        filters = getattr(memory, "activeFilters", None) or {}
+        pending = filters.get("pendingChange") if isinstance(filters, dict) else None
+        if isinstance(pending, dict):
+            context["pending"] = str(pending.get("preview") or pending.get("request") or pending)[:300]
+        try:
+            history = self.messages.list_by_conversation(conversation_id)[-3:]
+            turns, user_text = [], None
+            for item in history:
+                if item.role == "user":
+                    user_text = item.content[:120]
+                elif user_text is not None:
+                    turns.append({"user": user_text, "assistant": item.content[:120]})
+                    user_text = None
+            context["history"] = turns
+        except Exception:  # noqa: BLE001
+            pass
+        ctx_block = sp.context_block(context)
+        if ctx_block:
+            blocks.append(ctx_block)
+        return "\n\n".join(blocks)
+
+    def _change_plan_from_dsl(self, content: str, current, base_version_id,
+                              sink: StreamSink | None = None,
+                              context_block: str | None = None):
         """统一解析器 → 变更计划（第三期）。DSL 表达不了或没有变化时返回 None 走旧路径。"""
-        parsed = self._try_dsl_parse(content, sink=sink)
+        parsed = self._try_dsl_parse(content, sink=sink, context_block=context_block)
         if parsed is None or parsed.route != "dsl" or not parsed.dsl:
             return None
         try:
@@ -1451,17 +1542,92 @@ class AgentRuntime:
             on_status=sink.status if sink else None,
         )
         if toolbox.pending_change:
-            latest = self.memories.get_or_create(conversation_id)
-            filters = dict(latest.activeFilters)
-            filters["pendingChange"] = toolbox.pending_change
-            self.memories.apply_patch(
-                latest,
-                {
-                    "activeFilters": filters,
-                    "activeFocusTag": toolbox.pending_change["request"]["strategy"],
-                },
-            )
+            self._persist_agent_pending(conversation_id, toolbox.pending_change)
         return reply
+
+    def _persist_agent_pending(self, conversation_id: str, pending: dict[str, Any]) -> None:
+        """agent 路径产出的待确认变更落库。
+
+        DSL 待确认（kind=dsl）没有 request 段，旧实现硬取 request["strategy"] 会 500。
+        """
+        latest = self.memories.get_or_create(conversation_id)
+        filters = dict(latest.activeFilters)
+        filters["pendingChange"] = pending
+        patch: dict[str, Any] = {"activeFilters": filters}
+        request_payload = pending.get("request")
+        if isinstance(request_payload, dict) and request_payload.get("strategy"):
+            patch["activeFocusTag"] = request_payload["strategy"]
+        self.memories.apply_patch(latest, patch)
+
+    def _compare_versions_reply(
+        self,
+        conversation_id: str,
+        content: str,
+        selected_version,
+    ) -> str | None:
+        """版本对比：解析"哪两版"，给具体差异而不是通用模型说明。
+
+        支持两种指代：
+          - 显式序号："方案01和方案02的区别"
+          - 相对指代："这两版本/两个方案/最新两版/上一版和这版" → 最近两版
+        """
+        if not any(token in content for token in ("区别", "差异", "对比", "比较", "不同", "差别")):
+            return None
+        try:
+            ordered = chronological_versions(self.versions.list_by_conversation(conversation_id))
+        except Exception:  # noqa: BLE001
+            return None
+        if len(ordered) < 2:
+            if len(ordered) == 1 and _has_version_reference(content):
+                return (
+                    "当前会话只有 1 版方案，没有可比较的两版。\n"
+                    "先再排一版（例如改个约束或策略后生成沙盘），我再按模型层和结果层逐项对比。"
+                )
+            return None
+
+        toolbox = self._build_toolbox(conversation_id, selected_version, None)
+        resolved = []
+        ordinals = re.findall(r"方案\s*0*(\d{1,3})", content)
+        if len(ordinals) >= 2:
+            for ordinal in ordinals[:2]:
+                version = toolbox.resolve_version(f"方案{ordinal}")
+                if version and version.id not in {item.id for item in resolved}:
+                    resolved.append(version)
+        elif _has_version_reference(content):
+            resolved = ordered[-2:]
+        if len(resolved) < 2:
+            return None
+
+        left, right = resolved[0], resolved[1]
+        numbers = {item.id: index for index, item in enumerate(ordered, start=1)}
+        left_label = f"方案{numbers.get(left.id, 0):02d}"
+        right_label = f"方案{numbers.get(right.id, 0):02d}"
+        if not ordinals:
+            left_label = f"{left_label}（{left.id}）"
+            right_label = f"{right_label}（{right.id}）"
+
+        lines = [f"我按最近的两版来比：{left_label} → {right_label}。"]
+        left_fp = getattr(left, "modelFingerprint", None)
+        right_fp = getattr(right, "modelFingerprint", None)
+        if left_fp and right_fp:
+            if left_fp == right_fp:
+                lines.append(
+                    "**模型层**：两版模型指纹相同——决策变量、约束和目标函数结构完全一致，"
+                    "差异来自输入数据或求解结果，不是模型本身。"
+                )
+            else:
+                lines.append(
+                    "**模型层**：两版模型指纹不同——约束、目标或数据假设至少有一项变了，"
+                    "具体差异见下面对照。"
+                )
+        else:
+            lines.append("**模型层**：至少一版缺少完整模型产物，我只能对比结果层事实。")
+
+        try:
+            lines.append(render_compare_summary(toolbox.compare_pair(left, right)))
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"（结果层对比失败：{exc}）")
+        return "\n\n".join(lines)
 
     def _fallback_compare_reply(
         self,

@@ -152,3 +152,14 @@ def test_daily_hours_two_digit_value_is_not_truncated() -> None:
 
     assert compiled.overrides["每天最多维修小时数"] == 10
 
+
+
+def test_same_line_phrase_is_not_parsed_as_work_line_count() -> None:
+    """「同一条线」指同一条作业线，不是「作业线数=1」。"""
+    compiled = PlanningIntentCompiler().compile("同一条线干完一个要歇2小时")
+    assert "最多作业线数" not in compiled.overrides
+
+
+def test_work_line_count_still_recognized() -> None:
+    compiled = PlanningIntentCompiler().compile("最多两条线")
+    assert compiled.overrides["最多作业线数"] == 2

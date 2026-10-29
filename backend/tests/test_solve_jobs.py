@@ -58,3 +58,24 @@ def test_interrupted_running_jobs_are_recovered_as_unknown_failures(temp_db_path
     assert restored.solverStatus == "UNKNOWN"
     assert "服务重启" in restored.error
 
+
+
+def test_running_job_progress_advances_with_elapsed_time(temp_db_path) -> None:
+    """求解期间进度按「已用时长/时限」在 35→80 之间推进，不再长期停在 35。"""
+    repository = SolveJobRepository(Database(temp_db_path))
+    submitted = datetime(2026, 10, 26, 10, 0, tzinfo=timezone.utc)
+    job = repository.create(
+        conversation_id="conv-progress",
+        request_payload={"strategy": "成本最低优先", "seconds": 100},
+        model_fingerprint="model-1",
+        now=submitted,
+    )
+    repository.mark_running(job.id, now=submitted)
+
+    early = repository.get(job.id, now=submitted + timedelta(seconds=5))
+    halfway = repository.get(job.id, now=submitted + timedelta(seconds=50))
+    late = repository.get(job.id, now=submitted + timedelta(seconds=95))
+
+    assert 35 <= early.progressPercent < halfway.progressPercent < late.progressPercent <= 80
+    assert "已运行" in halfway.statusMessage
+    assert halfway.elapsedSeconds == 50

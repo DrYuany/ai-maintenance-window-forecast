@@ -2689,3 +2689,320 @@ button { cursor: pointer; }
     animation: none;
   }
 }
+
+/* ── 窗口时间轴：海事可作业窗口 × 实际排程 ───────────────────────── */
+.wt-shell {
+  position: relative;
+  margin: 0 16px 12px 17px;
+  padding: 13px 14px 11px;
+  border: 1px solid #d9eafa;
+  border-radius: 18px;
+  background:
+    radial-gradient(130% 120% at -10% -20%, #eefaff 0%, #ffffff00 55%),
+    linear-gradient(180deg, #fcfeff 0%, #f5faff 100%);
+  box-shadow: inset 0 1px 0 #fff, 0 8px 22px #1d72e80f;
+}
+
+.wt-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 64px;
+  font-size: 12px;
+  color: #7b8ca3;
+}
+
+.wt-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.wt-head-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wt-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: #5c7d9d;
+}
+
+.wt-head-main strong {
+  font-size: 14px;
+  color: #14293f;
+  letter-spacing: .01em;
+}
+
+.wt-range {
+  font-size: 11.5px;
+  color: #6b8299;
+  font-variant-numeric: tabular-nums;
+}
+
+.wt-head-stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.wt-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.wt-chip.window {
+  background: #e4f8f0;
+  color: #157a5f;
+  box-shadow: inset 0 0 0 1px #c6efdf;
+}
+
+.wt-chip.schedule {
+  background: #e8f3ff;
+  color: #1d63b0;
+  box-shadow: inset 0 0 0 1px #cfe4fb;
+}
+
+.wt-axis,
+.wt-row {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.wt-axis {
+  margin-bottom: 4px;
+}
+
+.wt-axis-track,
+.wt-row-track {
+  position: relative;
+  min-width: 0;
+}
+
+.wt-axis-track {
+  height: 22px;
+}
+
+.wt-axis-day {
+  position: absolute;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
+  padding-left: 5px;
+  border-left: 1px dashed #dbe9f7;
+  transform: translateX(0);
+}
+
+.wt-axis-day b {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #5b7b98;
+  font-variant-numeric: tabular-nums;
+}
+
+.wt-axis-day small {
+  font-size: 9px;
+  color: #9aafc4;
+}
+
+.wt-axis-day.end {
+  transform: translateX(-100%);
+  border-left: none;
+  border-right: 1px dashed #dbe9f7;
+  padding-left: 0;
+  padding-right: 5px;
+  text-align: right;
+}
+
+.wt-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wt-row {
+  min-height: 22px;
+}
+
+.wt-row-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: #6b8299;
+  white-space: nowrap;
+}
+
+.wt-row-label b {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #4d6579;
+}
+
+.wt-row-track {
+  height: 100%;
+  min-height: 22px;
+  border-radius: 12px;
+  background: #f2f8fe;
+  box-shadow: inset 0 0 0 1px #e6f0fa;
+}
+
+.wt-grid-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed #dbe9f7;
+}
+
+.wt-window-bar {
+  position: absolute;
+  inset: 2px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 2px solid #fff;
+  background: linear-gradient(180deg, #cdf3e6 0%, #aae9d5 100%);
+  box-shadow: 0 4px 10px #34b89426, inset 0 1px 0 #ffffffb0;
+  overflow: hidden;
+}
+
+.wt-window-bar span {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #15795e;
+  letter-spacing: .02em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  padding: 0 8px;
+}
+
+.wt-span-bracket {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed #8ec9ee;
+  border-right: 1px dashed #8ec9ee;
+  background: linear-gradient(180deg, #eaf6ff66, #eaf6ff22);
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.wt-task {
+  position: absolute;
+  z-index: 1;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 2px solid #fff;
+  background: linear-gradient(180deg, #c3e4fd, #9ccdf8);
+  box-shadow: 0 3px 8px #1f5e9f1f, inset 0 1px 0 #ffffffa8;
+  overflow: hidden;
+  cursor: default;
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+
+.wt-task:hover {
+  transform: translateY(-1px) scale(1.02);
+  box-shadow: 0 6px 14px #1f5e9f33, inset 0 1px 0 #ffffffc4;
+  z-index: 3;
+}
+
+.wt-task span {
+  font-size: 10px;
+  font-weight: 600;
+  color: #14324c;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wt-task.mint { background: linear-gradient(180deg, #b8f0dc, #8fe3c5); }
+.wt-task.sky { background: linear-gradient(180deg, #c3e4fd, #9ccdf8); }
+.wt-task.lilac { background: linear-gradient(180deg, #ddd8fd, #c3bbf9); }
+.wt-task.peach { background: linear-gradient(180deg, #ffdcc7, #ffc3a3); }
+.wt-task.lemon { background: linear-gradient(180deg, #fdefbc, #f8e08c); }
+.wt-task.rose { background: linear-gradient(180deg, #fdd6e1, #f9b8c9); }
+
+.wt-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px dashed #ddeaf7;
+}
+
+.wt-foot-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: #6b8299;
+  font-variant-numeric: tabular-nums;
+}
+
+.wt-foot-item.strong {
+  color: #365a7c;
+  font-weight: 600;
+}
+
+.wt-legend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 7px;
+  font-size: 10px;
+  color: #93a7ba;
+}
+
+.wt-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.wt-legend .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.wt-legend .dot.window { background: #a8e8d3; }
+.wt-legend .dot.task { background: #a6cff8; }
+.wt-legend .dot.idle { background: #eef4fa; box-shadow: inset 0 0 0 1px #dde9f5; }
+
+@media (max-width: 560px) {
+  .wt-shell { margin: 0 10px 10px; padding: 11px 10px 9px; }
+  .wt-axis, .wt-row { grid-template-columns: 32px minmax(0, 1fr); gap: 6px; }
+  .wt-head { flex-direction: column; align-items: flex-start; }
+  .wt-head-stats { justify-content: flex-start; }
+  .wt-task span, .wt-window-bar span { display: none; }
+  .wt-axis-day small { display: none; }
+}
