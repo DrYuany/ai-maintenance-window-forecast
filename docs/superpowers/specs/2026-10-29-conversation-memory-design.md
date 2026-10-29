@@ -98,10 +98,12 @@
 ### 3. 摘要机制（确定性 + 可选 LLM）
 
 - **确定性为主**：扩展现有正则（约束/否决/待办），并直接从 traces / jobs / versions
-  的结构化字段取动作与产物，不靠正则猜语义。
+  的结构化字段取动作与产物，不靠正则猜语义。**否决/待办不单独设结构化字段，折叠进
+  `summary` 文本**（§1 快照里不含 `rejectedPlans`/`openTodos` 字段）。
 - **问答（qa）的来源与判定**：从 `messages` 表扫描；凡用户消息命中问句判定
   （复用 `_QUESTION_HINTS` 正则 + `detect_model_question`，与路由层一致），就把它与
   紧随其后的助手回答配对成 `{q, a}`，`a` 取助手消息原文（超长截断到 200 字）。
+  `qa.versionId` 取自该消息的 `messages.version_ids`，无则省略。
   只归档「超出最近 N 条窗口」的早期问答；窗口内由「最近对话」原文覆盖，避免重复。
 - **可选 LLM**：配置了 key 时用 LLM 压缩旧消息写自由文本摘要；失败或无 key 回退确定性，
   绝不阻塞主流程。
@@ -130,6 +132,9 @@
 
 - 只改后端记忆层与上下文组装；前端无需改动（除非要展示记忆，本轮不做）。
 - 复用现有 `WorkingMemory` 仓储与 `Database` 迁移模式，不重写数据库层。
+- 废弃 `ConversationSummaryRepository` 会让现有测试
+  `tests/test_agent_memory.py::test_conversation_summary_repository_roundtrip` 失去对象，
+  实现计划需包含删除/更新该测试。
 - 与「agent 过程可视化」分支（`feat/registry-driven-schema-prompt`）都改
   `agent_runtime.py`，合并时需注意冲突。
 
