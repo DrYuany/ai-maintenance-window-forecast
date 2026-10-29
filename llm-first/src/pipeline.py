@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import client
+import context as session
 import contract
 import guardrail
 import prompt
@@ -62,6 +63,7 @@ class Outcome:
     error: str = ""
     cached: bool = False
     model_route: str | None = None
+    today: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -85,6 +87,7 @@ class Outcome:
             "usage": self.usage,
             "error": self.error,
             "cached": self.cached,
+            "today": self.today,
         }
 
 
@@ -130,7 +133,7 @@ def _repair_message(utterance: str, raw: dict[str, Any],
         "如果某条诉求确实做不到，就写进 unassigned 并说明理由——",
         "说做不到不算失败，编一个像的才算。",
         "",
-        "**「能过验收」不等于「表达对了」。** 如果为了过 A1~A10 换成一个意思已经变了的写法"
+        "**「能过验收」不等于「表达对了」。** 如果为了过 A1~A12 换成一个意思已经变了的写法"
         "（比如把「只排风机003」写成「完工任务数==1」），那还是错的，只是这次没人拦得住。",
         "拿不准就退回 clarify：问一句，比猜错一版便宜。",
     ]
@@ -161,18 +164,24 @@ def _finalize(outcome: Outcome, reason: str = "") -> Outcome:
 
 
 def understand(utterance: str, *, use_cache: bool = True,
-               allow_repair: bool = True) -> Outcome:
+               allow_repair: bool = True,
+               ctx: "session.Context | None" = None) -> Outcome:
     text = (utterance or "").strip()
     started = time.monotonic()
+    ctx = ctx or session.default()
 
     hit = guardrail.check(text)
     if hit is not None:
         return Outcome(utterance=text, route="reject", guardrail=hit,
                        latency_ms=int((time.monotonic() - started) * 1000),
+                       today=ctx.iso,
                        error=f"护栏拦下：{hit.category}（{hit.evidence}）")
 
+    # 缓存键带日期：同一句"明天"在 10-30 和 11-01 该落成不同日期，
+    # 只按文本做键会把昨天的答案今天照发。
+    key = f"{ctx.iso}|{text}"
     if use_cache:
-        cached = _CACHE.get(text)
+        cached = _CACHE.get(key)
         if cached is not None:
             echo = Outcome(**{**cached.__dict__, "cached": True})
             # 缓存命中的耗时是"这一次"的，不是上一轮模型跑的时间——
@@ -183,10 +192,11 @@ def understand(utterance: str, *, use_cache: bool = True,
     if not client.configured():
         return Outcome(utterance=text, route="clarify",
                        latency_ms=int((time.monotonic() - started) * 1000),
+                       today=ctx.iso,
                        error="未配置 DEEPSEEK_API_KEY，模型层不可用")
 
-    system = prompt.build()
-    outcome = Outcome(utterance=text, route="clarify")
+    system = prompt.build(ctx)
+    outcome = Outcome(utterance=text, route="clarify", today=ctx.iso)
     report: verify.Report | None = None
     raw: dict[str, Any] = {}
 
@@ -217,7 +227,7 @@ def understand(utterance: str, *, use_cache: bool = True,
             continue
 
         product = contract.normalize(raw)
-        report = verify.verify(text, raw)
+        report = verify.verify(text, raw, ctx)
         outcome.raw, outcome.product, outcome.report = raw, product, report
         errors = _compile_check(contract.as_dsl(product))
 
@@ -235,5 +245,5 @@ def understand(utterance: str, *, use_cache: bool = True,
     # 只缓存"真的能用"的结果。把澄清也缓存起来，会让改了 prompt 之后
     # 同一句话永远拿不到新结果，调试时会以为模型没变。
     if not outcome.error and outcome.route != "clarify":
-        _CACHE.put(text, outcome)
+        _CACHE.put(key, outcome)
     return outcome

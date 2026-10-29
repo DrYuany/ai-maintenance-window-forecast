@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import contract
+import context as session
 import rows as row_book
 import segment
 
@@ -328,23 +329,50 @@ def _split_calc(calc: str) -> tuple[str, str] | None:
     return None
 
 
-def _guessed_date(utterance: str, span: str, value: Any) -> str | None:
-    """整句只有相对时间、一个绝对日期都没有时，任何具体日期都是猜的。
+def _guessed_date(utterance: str, span: str, value: Any,
+                  ctx: "session.Context | None" = None) -> str | None:
+    """相对时间落成了日期——这个日期站得住吗？站不住就返回一条人能读的理由。
 
-    这条是补漏：原先只在 `convert` 的文字推导分支里判（span 里出现"明天"这类词就算）。
-    但模型换个写法就绕过去了——把相对时间词留在 claim 1，把日期记到 claim 2
-    的 fill 上（span="先别出海"），或者干脆用 `literal` 直接写一个 ISO 日期。
-    条件是"**整句**有相对时间词且**整句**没有绝对日期"，这样
-    "11月5日风大，明天也一样" 不会被冤枉（原文里本来就有日期，谁对谁错机器分不清）。
+    三种情况：
+
+    1. **原文本来就有绝对日期**（`11月5日风大，明天也一样`）→ 不判。
+       机器分不清"哪个日期对应哪一段"，硬判必然假警报。
+    2. **有基准**（`ctx`）→ 拿基准算出"明天"应该是哪天，落出来的日期必须对上。
+       对不上就判死，并报出"基准算是 10-31，你写的是 10-31 之外的东西"。
+       这比旧判据更严：旧的是"落了就算猜"，现在是"落错了才算错"。
+    3. **没基准，或那个说法本身有歧义**（"下周""月底"）→ 落成具体日期就是猜的。
+       机器不许替用户定"下周从哪天算"。
     """
     date_like = [t for t in _value_strings(value) if _ISO.search(t) or _dates(t)]
     if not date_like:
         return None
     if _dates(utterance) or _ISO.search(utterance):
         return None
-    if not _RELATIVE.search(utterance) and not _RELATIVE.search(span):
+
+    tokens = session.find_relative(utterance) or session.find_relative(span)
+    if not tokens:
         return None
-    return date_like[0]
+
+    if ctx is None:
+        return (f"原文只有相对时间（{span!r}），没有基准日期，"
+                f"却落成 {date_like[0]!r}——这是猜的，应走 clarify")
+
+    expected = [ctx.resolve(token) for token in tokens]
+    expected = [day for day in expected if day is not None]
+    landed = set()
+    for text in date_like:
+        landed.update(_dates(text))
+
+    if not expected:  # 说法有歧义，算不出来
+        return (f"原文的相对时间 {tokens} 有歧义（基准 {ctx.iso} 也算不出唯一日期），"
+                f"却落成 {date_like[0]!r}——应写 unassigned/need_info 让用户补日期")
+
+    if landed & {(day.month, day.day) for day in expected}:
+        return None
+
+    want = "、".join(day.isoformat() for day in expected)
+    return (f"按基准 {ctx.iso} 换算，{tokens} 应该是 {want}，"
+            f"但落成了 {date_like[0]!r}——换算对不上")
 
 
 def _unresolved_time(value: Any) -> str | None:
@@ -404,7 +432,8 @@ def _date_field_issues(dsl: dict[str, Any]) -> list[dict[str, Any]]:
     return issues
 
 
-def check_source(product: dict[str, Any], utterance: str = "") -> Check:
+def check_source(product: dict[str, Any], utterance: str = "",
+                 ctx: "session.Context | None" = None) -> Check:
     fills = product.get("fills") or []
     if not fills:
         return Check("A4", "来源", "na", "没有 fills")
@@ -425,6 +454,14 @@ def check_source(product: dict[str, Any], utterance: str = "") -> Check:
                                "要么走 clarify 要日期，要么进 unassigned"})
             continue
 
+        # 相对时间：有基准就核换算，没基准就判猜。**必须放在 default 分支之前**——
+        # 第一版放在后面，`from=default` 走完自己的分支就 continue 了，
+        # 于是"自己补一个日期"这条最省事的路，正好绕开了相对时间判据。
+        guess = _guessed_date(utterance, span, value, ctx) if utterance else None
+        if guess is not None:
+            bad.append({"where": label, "why": guess})
+            continue
+
         if source == "default":
             if not str(fill.get("why") or "").strip():
                 bad.append({"where": label, "why": "from=default 但没写 why"})
@@ -441,14 +478,6 @@ def check_source(product: dict[str, Any], utterance: str = "") -> Check:
             # 没有值就没法核对出处。模型偶尔只写 row+span、把值留在 dsl 里，
             # 那样 A4 会"因为没东西可查"而空过——这比判错更糟。
             bad.append({"where": label, "why": "这条 fill 没有 value，出处无从核对"})
-            continue
-
-        # 相对时间缺基准：整句都没给日期却落了个日期出来，不管用哪种 from 都算猜。
-        guess = _guessed_date(utterance, span, value) if utterance else None
-        if guess is not None:
-            bad.append({"where": label,
-                        "why": f"原文只有相对时间（{span!r}）且没给绝对日期，"
-                               f"却落成 {guess!r}——这是猜的，应走 clarify"})
             continue
 
         if source == "literal":
@@ -550,7 +579,10 @@ def check_source(product: dict[str, Any], utterance: str = "") -> Check:
                      "why": f"enum 映射 {value!r} 与 span {span!r} 无法机器核对（保留）"})
 
     if bad:
-        return Check("A4", "来源", "fail", f"{len(bad)} 条推不出出处", bad)
+        # 详情要能直接读出"哪一条、为什么"，只看"1 条推不出出处"等于没说。
+        # 退回重试时模型拿到的也是这句，含糊的报错会让它瞎改一通。
+        head = "；".join(str(item.get("why") or "") for item in bad[:2])
+        return Check("A4", "来源", "fail", f"{len(bad)} 条推不出出处：{head}", bad)
     if soft:
         return Check("A4", "来源", "unclear", f"{len(soft)} 条无法机器核对", soft)
     return Check("A4", "来源", "pass", f"{len(fills)} 条来源可复算")
@@ -772,6 +804,114 @@ def check_route_consistency(product: dict[str, Any]) -> Check:
     return Check("A10", "不改", "fail", f"route={route!r} 不在四种之内")
 
 
+# ── A11 方向 ────────────────────────────────────────────────────────────────
+# 「不超过」写成 `>=`，是错误分类学里的 E5.5。它比"值填错"更隐蔽：
+# 值看上去对、能编译、求解器也接受，只是**结论反了**——原本要压预算，
+# 结果变成"至少花这么多"。这是唯一一类"全过还更糟"的错。
+#
+# 判据只在能确定方向时才判死：
+#   · 只对带 `op` 的约束项（budget / cardinality / linear 等）生效；
+#   · 参数是赋值（"上限放宽到14"里的"上限"是栏目名，不是方向），一律不判；
+#   · claim 里同时出现两个方向的说法（"不超过…不低于…"）就算不清，不判。
+_DIRECTION_WORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("<=", ("不超过", "不多于", "不能超过", "不许超过", "不能晚于", "不晚于", "不许晚于",
+            "最多", "至多", "不高于", "以内", "之内", "封顶", "别超", "最晚")),
+    (">=", ("不低于", "不少于", "不能低于", "不能早于", "不早于", "不许早于",
+            "至少", "最少", "下限", "以上", "起步")),
+)
+_OP_EQUALISH = ("==", "=")
+
+
+def _direction_of(text: str) -> tuple[str | None, str | None]:
+    """这句话说的是哪个方向。两个方向都出现就当说不清（返回 None）。"""
+    hits = [(op, word) for op, words in _DIRECTION_WORDS
+            for word in words if word in (text or "")]
+    if not hits:
+        return None, None
+    kinds = {op for op, _w in hits}
+    if len(kinds) > 1:
+        return None, None
+    return hits[0]
+
+
+def check_direction(utterance: str, product: dict[str, Any]) -> Check:
+    if product.get("route") != "dsl":
+        return Check("A11", "方向", "na", f"route={product.get('route')}，没有方向可判")
+
+    claims = {str(c.get("id")): c for c in product.get("claims") or []}
+    fills = product.get("fills") or []
+    constraints = product["dsl"].get("constraints") or []
+
+    wrong, unsure, checked = [], [], 0
+    for fill in fills:
+        row = row_book.by_id(str(fill.get("row") or ""))
+        if row is None or row.section != "constraints":
+            continue
+        claim = claims.get(str(fill.get("claim"))) or {}
+        said_op, word = _direction_of(str(claim.get("text") or ""))
+        if said_op is None:
+            continue
+        for item in constraints:
+            if _item_type("constraints", item) != row.kind:
+                continue
+            wrote = item.get("op")
+            if not isinstance(wrote, str):
+                continue
+            checked += 1
+            label = f"{row.id} {row.kind}"
+            if wrote in _OP_EQUALISH:
+                unsure.append({"where": label, "claim": claim.get("text"),
+                               "said": f"{word}（{said_op}）", "wrote": wrote,
+                               "why": "原文说的是不等式，这里写成了等号——可能对，也可能是近似"})
+                continue
+            if wrote != said_op:
+                wrong.append({"where": label, "claim": claim.get("text"),
+                              "said": f"{word}（{said_op}）", "wrote": wrote,
+                              "why": f"原文是「{word}」，op 却写成 {wrote}，结论反了"})
+
+    if wrong:
+        sample = "；".join(f"「{w['claim']}」说 {w['said']}，写成 {w['wrote']}" for w in wrong[:2])
+        return Check("A11", "方向", "fail",
+                     f"{len(wrong)} 处比较方向和原文相反：{sample}", wrong + unsure)
+    if unsure:
+        return Check("A11", "方向", "unclear",
+                     f"{len(unsure)} 处把不等式写成等号，疑似近似", unsure)
+    if not checked:
+        return Check("A11", "方向", "na", "没有「文本说了方向、又写了 op」的项")
+    return Check("A11", "方向", "pass", f"{checked} 处比较方向与原文一致")
+
+
+# ── A12 reject 自查 ─────────────────────────────────────────────────────────
+# 整句拒掉、但原话里明明有表内的东西——这是 reject 最常见的滥用。
+# 工程上判不了"这段到底能不能做"（要判就得把 claim 文本对到 DSL 语义，
+# 那是另一个量级的活，而且极容易假警报）。所以这里只给线索，不拦截：
+# 命中就记一条 unclear，在页面上摆出来让人一眼看到"它拒了，但这句话里有 5 个表内词"。
+#
+# **不作为判据的一部分，是有意的。** 把判不了的东西说成"你错了"，
+# 一条假警报就能让人关掉整套验收器。
+_SCOPE_HINTS: tuple[str, ...] = (
+    "船租", "人工", "单价", "工时", "人数", "作业线", "风速", "浪高",
+    "预算", "成本", "任务0", "风机0", "窗口0", "同一天", "先修", "别排",
+    "截止", "完工", "工期", "电价", "部件", "叶片", "齿轮箱", "必须修", "不许修",
+)
+
+
+def check_reject_scope(utterance: str, product: dict[str, Any]) -> Check:
+    if product.get("route") != "reject":
+        return Check("A12", "不轻拒", "na", f"route={product.get('route')}，不需要自查")
+
+    hits = [word for word in _SCOPE_HINTS if word in (utterance or "")]
+    claims = product.get("claims") or []
+    actions = [c for c in claims if c.get("kind") == "action"]
+
+    if hits and actions:
+        return Check("A12", "不轻拒", "unclear",
+                     f"整句拒了，但原文里有 {len(hits)} 个表内线索词：{'、'.join(hits)}；"
+                     "请自查是不是有哪一段其实能落表",
+                     [{"hint": word} for word in hits])
+    return Check("A12", "不轻拒", "pass", "整句拒，原文没有明显的表内线索")
+
+
 # ── 汇总 ────────────────────────────────────────────────────────────────────
 
 def _dsl_numbers(dsl: dict[str, Any]) -> list[float]:
@@ -829,8 +969,13 @@ def audit_numbers(utterance: str, dsl: dict[str, Any]) -> dict[str, Any]:
             "dropped": len(missing), "invented": len(extra)}
 
 
-def verify(utterance: str, raw: dict[str, Any]) -> Report:
-    """跑完 A1~A10，返回报告。raw 是模型原始产物（未归一化）。"""
+def verify(utterance: str, raw: dict[str, Any],
+           ctx: "session.Context | None" = None) -> Report:
+    """跑完 A1~A11，返回报告。raw 是模型原始产物（未归一化）。
+
+    `ctx` 是会话基准（今天几号）。不给的话，相对时间一律按"没有基准"判——
+    旧行为和旧测试都不变，这是有意的：判据不该偷偷读系统时钟。
+    """
     product = contract.normalize(raw)
     pieces = segment.segments(utterance)
     return Report(
@@ -838,13 +983,15 @@ def verify(utterance: str, raw: dict[str, Any]) -> Report:
             check_cover(utterance, product),
             check_closure(product),
             check_evidence(utterance, product),
-            check_source(product, utterance),
+            check_source(product, utterance, ctx),
             check_rows(utterance, product),
             check_single_value(product),
             check_required(utterance, product),
             check_backing(utterance, product),
             check_shape(raw, product),
             check_route_consistency(product),
+            check_direction(utterance, product),
+            check_reject_scope(utterance, product),
         ],
         segments=pieces,
     )

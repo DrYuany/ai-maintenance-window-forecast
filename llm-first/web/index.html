@@ -139,6 +139,12 @@
   .empty { color: var(--ink-3); font-size: 12.5px; padding: 8px 0; }
   .err { background: var(--fail-soft); border: 1px solid #f0c9c9; color: #8f2424;
          border-radius: 8px; padding: 8px 10px; font-size: 12.5px; }
+  .pane { border-top: 1px dashed var(--line); padding-top: 10px; }
+  .readout { margin-top: 8px; border: 1px solid var(--line); border-radius: 8px;
+             background: #fbfcfd; padding: 8px 10px; }
+  .readout ul.plain li { font-size: 12.5px; margin: 2px 0; }
+  button.act:active { transform: translateY(1px); }
+
   footer { max-width: 1560px; margin: 0 auto; padding: 0 20px 40px; color: var(--ink-3); font-size: 12px; }
 </style>
 </head>
@@ -147,6 +153,7 @@
   <div class="bar">
     <div class="title">意图理解对照台<small>同一句话，两套理解方式</small></div>
     <div class="spacer"></div>
+    <span class="chip" id="c-today">基准日期 …</span>
     <span class="chip" id="c-model">模型 …</span>
     <span class="chip" id="c-prompt">提示词 …</span>
     <span class="chip" id="c-key">检查中…</span>
@@ -173,7 +180,7 @@
       <div class="body" id="left"><div class="empty">等待输入</div></div>
     </section>
     <section class="card">
-      <h2>LLM 主导版<span class="tag">llm-first/ · 整句读 + 工作记录 + A1~A10 验收</span></h2>
+      <h2>LLM 主导版<span class="tag">llm-first/ · 整句读 + 工作记录 + A1~A12 验收</span></h2>
       <div class="body" id="right"><div class="empty">等待输入</div></div>
     </section>
   </div>
@@ -315,8 +322,10 @@ function renderRight(d) {
   }
 
   if (d.report) {
-    html += `<div><h3>验收 A1~A10　${esc(d.report.summary)}</h3>${checksHtml(d.report)}</div>`;
+    html += `<div><h3>验收 A1~A12　${esc(d.report.summary)}</h3>${checksHtml(d.report)}</div>`;
   }
+
+  html += askPaneHtml(d);
 
   html += compileHtml(d.compile_errors);
   html += numbersHtml(d.numbers);
@@ -324,7 +333,120 @@ function renderRight(d) {
   if (d.dsl && Object.keys(d.dsl).length) {
     html += `<details><summary>DSL 原文</summary><pre>${json(d.dsl)}</pre></details>`;
   }
+  window.__dsl = d.dsl || {};
   $("right").innerHTML = html;
+}
+
+// ── 读请求与执行侧：按需触发，不自动跑 ─────────────────────────────────────
+// 为什么不自动：diff 要真解两次（十几秒），一进页面就跑会把"看它读得对不对"变成"等结果"。
+function askPaneHtml(d) {
+  const asks = (d.claims || []).filter((c) => c.kind === "ask");
+  const hasDsl = d.dsl && Object.keys(d.dsl).length > 0;
+  let html = `<div class="pane"><h3>接下来能干什么</h3><div class="row" style="margin-top:6px">`;
+  if (asks.length) {
+    html += asks.map((c, i) =>
+      `<button class="ex act" data-ask="${esc(c.text)}" data-about="${esc(c.about || "")}">
+        回答「${esc(c.text)}」（${esc(c.about || "?")}）</button>`).join("");
+  }
+  if (hasDsl) {
+    html += `<button class="ex act" data-run="1">把这份 DSL 真跑一遍求解</button>`;
+  }
+  if (!asks.length && !hasDsl) {
+    html += `<span class="note">这一句没有可回答的问句，也没有可执行的 DSL。</span>`;
+  }
+  return html + `</div><div id="pane-out"></div></div>`;
+}
+
+function paint(html) {
+  const box = $("pane-out");
+  if (box) box.innerHTML = html;
+}
+
+async function runAnswer(btn) {
+  const claim = btn.dataset.ask, about = btn.dataset.about;
+  btn.disabled = true;
+  paint(`<div class="note"><span class="spin"></span> 正在取数并计算（reason 约 1 秒，diff 要真解两次）…</div>`);
+  try {
+    const res = await fetch("/api/answer", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ claim, about }),
+    });
+    const r = await res.json();
+    paint(readingHtml(r));
+  } catch (e) {
+    paint(`<div class="err">请求失败：${esc(e.message)}</div>`);
+  } finally { btn.disabled = false; }
+}
+
+function readingHtml(r) {
+  if (!r) return "";
+  const okCls = r.ok ? "ok" : "warn";
+  let html = `<div class="readout"><div class="badges">
+      ${badge(r.about)}${badge(ms(r.seconds * 1000), "dim")}
+      <span class="b ${okCls}">${r.ok ? "答上了" : "答不上来"}</span></div>
+    <ul class="plain" style="margin-top:6px">` +
+    (r.lines || []).map((l) => `<li>${md(l)}</li>`).join("") + `</ul>`;
+  if (r.caveat) html += `<div class="note" style="margin-top:4px">${esc(r.caveat)}</div>`;
+  const rows = (r.data && r.data.rows) || [];
+  if (rows.length) {
+    html += `<table><tr><th>策略</th><th>状态</th><th>完成</th><th>总成本</th><th>现金支出</th><th>最晚完工</th></tr>` +
+      rows.map((x) => `<tr><td>${esc(x["策略"])}</td><td class="mono">${esc(x["状态"])}</td>
+        <td class="mono">${esc(x["完成任务数"])}</td><td class="mono">${fmtMoney(x["总成本"])}</td>
+        <td class="mono">${fmtMoney(x["现金支出"])}</td><td class="mono">${esc(x["最晚完工"] || "—")}</td></tr>`).join("") +
+      `</table>`;
+  }
+  return html + `</div>`;
+}
+
+function fmtMoney(v) {
+  if (v === null || v === undefined) return "—";
+  return Math.abs(v) >= 1e4 ? (v / 1e4).toFixed(1) + " 万" : Math.round(v) + " 元";
+}
+
+// 只认 **粗体**：答案里的重点。其余按纯文本转义，不引第三方 markdown 库。
+function md(text) {
+  return esc(text).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+}
+
+async function runDsl(btn) {
+  btn.disabled = true;
+  paint(`<div class="note"><span class="spin"></span> 子进程里跑 CP-SAT（默认前 6 个任务、限时 6 秒）…</div>`);
+  try {
+    const res = await fetch("/api/execute", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dsl: window.__dsl || {} }),
+    });
+    const r = await res.json();
+    paint(execHtml(r));
+  } catch (e) {
+    paint(`<div class="err">请求失败：${esc(e.message)}</div>`);
+  } finally { btn.disabled = false; }
+}
+
+function execHtml(r) {
+  if (!r) return "";
+  const p = r.payload || {};
+  const b = p.breakdown || {};
+  const status = r.status;
+  const cls = r.ok ? "ok" : (status === "TIMEOUT" ? "warn" : "hit");
+  let html = `<div class="readout"><div class="badges">
+      ${badge("执行侧", "route")}<span class="b ${cls}">${esc(status)}</span>
+      ${badge(ms(r.seconds * 1000), "dim")}
+      ${p.tasks ? badge(`前 ${p.tasks} 个任务`, "dim") : ""}</div>`;
+  if (r.error) html += `<div class="err" style="margin-top:6px">${esc(r.error)}</div>`;
+  if (p.scheduled !== undefined) {
+    html += `<ul class="plain" style="margin-top:6px">
+      <li>排进 <b>${p.scheduled}</b> / ${p.tasks ?? "?"} 个任务${p.stages ? `，分 ${p.stages} 个阶段` : ""}</li>
+      ${b["总成本"] !== undefined ? `<li>执行侧独立核算：总成本 <b>${fmtMoney(b["总成本"])}</b>
+        （现金支出 ${fmtMoney(b["现金支出"])}，其中船租 ${fmtMoney(b["船租"])}、人工 ${fmtMoney(b["人工"])}、
+        备件 ${fmtMoney(b["备件"])}、发电损失 ${fmtMoney(b["发电损失"])}）</li>` : ""}
+      ${p.model_cost !== undefined && p.model_cost !== null ? `<li>求解器目标值：${num(p.model_cost)}</li>` : ""}
+      ${b["最晚完工"] ? `<li>最晚完工：${esc(b["最晚完工"])}</li>` : ""}
+      ${p.note ? `<li class="note">${esc(p.note)}</li>` : ""}
+    </ul>`;
+  }
+  html += `<div class="note">求解结果和"理解对不对"是两件事：DSL 理解错了，求解器照样能算出一份漂亮的排程。</div>`;
+  return html + `</div>`;
 }
 
 function renderVerdict(d) {
@@ -376,12 +498,20 @@ async function ask() {
   }
 }
 
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("button.act");
+  if (!t) return;
+  if (t.dataset.ask !== undefined) runAnswer(t);
+  else if (t.dataset.run !== undefined) runDsl(t);
+});
+
 $("go").onclick = ask;
 $("q").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) ask(); });
 
 (async function boot() {
   try {
     const h = await (await fetch("/api/health")).json();
+    $("c-today").textContent = "今天是 " + h.today + "（" + (h.weekday || "") + "）";
     $("c-model").textContent = "模型 " + h.model;
     $("c-prompt").textContent = "提示词 " + h.prompt_chars + " 字符";
     const k = $("c-key");

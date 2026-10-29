@@ -31,6 +31,7 @@ if __package__ in (None, ""):  # 允许 `python src/prompt.py` 直接跑
 
 import paths  # noqa: E402,F401  （副作用：把 ../backend 挂进 sys.path）
 
+import context as session  # noqa: E402  （会话基准日期；与 verify 共用同一份换算）
 import segment as seg  # noqa: E402  （连接词表与切段逻辑同源）
 
 from app.core.dsl import validator as dsl_validator  # noqa: E402
@@ -262,7 +263,7 @@ C11 `linear` 能装任意线性式，可式子里的每一项都必须来自表 
    不是筛整份计划。这类要 unassigned + `row_not_wired`，
    **不要用 `count==1` 顶替**：那是"正好完工一个任务"，不是"只排这一台风机"。
 
-这三类要给 `unassigned`，理由写 `concept_not_modeled` 或 `row_not_wired`。
+这四类要给 `unassigned`，理由写 `concept_not_modeled` 或 `row_not_wired`。
 **不要交一个"差不多"的约束上去**——那比说做不到更糟，因为它会真的被执行。"""
 
 
@@ -284,6 +285,11 @@ def job_block() -> str:
 
 机器会核这三样之间对不对得上。**对不上整份退回，不给部分通过。**
 所以宁可少填一条并说明原因，也不要填一条自己都对不上的。"""
+
+
+def today_block(ctx: "session.Context") -> str:
+    """基准日期。放在岗位之后、步骤之前——它影响"值填多少"，必须在动手前就知道。"""
+    return "# 今天几号\n\n" + ctx.explain()
 
 
 def step_block() -> str:
@@ -337,9 +343,16 @@ def step_block() -> str:
 `convert` 的例子：`span="涨两成"` → `calc="12000*1.2=14400"`，`value=14400`。
 `enum` 的例子：`span="优先抢修高风险的"` → `value="高风险优先抢修"`。
 
+**"没给数"不等于"不能填"。** 原文只说了现象、但明确要求停工的
+（"明天风大，先别出海"），用 `from=default` + `state="不可作业"` 落表，
+`why` 写"原文未给风速，按不可作业处理"。这不是编造：
+编造是给自己造一个原文没有的数，这里是在两种合法取值里选了用户表达的那一个。
+反过来，原文只描述天气（"明天风大"）却**没说要停工**，那才该问一句。
+
 **日期字段只收日期。** `day` / `dates` / `start` / `finish` / `deadline` / `at` 这些键，
 要么写 `2026-11-09`、`2026-11-09T08:00:00+08:00`，要么写 `11月9日`；
 把"明天""下周一""月底"原样写进去等于没落地——那不是"没编造"，那是把没定的事说成定了。
+"明天"这类说法按上一节的基准换算成具体日期再写，`calc` 里说明怎么算的。
 
 `unassigned` 每条交三样：claim 编号、`reason`、`note`。`reason` 只有三种：
 
@@ -414,15 +427,20 @@ def audit_block() -> str:
 | A1 覆盖 | 系统按标点切出的每一段，都被至少一条 claim 覆盖 | 漏一段 → 整份退回 |
 | A2 闭合 | 每条 `action` claim 都有归宿（fills 或 unassigned）；`ask`/`noise`/`unsure` 不需要 | 有 action claim 没归宿 → 整份退回 |
 | A3 出处 | 每个 `span` 是原文的连续子串，且落在 claim 指向的那一段里 | 对不上 → 该条作废，其余仍采信 |
-| A4 来源 | `from≠default` 时，`value` 能从 `span` 直接得到或由 `calc` 算出 | 推不出 → 判编造，该条作废 |
+| A4 来源 | `from≠default` 时，`value` 能从 `span` 直接得到或由 `calc` 算出；相对时间要按基准换算，**换算出来对不上也算错** | 推不出 → 判编造，该条作废 |
 | A5 行号 | `row` 必须在 {_row_ranges()} 之内 | 越界 → 整份退回 |
 | A6 单值 | 同一 claim 里同一行只能一个值；跨 claim 冲突要写 `conflict` | 冲突未声明 → 退回澄清 |
 | A7 必填 | 每行的必填字段都要有（见各表） | 缺 → 该条作废 |
 | A8 一致 | dsl 每项都有 fill 背书；每个 fill 在 dsl 里都有对应项 | 双向对不上 → 整份退回 |
 | A9 形状 | 顶层是对象；四段是数组；字段名照抄 | 不合法 → 先归一化再重判，不算你的错 |
 | A10 不改 | `not_change` 时不许有 `action` claim；`reject` 时每条 claim 都要进 unassigned | 出现 action → 改判 dsl，或退回 |
+| A11 方向 | claim 里写「不超过/最多」→ op 必须是 `<=`；「至少/不低于」→ `>=` | 方向反了 → 整份退回 |
+| A12 不轻拒 | `reject` 时不许放过表内有落点的段（这条只记线索，不拦你） | 只提示，不改判 |
 
 三档后果：**整份退回 > 该条作废 > 归一化重判**。
+
+A11 单独说明：「钱不超过300万」写成 `op: ">="` 也能编译、也能求解，只是**结论反了**——
+原本要压预算，变成至少花这么多。这是唯一一类"全过还更糟"的错，所以判死。
 前两档会告诉你具体哪一条、为什么。
 
 下面这些是格式，不是提醒：
@@ -491,22 +509,27 @@ def reference_block() -> str:
 
 
 SECTIONS: tuple[tuple[str, callable], ...] = (
-    ("岗位", job_block),
-    ("工具性质（积木段）", capability_block),
-    ("干活步骤", step_block),
-    ("验收单", audit_block),
-    ("交卷格式", output_block),
-    ("写法", syntax_block),
-    ("参考表 A~F", reference_block),
+    ("岗位", lambda _ctx: job_block()),
+    ("今天", today_block),
+    ("工具性质（积木段）", lambda _ctx: capability_block()),
+    ("干活步骤", lambda _ctx: step_block()),
+    ("验收单", lambda _ctx: audit_block()),
+    ("交卷格式", lambda _ctx: output_block()),
+    ("写法", lambda _ctx: syntax_block()),
+    ("参考表 A~F", lambda _ctx: reference_block()),
 )
 
 
-def build() -> str:
-    return "\n\n".join(fn() for _name, fn in SECTIONS)
+def build(ctx: "session.Context | None" = None) -> str:
+    """`ctx` 是会话基准（今天几号）。不给就用系统日期——**但调用方应当显式给**：
+    同一句"明天"在不同日期该落成不同日期，提示词里不写清楚，模型的换算就是瞎猜。"""
+    ctx = ctx or session.default()
+    return "\n\n".join(fn(ctx) for _name, fn in SECTIONS)
 
 
-def stats() -> list[tuple[str, int]]:
-    return [(name, len(fn())) for name, fn in SECTIONS]
+def stats(ctx: "session.Context | None" = None) -> list[tuple[str, int]]:
+    ctx = ctx or session.default()
+    return [(name, len(fn(ctx))) for name, fn in SECTIONS]
 
 
 # ── 自检：防"手抄清单漂移" ──────────────────────────────────────────────────

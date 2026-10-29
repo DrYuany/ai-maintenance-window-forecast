@@ -9,13 +9,17 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-BACKEND = Path(__file__).resolve().parents[2] / "backend"
+ROOT = Path(__file__).resolve().parents[2]
+BACKEND = ROOT / "backend"
+# 求解内核（product_data / product_planner）。只有读参数快照和跑求解时才用得上，
+# 但路径要在这里统一挂——否则每个模块各写一份，迟早有一处漏了、报 ModuleNotFoundError。
+KERNEL = ROOT / "maintenance-milp-modeler" / "scripts"
 
 
 def ensure() -> None:
-    path = str(BACKEND)
-    if path not in sys.path:
-        sys.path.insert(0, path)
+    for path in (str(BACKEND), str(KERNEL)):
+        if path not in sys.path:
+            sys.path.insert(0, path)
 
 
 ensure()
