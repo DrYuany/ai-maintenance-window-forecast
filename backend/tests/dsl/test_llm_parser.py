@@ -369,3 +369,11 @@ def test_context_block_is_prepended_to_llm_prompt() -> None:
     )
     assert result.route == "dsl"
     assert "任务001~任务011" in client.last_request["messages"][0]["content"]
+
+
+# ── 对话修复 / 元问题（2026-10-29：不能被 DSL 澄清劫持）────────────────────
+
+def test_repair_utterance_routes_to_not_change() -> None:
+    for text in ["你没听懂我说的意思？", "我是说两版本的区别", "答非所问了吧"]:
+        result = parse(text, library=[])
+        assert result.route == "not_change", f"{text} -> {result.route}"

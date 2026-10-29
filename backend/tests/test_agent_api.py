@@ -743,8 +743,33 @@ def test_clarify_route_short_circuits_without_llm(temp_db_path, monkeypatch) -> 
 
     resp = client.post(
         "/api/agent/message",
-        json={"conversationId": conversation["id"], "message": "应急模式"},
+        json={"conversationId": conversation["id"], "message": "台风要来了，先别排"},
     ).json()
 
     assert resp["actionType"] == "change_clarification"
     assert "拿不准" in resp["assistantMessage"]["content"]
+
+
+def test_repair_utterance_is_not_hijacked_by_dsl_clarification(temp_db_path, monkeypatch) -> None:
+    """用户表达不满/纠错时，不能被当成"DSL 说不清"回澄清话术。"""
+    os.environ.pop("MINIMAX_API_KEY", None)
+    client = _client(temp_db_path, monkeypatch)
+    conversation = client.post("/api/conversations", json={"title": "repair"}).json()
+
+    resp = client.post(
+        "/api/agent/message",
+        json={"conversationId": conversation["id"], "message": "你没听懂我说的意思？"},
+    ).json()
+
+    assert resp["actionType"] == "assistant_reply"
+    assert "拿不准" not in resp["assistantMessage"]["content"]
+
+
+def test_version_reference_helpers() -> None:
+    from app.core.agent_runtime import _has_version_reference, _looks_like_modification
+
+    assert _has_version_reference("这两版本方案的数学模型区别是什么")
+    assert _has_version_reference("方案01和方案02")
+    assert not _has_version_reference("今天风大吗")
+    assert _looks_like_modification("顺延两天")
+    assert not _looks_like_modification("你没听懂我说的意思？")

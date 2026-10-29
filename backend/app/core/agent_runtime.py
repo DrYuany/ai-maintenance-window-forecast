@@ -70,6 +70,26 @@ SKILL_NAME = "maintenance-milp-modeler"
 # 这里再缓存一层，避免每次解析都走 import/路径拼接。
 _ENTITY_SNAPSHOT_CACHE: dict[str, Any] = {}
 
+# 修改类信号：只有像"要改排程"的话术才吃 DSL 澄清，
+# 对话修复/元问题（"你没听懂""我是说"）交给对话 agent 处理。
+_MODIFY_HINTS = re.compile(
+    r"改|调|设|换|加|减|增|降|压|缩短|延长|提前|推迟|延后|顺延|不要|别|禁止|必须|只能"
+    r"|最多|至少|不超过|预算|优先|权重|粒度|上限|下限|阈值|放宽|收紧"
+)
+
+
+def _looks_like_modification(text: str) -> bool:
+    return bool(_MODIFY_HINTS.search(text or ""))
+
+
+_VERSION_REF_RE = re.compile(
+    r"这(?:两|2)版|这两个?方案|两版|最新两版|上一版|前一版|这版|这一版|方案\s*0*\d"
+)
+
+
+def _has_version_reference(text: str) -> bool:
+    return bool(_VERSION_REF_RE.search(text or ""))
+
 
 def _entity_snapshot() -> Any:
     """给 LLM 的极简快照（只有实体清单，不含数值）。失败返回 None。"""
@@ -368,6 +388,18 @@ class AgentRuntime:
                 memory=memory,
             )
 
+        # 版本对比优先于"模型是什么"：问"这两版区别"时要给具体差异，
+        # 而不是讲通用模型结构。
+        compare_reply = self._compare_versions_reply(conversation_id, content, selected_version)
+        if compare_reply is not None:
+            return self._finalize_response(
+                conversation_id,
+                compare_reply,
+                "version_compare",
+                memory.activeView,
+                [],
+            )
+
         model_question = detect_model_question(content)
         if model_question:
             if model_question == "capability":
@@ -529,7 +561,7 @@ class AgentRuntime:
                     memory.activeView,
                     [],
                 )
-            if dsl_result is not None and dsl_result.route == "clarify":
+            if dsl_result is not None and dsl_result.route == "clarify" and _looks_like_modification(content):
                 # 低置信/歧义诉求：直接澄清，不再回退旧 conversation_agent（避免二次 LLM）。
                 if sink:
                     sink.stage("route", "判断意图路由", "done", "clarify")
@@ -1508,6 +1540,76 @@ class AgentRuntime:
                 },
             )
         return reply
+
+    def _compare_versions_reply(
+        self,
+        conversation_id: str,
+        content: str,
+        selected_version,
+    ) -> str | None:
+        """版本对比：解析"哪两版"，给具体差异而不是通用模型说明。
+
+        支持两种指代：
+          - 显式序号："方案01和方案02的区别"
+          - 相对指代："这两版本/两个方案/最新两版/上一版和这版" → 最近两版
+        """
+        if not any(token in content for token in ("区别", "差异", "对比", "比较", "不同", "差别")):
+            return None
+        try:
+            ordered = chronological_versions(self.versions.list_by_conversation(conversation_id))
+        except Exception:  # noqa: BLE001
+            return None
+        if len(ordered) < 2:
+            if len(ordered) == 1 and _has_version_reference(content):
+                return (
+                    "当前会话只有 1 版方案，没有可比较的两版。\n"
+                    "先再排一版（例如改个约束或策略后生成沙盘），我再按模型层和结果层逐项对比。"
+                )
+            return None
+
+        toolbox = self._build_toolbox(conversation_id, selected_version, None)
+        resolved = []
+        ordinals = re.findall(r"方案\s*0*(\d{1,3})", content)
+        if len(ordinals) >= 2:
+            for ordinal in ordinals[:2]:
+                version = toolbox.resolve_version(f"方案{ordinal}")
+                if version and version.id not in {item.id for item in resolved}:
+                    resolved.append(version)
+        elif _has_version_reference(content):
+            resolved = ordered[-2:]
+        if len(resolved) < 2:
+            return None
+
+        left, right = resolved[0], resolved[1]
+        numbers = {item.id: index for index, item in enumerate(ordered, start=1)}
+        left_label = f"方案{numbers.get(left.id, 0):02d}"
+        right_label = f"方案{numbers.get(right.id, 0):02d}"
+        if not ordinals:
+            left_label = f"{left_label}（{left.id}）"
+            right_label = f"{right_label}（{right.id}）"
+
+        lines = [f"我按最近的两版来比：{left_label} → {right_label}。"]
+        left_fp = getattr(left, "modelFingerprint", None)
+        right_fp = getattr(right, "modelFingerprint", None)
+        if left_fp and right_fp:
+            if left_fp == right_fp:
+                lines.append(
+                    "**模型层**：两版模型指纹相同——决策变量、约束和目标函数结构完全一致，"
+                    "差异来自输入数据或求解结果，不是模型本身。"
+                )
+            else:
+                lines.append(
+                    "**模型层**：两版模型指纹不同——约束、目标或数据假设至少有一项变了，"
+                    "具体差异见下面对照。"
+                )
+        else:
+            lines.append("**模型层**：至少一版缺少完整模型产物，我只能对比结果层事实。")
+
+        try:
+            lines.append(render_compare_summary(toolbox.compare_pair(left, right)))
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"（结果层对比失败：{exc}）")
+        return "\n\n".join(lines)
 
     def _fallback_compare_reply(
         self,
