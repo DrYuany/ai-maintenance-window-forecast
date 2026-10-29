@@ -13,7 +13,7 @@ export function ConversationRail({ conversations, activeId, onCreate, onSelect }
     <aside className="agent-rail" aria-label="会话列表">
       <div className="agent-brand">
         <span><Sparkles size={18} /></span>
-        <div><strong>检修排程 Agent</strong><small>可审计决策工作空间</small></div>
+        <div><strong>一修</strong><small>风机检修排程 Agent</small></div>
       </div>
       <button className="new-chat-button" onClick={onCreate}><MessageSquarePlus size={16} />新建排程会话</button>
       <label className="agent-search"><Search size={15} /><input aria-label="搜索会话" placeholder="搜索会话" /></label>
