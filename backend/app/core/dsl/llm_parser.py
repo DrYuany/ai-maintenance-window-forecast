@@ -40,6 +40,16 @@ def _task_ref(value: str) -> str:
     return f"任务{int(plain):03d}"
 
 
+def _all_task_refs(text: str) -> list[str]:
+    """按出现顺序提取全部任务引用（去重）。"""
+    seen: list[str] = []
+    for raw in re.findall(_TASK, text):
+        ref = _task_ref(raw)
+        if ref not in seen:
+            seen.append(ref)
+    return seen
+
+
 def _month_day(year: str | None, month: str, day: str) -> str:
     return f"2026-{int(month):02d}-{int(day):02d}T08:00:00+08:00"
 
@@ -315,8 +325,14 @@ def _rule_dsl(kind: str, groups: list[str], text: str) -> dict[str, Any] | None:
                 "time": _month_day(year, month, day),
             }]}
         if kind == "must":
+            tasks = _all_task_refs(text)
+            if len(tasks) > 1:
+                return {"constraints": [{"type": "must", "task": task} for task in tasks]}
             return {"constraints": [{"type": "must", "task": _task_ref(groups[0])}]}
         if kind == "exclude":
+            tasks = _all_task_refs(text)
+            if len(tasks) > 1:
+                return {"constraints": [{"type": "exclude", "task": task} for task in tasks]}
             return {"constraints": [{"type": "exclude", "task": _task_ref(groups[0])}]}
         if kind == "fix":
             return {"constraints": [{
@@ -720,7 +736,78 @@ def parse(
     system_prompt: str | None = None,
     context_block: str | None = None,
 ) -> ParseResult:
-    """三层解析入口：批量 → 规则 → 旧规划语言桥接 → 意图门控 → 向量 → LLM。
+    """解析入口：先尝试复合句拆分合并，失败再走单句主链。"""
+    parts = _split_compounds(message)
+    if parts:
+        results: list[ParseResult] = []
+        for part in parts:
+            try:
+                results.append(
+                    _parse_core(
+                        part, library=library, client=client,
+                        system_prompt=system_prompt, context_block=context_block,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - 某一段解析失败 → 退回整句主链
+                results = []
+                break
+        if results and all(result.route == "dsl" and result.dsl for result in results):
+            merged = _merge_dsls([result.dsl for result in results])
+            if merged:
+                if on_stage:
+                    on_stage(
+                        "parse.compound",
+                        f"复合句拆成 {len(parts)} 条并合并",
+                        "done",
+                        " ／ ".join(parts)[:90],
+                    )
+                    on_stage("route", "判断意图路由", "done", "dsl")
+                return ParseResult(
+                    dsl=merged,
+                    source="compound",
+                    route="dsl",
+                    confidence=min(result.confidence for result in results),
+                    source_scores={"compound": 1.0},
+                )
+    return _parse_core(
+        message, library=library, client=client, on_stage=on_stage,
+        system_prompt=system_prompt, context_block=context_block,
+    )
+
+
+_SPLIT_RE = re.compile(r"[，,；;。\s]+")
+
+
+def _split_compounds(message: str) -> list[str]:
+    """按逗号/分号/句号切分；问句不拆。"""
+    if _QUESTION_HINTS.search(message):
+        return []
+    parts = [part.strip() for part in _SPLIT_RE.split(message) if len(part.strip()) >= 2]
+    return parts if len(parts) >= 2 else []
+
+
+def _merge_dsls(dsls: list[dict[str, Any]]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for dsl in dsls:
+        for key in ("constraints", "objectives", "parameters", "data"):
+            for item in dsl.get(key) or []:
+                bucket = merged.setdefault(key, [])
+                if item not in bucket:
+                    bucket.append(item)
+        if dsl.get("solver"):
+            merged["solver"] = dsl["solver"]
+    return merged
+
+
+def _parse_core(
+    message: str,
+    library: list[dict] | None = None,
+    client=None,
+    on_stage: Callable[[str, str, str, str | None], None] | None = None,
+    system_prompt: str | None = None,
+    context_block: str | None = None,
+) -> ParseResult:
+    """三层主链：批量 → 规则 → 旧规划语言桥接 → 意图门控 → 向量 → LLM。
 
     路由结果：dsl / batch / data_patch / parameter / strategy / reject / not_change / clarify。
 

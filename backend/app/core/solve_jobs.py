@@ -213,13 +213,28 @@ class SolveJobRepository:
         )
 
     def _with_elapsed(self, job: SolveJob, now: datetime) -> SolveJob:
+        """RUNNING 时按已用时长推算进度，避免长时间停在 35%。
+
+        CP-SAT 求解期间没有可靠的细粒度进度，用「已用时长 / 时限」在 35%→80% 区间
+        线性推进，配合真实秒数；求解结束由 mark_reviewing / mark_completed 接管。
+        """
         if job.status != "RUNNING":
             return job
         elapsed = self._elapsed(job, now)
+        max_seconds = int((job.request or {}).get("seconds") or 300)
+        max_seconds = max(1, max_seconds)
+        ratio = min(1.0, elapsed / max_seconds)
+        progress = min(80, 35 + int(45 * ratio))
+        if elapsed <= max_seconds:
+            message = f"正在求解（已运行 {elapsed} 秒，时限 {max_seconds} 秒）"
+        else:
+            message = f"已超时限 {max_seconds} 秒，仍在求解（已运行 {elapsed} 秒）"
         return job.model_copy(
             update={
                 "elapsedSeconds": elapsed,
                 "needsUserDecision": elapsed >= job.nextDecisionAt and not job.backgrounded,
+                "progressPercent": progress,
+                "statusMessage": message,
             }
         )
 

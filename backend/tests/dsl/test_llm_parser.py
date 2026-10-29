@@ -377,3 +377,39 @@ def test_repair_utterance_routes_to_not_change() -> None:
     for text in ["你没听懂我说的意思？", "我是说两版本的区别", "答非所问了吧"]:
         result = parse(text, library=[])
         assert result.route == "not_change", f"{text} -> {result.route}"
+
+
+# ── 复合句拆分合并（2026-10-29）─────────────────────────────────────────────
+
+def test_compound_splits_and_merges_two_constraints() -> None:
+    result = parse("任务005最早11月6日开工，任务006最晚11月20日前修完", library=[])
+    assert result.route == "dsl" and result.source == "compound"
+    types = {c["type"] for c in result.dsl["constraints"]}
+    assert types == {"earliest", "deadline"}
+
+
+def test_compound_merges_parameter_and_constraint() -> None:
+    result = parse("任务001和任务002不能同一天，另外船租涨20%", library=[])
+    assert result.route == "dsl"
+    assert result.dsl["constraints"][0]["type"] == "co_occur"
+    assert result.dsl["parameters"][0]["field"] == "船舶日租金"
+
+
+def test_compound_dedupes_identical_items() -> None:
+    result = parse("任务001最早11月5日开工，任务001最早11月5日开工", library=[])
+    assert result.route == "dsl"
+    assert len(result.dsl["constraints"]) == 1
+
+
+def test_question_is_not_split() -> None:
+    assert parse("任务001最早什么时候开工，任务002呢？", library=[]).route != "compound"
+
+
+def test_multi_task_must_expands_to_each_task() -> None:
+    dsl = parse_by_rules("任务001和任务003必须修")
+    assert [c["task"] for c in dsl["constraints"]] == ["任务001", "任务003"]
+
+
+def test_multi_task_exclude_expands_to_each_task() -> None:
+    dsl = parse_by_rules("别排任务001和任务002")
+    assert [c["task"] for c in dsl["constraints"]] == ["任务001", "任务002"]
