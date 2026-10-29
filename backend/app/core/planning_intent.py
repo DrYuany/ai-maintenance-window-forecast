@@ -677,7 +677,7 @@ class PlanningIntentCompiler:
             token in text
             for token in ("为什么", "是什么", "是多少", "什么算法", "怎么理解", "怎么", "如何",
                           "有哪些", "能否介绍", "？", "?")
-        )
+        ) or bool(re.search(r"多少|几[个项天条人艘]|哪个|哪一版|对比|比较|区别|差别|差在哪", text))
         if question and not explicit_action:
             return False
         if explicit_action:

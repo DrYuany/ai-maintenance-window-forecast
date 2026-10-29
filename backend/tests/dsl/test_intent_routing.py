@@ -70,3 +70,25 @@ def test_unconsumed_sentence_is_handed_to_llm() -> None:
     """规则层读不懂的句子不许硬认领——否则"看起来正常"的空结果会盖住原话。"""
     assert parse_by_legacy("船租翻倍了") is None
     assert parse_by_legacy("这段时间到底该怎么安排比较妥当") is None
+
+
+# ── 上游那道门：is_planning_request ──────────────────────────────────────────
+# 它比 DSL 漏斗更靠前。为真时直接进旧规划器（纯正则），DSL 六层和大模型都不走。
+# 所以它的漏判 = 整句被一个关键词带走，且没有任何兜底。
+
+def test_comparison_question_is_not_claimed_by_the_gate() -> None:
+    """「经济优先和风险优先差多少」是问句，不是"改成高风险优先"的指令。
+
+    实测它曾被认领：问句词表里只有「是多少」，没有「多少」；
+    于是落到最后一段关键词表，「风险优先」命中 → 走进旧规划器 →
+    产出一份 strategy=高风险优先抢修 的"改方案"。用户问的是差多少。
+    """
+    compiler = PlanningIntentCompiler()
+    assert compiler.is_planning_request("经济优先和风险优先差多少") is False
+    assert compiler.is_planning_request("按成本最低优先排") is True
+
+
+def test_gate_keeps_action_sentences() -> None:
+    compiler = PlanningIntentCompiler()
+    for text in ("钱不超过300万", "按成本最低优先排每天只能干8小时", "帮我排一版方案"):
+        assert compiler.is_planning_request(text) is True, text
