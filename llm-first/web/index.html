@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="data:," />
+<title>意图理解对照台 · 规则主导 vs LLM主导</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --ink: #17191c;
+    --ink-2: #5b6270;
+    --ink-3: #8b93a1;
+    --line: #e3e6eb;
+    --line-2: #eef0f3;
+    --accent: #2f6fed;
+    --accent-soft: #eaf1ff;
+    --pass: #138a53;
+    --pass-soft: #e6f6ee;
+    --fail: #c62f2f;
+    --fail-soft: #fdecec;
+    --warn: #a86a00;
+    --warn-soft: #fdf3e2;
+    --na: #8b93a1;
+    --na-soft: #f1f2f5;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10; background: rgba(255,255,255,.92);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--line);
+  }
+  .bar { max-width: 1560px; margin: 0 auto; padding: 12px 20px; display: flex;
+         align-items: center; gap: 14px; flex-wrap: wrap; }
+  .title { font-size: 15px; font-weight: 650; letter-spacing: .2px; }
+  .title small { font-weight: 400; color: var(--ink-3); margin-left: 8px; font-size: 12px; }
+  .spacer { flex: 1; }
+  .chip {
+    font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--ink-2); background: #fff; white-space: nowrap;
+  }
+  .chip.ok { color: var(--pass); border-color: #bfe3d0; background: var(--pass-soft); }
+  .chip.bad { color: var(--fail); border-color: #f0c9c9; background: var(--fail-soft); }
+  .chip a { color: var(--accent); text-decoration: none; }
+  main { max-width: 1560px; margin: 0 auto; padding: 18px 20px 60px; }
+
+  .ask { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+         padding: 14px; }
+  .ask textarea {
+    width: 100%; min-height: 62px; resize: vertical; border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px 12px; font: inherit; outline: none; background: #fff;
+  }
+  .ask textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  button.primary {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+    padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button.primary:disabled { opacity: .55; cursor: default; }
+  .ex {
+    border: 1px solid var(--line); background: #fff; color: var(--ink-2);
+    border-radius: 999px; padding: 4px 11px; font-size: 12px; cursor: pointer;
+  }
+  .ex:hover { border-color: var(--accent); color: var(--accent); }
+  label.toggle { font-size: 12px; color: var(--ink-2); display: inline-flex; gap: 5px; align-items: center; }
+
+  .verdict { margin-top: 14px; border-radius: var(--radius); border: 1px solid var(--line);
+             background: var(--panel); padding: 10px 14px; font-size: 13px; color: var(--ink-2); }
+  .verdict b { color: var(--ink); }
+  .verdict .sep { color: var(--ink-3); margin: 0 10px; }
+
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+  @media (max-width: 1100px) { .cols { grid-template-columns: 1fr; } }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+          display: flex; flex-direction: column; min-height: 220px; }
+  .card > h2 {
+    margin: 0; padding: 11px 14px; font-size: 13px; font-weight: 650;
+    border-bottom: 1px solid var(--line-2); display: flex; align-items: center; gap: 8px;
+  }
+  .card > h2 .tag { font-weight: 400; font-size: 11px; color: var(--ink-3); }
+  .body { padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
+
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; }
+  .b { font-size: 12px; padding: 2px 8px; border-radius: 6px; background: var(--na-soft);
+       color: var(--ink-2); border: 1px solid transparent; }
+  .b.route { background: var(--accent-soft); color: #1f4fb8; font-family: var(--mono); }
+  .b.route.stop { background: var(--fail-soft); color: var(--fail); }
+  .b.dim { background: transparent; border-color: var(--line); color: var(--ink-3); }
+
+  h3 { margin: 0; font-size: 12px; color: var(--ink-3); font-weight: 600;
+       letter-spacing: .3px; text-transform: none; }
+
+  ul.plain { margin: 0; padding-left: 16px; }
+  ul.plain li { font-size: 13px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 5px 7px; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+  th { color: var(--ink-3); font-weight: 600; font-size: 11.5px; }
+  td.mono, .mono { font-family: var(--mono); font-size: 12px; }
+  tr:last-child td { border-bottom: 0; }
+
+  .checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+  .ck { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; background: #fff; }
+  .ck .h { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+  .ck .code { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+  .ck .nm { font-size: 12px; font-weight: 600; }
+  .ck .dt { font-size: 11px; color: var(--ink-3); margin-top: 3px; line-height: 1.45;
+            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .ck.pass { border-color: #bfe3d0; background: var(--pass-soft); }
+  .ck.pass .dot { background: var(--pass); }
+  .ck.fail { border-color: #f0c9c9; background: var(--fail-soft); }
+  .ck.fail .dot { background: var(--fail); }
+  .ck.unclear { border-color: #ecd6a8; background: var(--warn-soft); }
+  .ck.unclear .dot { background: var(--warn); }
+  .ck.na { background: #fafbfc; }
+  .ck.na .dot { background: var(--na); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+
+  details { border: 1px solid var(--line-2); border-radius: 8px; padding: 6px 10px; background: #fbfcfd; }
+  details > summary { cursor: pointer; font-size: 12px; color: var(--ink-2); outline: none; }
+  pre { margin: 8px 0 2px; font-family: var(--mono); font-size: 11.5px; line-height: 1.5;
+        white-space: pre-wrap; word-break: break-all; color: #2b3038; }
+
+  .note { font-size: 12px; color: var(--ink-3); }
+  .hit { color: var(--fail); font-weight: 600; }
+  .ok { color: var(--pass); font-weight: 600; }
+  .warn { color: var(--warn); font-weight: 600; }
+  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid #cfd6e2;
+          border-top-color: var(--accent); border-radius: 50%; animation: sp .7s linear infinite; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  .empty { color: var(--ink-3); font-size: 12.5px; padding: 8px 0; }
+  .err { background: var(--fail-soft); border: 1px solid #f0c9c9; color: #8f2424;
+         border-radius: 8px; padding: 8px 10px; font-size: 12.5px; }
+  footer { max-width: 1560px; margin: 0 auto; padding: 0 20px 40px; color: var(--ink-3); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="title">意图理解对照台<small>同一句话，两套理解方式</small></div>
+    <div class="spacer"></div>
+    <span class="chip" id="c-model">模型 …</span>
+    <span class="chip" id="c-prompt">提示词 …</span>
+    <span class="chip" id="c-key">检查中…</span>
+    <span class="chip"><a href="http://127.0.0.1:3000" target="_blank" rel="noreferrer">规则主导版完整界面 ↗</a></span>
+  </div>
+</header>
+
+<main>
+  <section class="ask">
+    <textarea id="q" placeholder="用一句话说出你的诉求，例如：任务001和任务002不要同一天做，钱不超过300万"></textarea>
+    <div class="row">
+      <button class="primary" id="go">两边同时读</button>
+      <label class="toggle"><input type="checkbox" id="repair" checked /> 允许退回重试一次</label>
+      <span class="spacer"></span>
+      <span id="exs" class="row" style="margin:0"></span>
+    </div>
+  </section>
+
+  <div class="verdict" id="verdict">输入一句话，左右两栏会用各自的方式读它。左边只认规则，右边让模型读整句、再由验收器逐条核。</div>
+
+  <div class="cols">
+    <section class="card">
+      <h2>规则主导版<span class="tag">backend/ · 规则认领 + 旧编译器，不调用大模型</span></h2>
+      <div class="body" id="left"><div class="empty">等待输入</div></div>
+    </section>
+    <section class="card">
+      <h2>LLM 主导版<span class="tag">llm-first/ · 整句读 + 工作记录 + A1~A10 验收</span></h2>
+      <div class="body" id="right"><div class="empty">等待输入</div></div>
+    </section>
+  </div>
+</main>
+
+<footer>
+  两边的执行侧是同一套：DSL 都交给 <span class="mono">backend/app/core/dsl/validator.py</span> 校验、同一份注册表。
+  差异只来自理解层。
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const num = (n) => Number.isInteger(n) ? String(n) : (Math.round(n * 1000) / 1000);
+const json = (o) => esc(JSON.stringify(o, null, 1));
+const ms = (n) => (n === undefined || n === null) ? "—" : (n < 1 ? "<1 ms" : n + " ms");
+
+function badge(text, cls = "") { return `<span class="b ${cls}">${esc(text)}</span>`; }
+function routeBadge(route, stop) { return `<span class="b route ${stop ? "stop" : ""}">${esc(route || "—")}</span>`; }
+
+function verdictClass(v) { return ({ pass: "pass", fail: "fail", unclear: "unclear", na: "na" })[v] || "na"; }
+function verdictText(v) { return ({ pass: "过", fail: "退", unclear: "存疑", na: "不适用" })[v] || v; }
+
+function checksHtml(report) {
+  if (!report) return "";
+  return `<div class="checks">` + report.checks.map((c) => `
+    <div class="ck ${verdictClass(c.verdict)}">
+      <div class="h"><span class="nm">${c.code} ${esc(c.name)}</span><span class="dot"></span></div>
+      <div class="dt" title="${esc(c.detail)}"><span class="code">${verdictText(c.verdict)}</span> ${esc(c.detail)}</div>
+    </div>`).join("") + `</div>`;
+}
+
+function numbersHtml(n) {
+  if (!n) return "";
+  const miss = (n.missing || []).map(num).join("、") || "无";
+  const extra = (n.extra || []).map(num).join("、") || "无";
+  return `<div><h3>数字对账</h3>
+    <div class="note">原文 ${n.original.length} 个数字 → DSL 复现 ${n.produced.length} 个。
+      丢：<span class="${n.missing.length ? "hit" : "ok"}">${esc(miss)}</span>　
+      多：<span class="${n.extra.length ? "warn" : "ok"}">${esc(extra)}</span>
+      ${n.extra.length ? '<br><span style="color:var(--ink-3)">（多出的常是 08:00 之类的时刻默认值，看清单自己判断）</span>' : ""}
+    </div></div>`;
+}
+
+function compileHtml(errors) {
+  if (!errors || !errors.length) return `<div class="note ok">编译校验通过（validator 无报错）</div>`;
+  return `<div><h3>编译校验</h3><ul class="plain">` +
+    errors.map((e) => `<li class="hit">${esc(e)}</li>`).join("") + `</ul></div>`;
+}
+
+function renderLeft(d) {
+  if (!d) return;
+  if (d.error && !d.stage) return void ($("left").innerHTML = `<div class="err">${esc(d.error)}</div>`);
+  let html = `<div class="badges">
+      ${routeBadge(d.route)}${badge(d.stage_label || d.stage, "")}
+      ${badge(ms(d.latency_ms), "dim")}${badge("不调用大模型", "dim")}</div>`;
+
+  if (!d.summary || !d.summary.length) {
+    html += `<div class="empty">这一层没有认出任何改动 —— 在真实链路里，这句话会继续往右走（向量 → 大模型）。</div>`;
+  } else {
+    html += `<div><h3>读出来的改动（人话）</h3><ul class="plain">` +
+      d.summary.map((s) => `<li>${esc(s)}</li>`).join("") + `</ul></div>`;
+  }
+  html += compileHtml(d.compile_errors);
+  html += numbersHtml(d.numbers);
+  if (d.dsl && Object.keys(d.dsl).length) {
+    html += `<details><summary>DSL 原文</summary><pre>${json(d.dsl)}</pre></details>`;
+  }
+  html += `<div class="note">规则侧不交工作记录（没有 claims/fills），所以 A1~A4、A8 无从验收——
+    这不是判它错，是它没有这项产物。可比的是：编译校验、数字对账、以及它认出了什么。</div>`;
+  $("left").innerHTML = html;
+}
+
+function renderRight(d) {
+  if (!d) return;
+  let html = `<div class="badges">${routeBadge(d.route, d.route === "clarify" || d.route === "reject")}
+      ${badge(ms(d.latency_ms), "dim")}${badge(`尝试 ${d.attempts} 次`, "dim")}` +
+      (d.cached ? badge(`缓存命中 · 模型原耗 ${ms(d.model_ms)}`, "dim") : "") +
+      (d.model_route ? badge(`模型原判 ${d.model_route}`, "dim") : "") + `</div>`;
+
+  if (d.guardrail) {
+    html += `<div class="err">护栏拦下：${esc(d.guardrail.category)}（命中「${esc(d.guardrail.evidence)}」）</div>`;
+  }
+  if (d.error) html += `<div class="err">${esc(d.error)}</div>`;
+
+  if (d.segments && d.segments.length) {
+    html += `<div><h3>系统切段（分母，模型左右不了）</h3>
+      <div class="badges">${d.segments.map((s) => badge(s)).join("")}</div></div>`;
+  }
+
+  if (d.claims && d.claims.length) {
+    html += `<div><h3>claims · 切句</h3><table><tr><th>#</th><th>原文片段</th><th>kind</th><th>about</th></tr>` +
+      d.claims.map((c) => `<tr><td class="mono">${esc(c.id)}</td><td>${esc(c.text)}</td>
+        <td class="mono">${esc(c.kind || "")}</td><td class="mono">${esc(c.about || "")}</td></tr>`).join("") +
+      `</table></div>`;
+  }
+
+  if (d.fills && d.fills.length) {
+    html += `<div><h3>fills · 认领</h3><table><tr><th>#</th><th>行号</th><th>依据 span</th><th>from</th><th>值</th></tr>` +
+      d.fills.map((f) => `<tr><td class="mono">${esc(f.claim)}</td><td class="mono">${esc(f.row)}</td>
+        <td>${esc(f.span)}</td><td class="mono">${esc(f.from)}</td>
+        <td class="mono">${esc(typeof f.value === "object" ? JSON.stringify(f.value) : f.value)}</td></tr>`).join("") +
+      `</table></div>`;
+  }
+
+  if (d.unassigned && d.unassigned.length) {
+    html += `<div><h3>unassigned · 明说做不到</h3><table><tr><th>#</th><th>理由</th><th>说明</th></tr>` +
+      d.unassigned.map((u) => `<tr><td class="mono">${esc(u.claim)}</td><td class="mono">${esc(u.reason)}</td>
+        <td>${esc(u.note)}</td></tr>`).join("") + `</table></div>`;
+  }
+
+  if (d.report) {
+    html += `<div><h3>验收 A1~A10　${esc(d.report.summary)}</h3>${checksHtml(d.report)}</div>`;
+  }
+
+  html += compileHtml(d.compile_errors);
+  html += numbersHtml(d.numbers);
+
+  if (d.dsl && Object.keys(d.dsl).length) {
+    html += `<details><summary>DSL 原文</summary><pre>${json(d.dsl)}</pre></details>`;
+  }
+  $("right").innerHTML = html;
+}
+
+function renderVerdict(d) {
+  const r = d.rule || {}, l = d.llm || {};
+  const rN = (r.summary || []).length;
+  const lN = Object.keys(l.dsl || {}).reduce((a, k) => a + (l.dsl[k] || []).length, 0);
+  const rDrop = (r.numbers && r.numbers.missing || []).length;
+  const lDrop = (l.numbers && l.numbers.missing || []).length;
+  const fails = l.report ? l.report.checks.filter((c) => c.verdict === "fail").length : 0;
+  $("verdict").innerHTML =
+    `这句话，左边读出 <b>${rN}</b> 项改动、丢掉 <b>${rDrop}</b> 个原文数字；` +
+    `右边读出 <b>${lN}</b> 项改动、丢掉 <b>${lDrop}</b> 个数字、验收未过 <b>${fails}</b> 条。` +
+    `<span class="sep">|</span>右边最终交出的动作是 <b>${esc(l.route || "—")}</b>` +
+    (l.route === "clarify" ? "　——它选了问，而不是猜。" : "。");
+}
+
+async function ask() {
+  const q = $("q").value.trim();
+  if (!q) { $("q").focus(); return; }
+  $("go").disabled = true;
+  $("go").innerHTML = `<span class="spin"></span> 读取中`;
+  $("left").innerHTML = `<div class="empty"><span class="spin"></span> 规则层…</div>`;
+  $("right").innerHTML = `<div class="empty"><span class="spin"></span> 模型读取 + 验收…（通常 1~4 秒）</div>`;
+  try {
+    const res = await fetch("/api/compare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ utterance: q, allow_repair: $("repair").checked }),
+    });
+    const data = await res.json();
+    renderLeft(data.rule); renderRight(data.llm); renderVerdict(data);
+  } catch (e) {
+    $("right").innerHTML = `<div class="err">请求失败：${esc(e.message)}</div>`;
+  } finally {
+    $("go").disabled = false;
+    $("go").textContent = "两边同时读";
+  }
+}
+
+$("go").onclick = ask;
+$("q").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) ask(); });
+
+(async function boot() {
+  try {
+    const h = await (await fetch("/api/health")).json();
+    $("c-model").textContent = "模型 " + h.model;
+    $("c-prompt").textContent = "提示词 " + h.prompt_chars + " 字符";
+    const k = $("c-key");
+    k.textContent = h.llm_ready ? "API 已配置" : "未配置 DEEPSEEK_API_KEY";
+    k.className = "chip " + (h.llm_ready ? "ok" : "bad");
+    $("exs").innerHTML = h.examples.map((x) => `<button class="ex">${esc(x)}</button>`).join("");
+    [...$("exs").children].forEach((b) => b.onclick = () => { $("q").value = b.textContent; ask(); });
+    $("q").value = h.examples[1] || h.examples[0] || "";
+  } catch (e) { /* 后端没起来时保持静态 */ }
+})();
+</script>
+</body>
+</html>
