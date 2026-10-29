@@ -388,15 +388,16 @@ class AgentRuntime:
                 memory=memory,
             )
 
-        # ── Agent-first：读类问题交给模型自己判断和调工具 ──────────────────
-        # 以前这里用关键词表先分诊（模型问答 / 版本对比），模型永远看不到原话，
-        # 结果"这两版本区别"被当成"模型是什么"讲通用结构。
-        # 现在：只要对话 agent 可用，且这句话不是明确的排程修改/求解命令，
-        # 就交给 agent 用 read_versions（含 model/constraints/parameters）自己答；
-        # agent 不可用（无 key）时回落到下面的确定性分诊，保证离线与测试可用。
-        compare_reply = self._compare_versions_reply(conversation_id, content, selected_version)
-        model_question = detect_model_question(content)
-        if self.conversation_agent.enabled and (model_question or compare_reply is not None):
+        # ── Agent-first：语义判断交给模型 ────────────────────────────────
+        # 读类/解释类/纠错类/改排程都由模型自己决定调哪个工具（read_* 或 solve）。
+        # 仍然确定性处理的只有：待确认/取消（上面）、求解命令（上面）、
+        # 版本切换与场景批量（状态与批量流程，下面）。
+        # agent 不可用（无 key / 调用失败）时回落到原来的确定性链路。
+        if (
+            self.conversation_agent.enabled
+            and not (is_version_switch_request(content) and selected_version)
+            and not is_scenario_batch(content)
+        ):
             try:
                 reply = self._answer_with_conversation_agent(
                     conversation_id=conversation_id,
@@ -406,15 +407,24 @@ class AgentRuntime:
                     selected_version=selected_version,
                     sink=sink,
                 )
+                latest = self.memories.get_or_create(conversation_id)
+                pending_now = (latest.activeFilters or {}).get("pendingChange")
+                created_now = (
+                    isinstance(pending_now, dict)
+                    and pending_now.get("sourcePrompt") == content
+                )
                 return self._finalize_response(
                     conversation_id,
                     reply,
-                    "assistant_reply",
-                    memory.activeView,
+                    "change_preview" if created_now else "assistant_reply",
+                    latest.activeView,
                     [],
                 )
             except ConversationAgentError:
                 pass  # 落到确定性兜底
+
+        compare_reply = self._compare_versions_reply(conversation_id, content, selected_version)
+        model_question = detect_model_question(content)
 
         if compare_reply is not None:
             return self._finalize_response(
@@ -953,58 +963,13 @@ class AgentRuntime:
             [item for pair in pairs for item in pair],
         )
 
-    _DSL_LABELS = {
-        "co_occur": "互斥（不同天/同时）：{tasks}",
-        "precedence": "先后顺序：{before} → {after}",
-        "earliest": "最早开工：{task} 不早于 {time}",
-        "deadline": "最晚完工：{task} 不晚于 {time}",
-        "fix": "固定作业线：{task} 只上 {line} 号线",
-        "forbidden_dates": "禁止开工日期：{dates}",
-        "must": "必修：{task}",
-        "exclude": "排除：{task}",
-        "cardinality": "完成数 {op} {value}",
-        "budget": "预算：{quantity} {op} {value}",
-    }
+    _DSL_LABELS = None  # 兼容旧引用；渲染已下沉到 change_planning
 
     @classmethod
     def _format_dsl_preview(cls, dsl: dict[str, Any]) -> str:
-        lines = ["已基于当前配置准备自定义约束/目标，尚未求解。", "变更预览："]
-        index = 1
-        for spec in dsl.get("constraints") or []:
-            label = cls._DSL_LABELS.get(spec.get("type"), str(spec))
-            try:
-                text = label.format(**spec)
-            except (KeyError, IndexError):
-                text = json.dumps(spec, ensure_ascii=False)
-            lines.append(f"{index}. {text}")
-            index += 1
-        for spec in dsl.get("objectives") or []:
-            if spec.get("type") == "strategy":
-                mode = spec.get("mode")
-                suffix = f"（{mode}）" if mode else ""
-                lines.append(f"{index}. 优化策略：{spec.get('name')}{suffix}")
-                index += 1
-            elif spec.get("type") == "weighted":
-                weights = "、".join(
-                    f"{name} {value:.2f}" for name, value in (spec.get("weights") or {}).items()
-                )
-                lines.append(f"{index}. 加权目标：{weights}")
-                index += 1
-            elif spec.get("type") == "lexmin":
-                stages = " → ".join(
-                    f"{'最小化' if s.get('dir') == 'minimize' else '最大化'}{s.get('q')}"
-                    for s in spec.get("stages", [])
-                )
-                lines.append(f"{index}. 自定义分层目标：{stages}")
-                index += 1
-            else:
-                lines.append(f"{index}. 自定义目标：{json.dumps(spec, ensure_ascii=False)}")
-                index += 1
-        lines.extend([
-            "这次会生成独立沙盘版本，不覆盖现有方案。",
-            "回复“确认生成沙盘”执行；回复“取消”放弃本次变更。",
-        ])
-        return "\n".join(lines)
+        from app.core.change_planning import format_dsl_preview
+
+        return format_dsl_preview(dsl)
 
     def _try_dsl_parse(self, content: str, sink: StreamSink | None = None, context_block: str | None = None):
         """DSL 三层解析（增量能力）。解析不了/LLM 不可用返回 None，回退现有路径。
@@ -1553,17 +1518,22 @@ class AgentRuntime:
             on_status=sink.status if sink else None,
         )
         if toolbox.pending_change:
-            latest = self.memories.get_or_create(conversation_id)
-            filters = dict(latest.activeFilters)
-            filters["pendingChange"] = toolbox.pending_change
-            self.memories.apply_patch(
-                latest,
-                {
-                    "activeFilters": filters,
-                    "activeFocusTag": toolbox.pending_change["request"]["strategy"],
-                },
-            )
+            self._persist_agent_pending(conversation_id, toolbox.pending_change)
         return reply
+
+    def _persist_agent_pending(self, conversation_id: str, pending: dict[str, Any]) -> None:
+        """agent 路径产出的待确认变更落库。
+
+        DSL 待确认（kind=dsl）没有 request 段，旧实现硬取 request["strategy"] 会 500。
+        """
+        latest = self.memories.get_or_create(conversation_id)
+        filters = dict(latest.activeFilters)
+        filters["pendingChange"] = pending
+        patch: dict[str, Any] = {"activeFilters": filters}
+        request_payload = pending.get("request")
+        if isinstance(request_payload, dict) and request_payload.get("strategy"):
+            patch["activeFocusTag"] = request_payload["strategy"]
+        self.memories.apply_patch(latest, patch)
 
     def _compare_versions_reply(
         self,

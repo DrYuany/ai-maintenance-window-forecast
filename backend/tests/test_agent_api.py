@@ -773,3 +773,27 @@ def test_version_reference_helpers() -> None:
     assert not _has_version_reference("今天风大吗")
     assert _looks_like_modification("顺延两天")
     assert not _looks_like_modification("你没听懂我说的意思？")
+
+
+def test_agent_dsl_pending_persists_without_request_field() -> None:
+    """DSL 待确认没有 request 段，落库不得因取 request["strategy"] 崩溃。"""
+    from types import SimpleNamespace
+
+    from app.core.agent_runtime import AgentRuntime
+
+    saved: dict = {}
+
+    class _Memories:
+        def get_or_create(self, conversation_id):
+            return SimpleNamespace(activeFilters={"x": 1}, activeView="P01")
+
+        def apply_patch(self, memory, patch):
+            saved.update(patch)
+            return memory
+
+    stub = SimpleNamespace(memories=_Memories())
+    AgentRuntime._persist_agent_pending(
+        stub, "conv_x", {"kind": "dsl", "dsl": {"constraints": []}, "preview": "p"}
+    )
+    assert saved["activeFilters"]["pendingChange"]["kind"] == "dsl"
+    assert "activeFocusTag" not in saved

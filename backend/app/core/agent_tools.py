@@ -1416,24 +1416,62 @@ class AgentToolbox:
                 version=base,
             )
         current = self._request_from(base)
-        plan = build_change_plan(
-            instruction,
-            current,
-            base.id if base else None,
-            self.planner,
-        )
-        if not plan.operations:
+        base_id = base.id if base else None
+
+        # DSL 优先：约束/目标类修改（互斥、先后、最早、预算、加权目标…）旧规划器表达不了。
+        from app.core.change_planning import plan_dsl_change
+
+        dsl_change = plan_dsl_change(instruction, current, base_id)
+        if dsl_change is not None and not dsl_change.expressible:
+            payload = {
+                "kind": "dsl",
+                "dsl": dsl_change.dsl,
+                "source": dsl_change.source,
+                "baseVersionId": base_id,
+                "sourcePrompt": instruction,
+                "preview": dsl_change.preview,
+            }
+            self.pending_change = payload
+            if self.on_pending_change:
+                self.on_pending_change(payload)
             return self._envelope(
-                "clarify",
-                {"message": plan.preview, "requiresUserConfirmation": False},
+                "needs_confirmation",
+                {
+                    "preview": dsl_change.preview,
+                    "basePlanNumber": self.plan_numbers.get(base.id) if base else None,
+                    "requiresUserConfirmation": True,
+                },
                 version=base,
+                next_actions=["等待用户确认；确认前不得声称已求解或已生成方案。"],
             )
+
+        if dsl_change is not None and dsl_change.operations:
+            from app.core.model_change import _format_preview
+
+            operations = dsl_change.operations
+            request = dsl_change.request
+            preview = _format_preview(operations, base_id)
+            source_prompt = instruction
+        else:
+            plan = build_change_plan(instruction, current, base_id, self.planner)
+            if not plan.operations:
+                return self._envelope(
+                    "clarify",
+                    {"message": plan.preview, "requiresUserConfirmation": False},
+                    version=base,
+                )
+            operations = plan.operations
+            request = plan.request
+            preview = plan.preview
+            source_prompt = plan.source_prompt
+            base_id = plan.base_version_id
+
         payload = {
-            "baseVersionId": plan.base_version_id,
-            "request": plan.request.to_payload(),
-            "operations": plan.operations,
-            "preview": plan.preview,
-            "sourcePrompt": plan.source_prompt,
+            "baseVersionId": base_id,
+            "request": request.to_payload(),
+            "operations": operations,
+            "preview": preview,
+            "sourcePrompt": source_prompt,
         }
         self.pending_change = payload
         if self.on_pending_change:
@@ -1441,8 +1479,8 @@ class AgentToolbox:
         return self._envelope(
             "needs_confirmation",
             {
-                "preview": plan.preview,
-                "operations": plan.operations,
+                "preview": preview,
+                "operations": operations,
                 "basePlanNumber": (
                     self.plan_numbers.get(base.id) if base else None
                 ),
