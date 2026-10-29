@@ -27,6 +27,12 @@ def to_registry_name(internal_key: str) -> str:
     return _KEY_TO_PARAM_NAME.get(internal_key, internal_key)
 
 
+# 注册表里叫"参数"、实际落到 PlanningRequest.strategy 的字段。
+# 与 product_planner.STRATEGIES 保持一致。
+STRATEGY_NAMES: tuple[str, ...] = ('成本最低优先', '高风险优先抢修', '最短完成优先', '检修最多器件优先')
+_STRATEGY_FIELDS: frozenset[str] = frozenset({'标准目标策略', '目标策略', '优化策略'})
+
+
 # limits 键 → DSL 约束规格
 def _limits_to_constraints(limits: dict[str, Any]) -> list[dict[str, Any]]:
     constraints: list[dict[str, Any]] = []
@@ -109,6 +115,17 @@ def dsl_to_request(
     for spec in dsl.get("parameters") or []:
         field = to_registry_name(spec["field"])  # 接受注册表名或内部键
         field = PARAM_NAME_TO_KEY.get(field, field)
+        if field in _STRATEGY_FIELDS:
+            # 标准目标策略在 122 项注册表里是"选择层参数"，但它不是系统参数，
+            # 落到 PlanningRequest 的 strategy 字段。不拦就会当成覆盖参数，
+            # 到 load_project 才报"未支持参数：{'标准目标策略'}"。
+            name = str(spec.get("value") or "").strip()
+            if name in STRATEGY_NAMES:
+                request = replace(request, strategy=name)
+                continue
+            residual.append({"type": "unsupported_parameter", "field": field, "value": spec.get("value"),
+                             "reason": f"策略只能是：{'/'.join(STRATEGY_NAMES)}"})
+            continue
         if spec.get("op") == "*":
             # 本轮新口径取代旧口径：相对倍率替换掉同参数的绝对覆盖
             overrides.pop(field, None)

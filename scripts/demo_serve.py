@@ -30,6 +30,11 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8010)
     parser.add_argument("--host", default="127.0.0.1", help="默认只听本机，走隧道即可对外")
     parser.add_argument("--code", default="", help="访问口令；省略则读环境变量或自动生成")
+    parser.add_argument("--open", action="store_true", help="本机演示：不设口令，直接开")
+    parser.add_argument("--workers", type=int, default=0,
+                        help="求解线程数。默认 min(8,CPU)；设 1 回到可复现模式")
+    parser.add_argument("--seconds", type=int, default=60,
+                        help="单次求解时限。方案通常 1~3 秒就有，后续时间用于打磨次要目标")
     args = parser.parse_args()
 
     if not BUILD_INDEX.exists():
@@ -40,10 +45,20 @@ def main() -> None:
     except ImportError:
         fail("当前解释器没有 ortools，请用装了 OR-Tools 的 Python 3.12 运行")
 
-    code = args.code.strip() or os.environ.get("DEMO_ACCESS_CODE", "").strip()
-    if not code:
+    code = "" if args.open else (args.code.strip() or os.environ.get("DEMO_ACCESS_CODE", "").strip())
+    if not code and not args.open:
         code = "".join(secrets.choice(ALPHABET) for _ in range(6))
-    os.environ["DEMO_ACCESS_CODE"] = code
+    if code:
+        os.environ["DEMO_ACCESS_CODE"] = code
+    else:
+        os.environ.pop("DEMO_ACCESS_CODE", None)
+
+    # 演示默认多线程：单线程是为逐位可复现，12 项任务要 5 分钟才出解，
+    # 演示时没人愿意等。8 线程实测同一目标值 1.1 秒收敛。
+    cpu = os.cpu_count() or 1
+    workers = args.workers or min(8, cpu)
+    os.environ["MWA_SOLVER_WORKERS"] = str(workers)
+    os.environ["MWA_SOLVE_SECONDS"] = str(max(5, args.seconds))
 
     if str(BACKEND) not in sys.path:
         sys.path.insert(0, str(BACKEND))
@@ -53,13 +68,21 @@ def main() -> None:
     base = f"http://127.0.0.1:{args.port}"
     print()
     print("  演示站点已就绪")
-    print(f"  本机打开   {base}/?k={code}")
-    print(f"  访问口令   {code}")
-    print(f"  健康检查   {base}/api/health")
-    print()
-    print("  要给别人看，另开一个终端跑：")
-    print(f"      cloudflared tunnel --url {base}")
-    print("  把隧道给出的公网地址接上 /?k=口令，就是邀请链接。")
+    print(f"  求解线程   {workers}" + ("（可复现模式，会慢很多）" if workers == 1 else "（演示模式，最快）"))
+    print(f"  求解时限   {max(5, args.seconds)} 秒")
+    if code:
+        print(f"  本机打开   {base}/?k={code}")
+        print(f"  访问口令   {code}")
+        print(f"  健康检查   {base}/api/health")
+        print()
+        print("  要给别人看，另开一个终端跑：")
+        print(f"      cloudflared tunnel --url {base}")
+        print("  把隧道给出的公网地址接上 /?k=口令，就是邀请链接。")
+    else:
+        print(f"  本机打开   {base}")
+        print(f"  健康检查   {base}/api/health")
+        print()
+        print("  未设口令，同网络的人知道地址就能直接进。要对外演示请去掉 --open。")
     print()
     print("  换下一批人体验之前，先停服务，再跑：python scripts/demo_reset.py")
     print()

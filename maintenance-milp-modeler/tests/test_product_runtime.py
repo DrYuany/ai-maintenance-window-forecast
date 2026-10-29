@@ -16,7 +16,9 @@ PROJECT = Path(__file__).resolve().parents[2]
 class ProductRuntimeTests(unittest.TestCase):
     def test_current_snapshot_does_not_read_future_alarms(self):
         data = load_project(PROJECT, as_of='2026-10-23T18:00:00+08:00')
-        self.assertEqual(len(data.tasks), 25)
+        # 数据在 a27db1c 调整为"初始 10 条、之后每 4 天一条"，此日即为 11 条。
+        # 这里的数字只用来确认"未来告警没被读进来"，跟随数据版本走。
+        self.assertEqual(len(data.tasks), 11)
         self.assertEqual(len(data.windows), 1)
         self.assertGreater(len(data.observation_windows), 1)
         self.assertEqual(data.windows[0]['编号'], '窗口02')

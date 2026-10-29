@@ -8,6 +8,7 @@ import hashlib
 import html
 import json
 import math
+import os
 import time
 from collections import defaultdict
 from fractions import Fraction
@@ -17,6 +18,22 @@ from model_artifact import build_model_artifact, export_model_file, write_model_
 
 MONEY = 1000000  # micro-yuan; all costs are reported in yuan
 STRATEGIES = ('成本最低优先','高风险优先抢修','最短完成优先','检修最多器件优先')
+
+
+def _worker_count():
+    """求解线程数。默认 1 = 结果可复现（并行会让同一题在不同次跑出不同解）。
+
+    演示场景用环境变量放开：MWA_SOLVER_WORKERS=8。实测 12 项任务从 300 秒
+    压到秒级，目标值不变，但不再保证逐位可复现。
+    """
+    try:
+        value = int(os.environ.get('MWA_SOLVER_WORKERS', '1'))
+    except ValueError:
+        return 1
+    return max(1, min(32, value))
+
+
+WORKERS = _worker_count()
 
 
 def clock(text):
@@ -354,6 +371,13 @@ def build_model(data, options, partial=False, strategy='成本最低优先', mod
 
 
 def solve(data, options, output, seconds=60, strategy='成本最低优先', mode='分层', weights=None, limits=None, partial=False, hint=None, on_solver=None, cancelled=None, model_fingerprint=None, extra_constraints=None, custom_stages=None):
+    # 演示可临时压时限：方案通常 1~3 秒就有，剩余时间都在给次要目标打磨。
+    cap = os.environ.get('MWA_SOLVE_SECONDS', '').strip()
+    if cap:
+        try:
+            seconds = min(seconds, max(5, int(cap)))
+        except ValueError:
+            pass
     model,choices,stages,cost=build_model(data,options,partial,strategy,mode,weights,limits,extra_constraints,custom_stages)
     if hint:
         keys={(c['任务编号'],c['开始'],c['作业线']) for c in hint}
@@ -370,7 +394,7 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
     else:
         prototype_bytes = str(prototype).encode('utf-8')
     artifact_fingerprint = model_fingerprint or hashlib.sha256(prototype_bytes).hexdigest()
-    solver_parameters = {'num_search_workers':1,'random_seed':17,'max_time_in_seconds':seconds}
+    solver_parameters = {'num_search_workers':WORKERS,'random_seed':17,'max_time_in_seconds':seconds}
     artifact = build_model_artifact(
         data=data,
         options=options,
@@ -386,12 +410,28 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
         model_fingerprint=artifact_fingerprint,
     )
     artifact = write_model_artifact(artifact, output, model)
-    solver=cp_model.CpSolver();solver.parameters.num_search_workers=1;solver.parameters.random_seed=17
+    solver=cp_model.CpSolver();solver.parameters.num_search_workers=WORKERS;solver.parameters.random_seed=17
     if on_solver: on_solver(solver)
     fallback=list(hint) if hint and not limits else None
     started=time.monotonic();logs=[];selected=fallback
     last_cost=account(data,fallback)['总成本'] if fallback else None
     termination_reason='COMPLETED';business_complete=False;tie_complete=False;last_status=None
+
+    def _rehint():
+        """把当前解交给下一阶段当起点。
+
+        分层求解每阶段会加一条“上一目标 == 最优值”。这条约束把可行域压成
+        一层薄壳，下一阶段若从零开始搜，等于重新解一遍原问题——实测 12 项
+        任务第一阶段 1.2 秒最优，第二阶段却烧掉 299 秒毫无进展。
+        当前解本来就满足新加的那条等式，直接喂回去即可。
+        """
+        if selected is None:
+            return
+        keys={(c['任务编号'],c['开始'],c['作业线']) for c in selected}
+        model.ClearHints()
+        for c,x in choices:
+            model.AddHint(x,int((c['任务编号'],c['开始'],c['作业线']) in keys))
+
     for name,sense,expression in stages:
         if cancelled and cancelled():
             termination_reason='USER_CANCELLED';break
@@ -418,6 +458,7 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
         if status!=cp_model.OPTIMAL:
             termination_reason='TIME_LIMIT';break
         model.Add(expression==round(val))
+        _rehint()
     business_complete=len(logs)==len(stages) and all(r['状态']=='OPTIMAL' for r in logs)
     if business_complete:
         ordered=sorted(choices,key=lambda item:(item[0]['任务编号'],item[0]['开始'],item[0]['作业线']))
@@ -446,6 +487,7 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
             if status!=cp_model.OPTIMAL:
                 termination_reason='TIME_LIMIT';break
             model.Add(expression==value)
+            _rehint()
         else:
             tie_complete=True
     if cancelled and cancelled(): termination_reason='USER_CANCELLED'
@@ -488,7 +530,7 @@ def recommend(data, output, seconds=60, strategy='成本最低优先', mode='分
     if not data.tasks:
         chosen=[];info={'有解':True,'状态':'无待修告警','解状态':'OPTIMAL','终止原因':'COMPLETED','阶段':[],
                         '诊断模型':False,'模型成本':0,'分层全部最优':True,'确定性决胜完成':True,
-                        '求解器参数':{'num_search_workers':1,'random_seed':17,'max_time_in_seconds':seconds}}
+                        '求解器参数':{'num_search_workers':WORKERS,'random_seed':17,'max_time_in_seconds':seconds}}
     else:
         best=max(baselines.values(),key=len)
         chosen,info=solve(data,options,output,seconds,strategy,mode,weights,limits,hint=best,on_solver=on_solver,cancelled=cancelled,model_fingerprint=model_fingerprint,extra_constraints=extra_constraints,custom_stages=custom_stages)
