@@ -265,6 +265,10 @@ def _enum_domain(row: row_book.Row) -> set[str] | None:
 
 _RELATIVE = re.compile(r"(明天|后天|今天|昨天|大后天|次日|隔天|下周|本周|这周|上周|月底|月初|下个月|这个月)")
 
+# 注册表里所有"值必须是日期"的键。写死在这里是有意的：
+# 这几个键的名字是契约的一部分，改名字要连着提示词一起改，本来就该同步。
+_DATE_KEYS = {"day", "date", "dates", "start", "finish", "deadline", "at"}
+
 
 def _value_strings(value: Any) -> list[str]:
     """把 value 里的字符串掏出来（含嵌套 dict/list）。用于核对文字推导。
@@ -324,7 +328,83 @@ def _split_calc(calc: str) -> tuple[str, str] | None:
     return None
 
 
-def check_source(product: dict[str, Any]) -> Check:
+def _guessed_date(utterance: str, span: str, value: Any) -> str | None:
+    """整句只有相对时间、一个绝对日期都没有时，任何具体日期都是猜的。
+
+    这条是补漏：原先只在 `convert` 的文字推导分支里判（span 里出现"明天"这类词就算）。
+    但模型换个写法就绕过去了——把相对时间词留在 claim 1，把日期记到 claim 2
+    的 fill 上（span="先别出海"），或者干脆用 `literal` 直接写一个 ISO 日期。
+    条件是"**整句**有相对时间词且**整句**没有绝对日期"，这样
+    "11月5日风大，明天也一样" 不会被冤枉（原文里本来就有日期，谁对谁错机器分不清）。
+    """
+    date_like = [t for t in _value_strings(value) if _ISO.search(t) or _dates(t)]
+    if not date_like:
+        return None
+    if _dates(utterance) or _ISO.search(utterance):
+        return None
+    if not _RELATIVE.search(utterance) and not _RELATIVE.search(span):
+        return None
+    return date_like[0]
+
+
+def _unresolved_time(value: Any) -> str | None:
+    """value 里还留着没落地的相对时间词吗（"明天"、"下周一"、"月底"）。
+
+    这是实测补的第二道口子：模型发现"编个日期"会被 A4 判死，就换成不编——
+    直接把 `"day": "明天"`、`"dates": ["明天"]` 原样写进 DSL，
+    再用 `from=default` 附一句 why（"原文未给具体日期"）。
+    于是 A4 走了 default 分支、只看 why 写没写，日期字段里就带着一句人话进了编译器。
+    这类值后面没有任何一步会报错，求解器要么崩要么当成无效值——
+    **"没编造"不等于"能用"**。
+    """
+    for token in _value_strings(value):
+        found = _RELATIVE.search(token)
+        if found:
+            return found.group(0)
+    return None
+
+
+def _date_field_issues(dsl: dict[str, Any]) -> list[dict[str, Any]]:
+    """DSL 里日期字段的值，必须是日期。
+
+    上面那条管的是"相对时间词混进来"，这条管"混进来的是别的东西"——
+    比如 `day: "TBD"`、`dates: ["待定"]`。日期字段是注册表里定死的几处，
+    在这里逐个校验，代价很小。
+    """
+    issues: list[dict[str, Any]] = []
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            for key, item in node.items():
+                here = f"{path}.{key}" if path else key
+                if key in _DATE_KEYS:
+                    if isinstance(item, (list, tuple)):
+                        for index, single in enumerate(item):
+                            _check(single, f"{here}[{index}]")
+                    else:
+                        _check(item, here)
+                else:
+                    walk(item, here)
+        elif isinstance(node, (list, tuple)):
+            for index, item in enumerate(node):
+                walk(item, f"{path}[{index}]")
+
+    def _check(value: Any, where: str) -> None:
+        if not isinstance(value, str):
+            issues.append({"where": where, "why": f"日期字段收到 {value!r}，不是字符串"})
+            return
+        if _RELATIVE.search(value):
+            issues.append({"where": where,
+                           "why": f"日期字段里是 {value!r}，相对时间没有落地"})
+            return
+        if not (_ISO.search(value) or _dates(value)):
+            issues.append({"where": where, "why": f"日期字段里是 {value!r}，不是日期"})
+
+    walk(dsl, "")
+    return issues
+
+
+def check_source(product: dict[str, Any], utterance: str = "") -> Check:
     fills = product.get("fills") or []
     if not fills:
         return Check("A4", "来源", "na", "没有 fills")
@@ -335,6 +415,15 @@ def check_source(product: dict[str, Any]) -> Check:
         label = f"fills[{index}] {fill.get('row')}"
         span = str(fill.get("span") or "")
         value = fill.get("value")
+
+        # 先把"没落地的相对时间"挡住，default 也不例外——
+        # `from=default` 只需要一句 why 就能过 A4，最容易被用来夹带 "明天"。
+        stuck = _unresolved_time(value)
+        if stuck is not None:
+            bad.append({"where": label,
+                        "why": f"value 里还是相对时间 {stuck!r}，没有落成具体日期；"
+                               "要么走 clarify 要日期，要么进 unassigned"})
+            continue
 
         if source == "default":
             if not str(fill.get("why") or "").strip():
@@ -352,6 +441,14 @@ def check_source(product: dict[str, Any]) -> Check:
             # 没有值就没法核对出处。模型偶尔只写 row+span、把值留在 dsl 里，
             # 那样 A4 会"因为没东西可查"而空过——这比判错更糟。
             bad.append({"where": label, "why": "这条 fill 没有 value，出处无从核对"})
+            continue
+
+        # 相对时间缺基准：整句都没给日期却落了个日期出来，不管用哪种 from 都算猜。
+        guess = _guessed_date(utterance, span, value) if utterance else None
+        if guess is not None:
+            bad.append({"where": label,
+                        "why": f"原文只有相对时间（{span!r}）且没给绝对日期，"
+                               f"却落成 {guess!r}——这是猜的，应走 clarify"})
             continue
 
         if source == "literal":
@@ -605,6 +702,7 @@ def check_backing(utterance: str, product: dict[str, Any]) -> Check:
 
 def check_shape(raw: dict[str, Any], product: dict[str, Any]) -> Check:
     issues = list(contract.shape_issues(raw))
+    issues += _date_field_issues(product.get("dsl") or {})
 
     for claim in product.get("claims") or []:
         kind = claim.get("kind")
@@ -740,7 +838,7 @@ def verify(utterance: str, raw: dict[str, Any]) -> Report:
             check_cover(utterance, product),
             check_closure(product),
             check_evidence(utterance, product),
-            check_source(product),
+            check_source(product, utterance),
             check_rows(utterance, product),
             check_single_value(product),
             check_required(utterance, product),

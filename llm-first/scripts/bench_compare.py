@@ -41,12 +41,16 @@ def run(allow_repair: bool = True) -> list[dict]:
         rule = rulebench.understand_rule(utterance)
         started = time.monotonic()
         llm = pipeline.understand(utterance, allow_repair=allow_repair)
+        hit = sum(1 for p in rule.parts if p.claimed)
         rows.append({
             "tag": tag,
             "utterance": utterance,
             "rule_stage": rule.stage,
+            "rule_claimed": hit,
+            "rule_parts": len(rule.parts),
             "rule_items": sum(len(v) for v in rule.dsl.values()),
             "rule_dropped": rule.numbers["missing"],
+            "rule_fallback_dropped": (rule.fallback or {}).get("numbers", {}).get("missing", []),
             "rule_errors": rule.compile_errors,
             "llm_route": llm.route,
             "llm_items": sum(len(v) for v in (llm.product.get("dsl") or {}).values()),
@@ -60,17 +64,41 @@ def run(allow_repair: bool = True) -> list[dict]:
     return rows
 
 
+def _rule_cell(r: dict) -> str:
+    if r["rule_parts"]:
+        return f"{r['rule_stage']}（{r['rule_claimed']}/{r['rule_parts']} 段 · {r['rule_items']} 项）"
+    return f"{r['rule_stage']}（{r['rule_items']} 项）"
+
+
 def to_markdown(rows: list[dict]) -> str:
-    head = ("| 场景 | 原话 | 规则侧命中 | 规则侧丢数 | LLM侧 | 项数 | 未过 | 耗时 |\n"
+    pure_dsl = [r for r in rows if r["rule_stage"] in {"batch", "compound", "rules", "legacy"}]
+    pure_gate = [r for r in rows if r["rule_stage"] in {"not_change_guard", "gate"}]
+    partial = [r for r in rows if r["rule_stage"] == "needs_llm" and r["rule_claimed"]]
+    rest = len(rows) - len(pure_dsl) - len(pure_gate)
+    lead = (
+        f"**{len(rows)} 条里，规则层能独立交出 DSL 的有 {len(pure_dsl)} 条"
+        f"（{'、'.join(r['tag'] for r in pure_dsl) or '无'}）；"
+        f"另有 {len(pure_gate)} 条被确定性判死、不需要模型"
+        f"（{'、'.join(r['tag'] for r in pure_gate) or '无'}）。**\n\n"
+        f"剩下 {rest} 条交给大模型，其中 {len(partial)} 条只是**某一段**认下来了"
+        f"（{'、'.join(r['tag'] for r in partial) or '无'}），整句照样得模型读——"
+        "`parse()` 要求每一段都命中才合并。\n\n"
+    )
+    head = ("| 场景 | 原话 | 规则层（认下/拆出） | 规则侧丢数 | LLM侧 | 项数 | 未过 | 耗时 |\n"
             "|---|---|---|---|---|---|---|---|\n")
     body = ""
     for r in rows:
-        rule = f"{r['rule_stage']}（{r['rule_items']} 项）"
-        dropped = "、".join(str(int(x)) for x in r["rule_dropped"]) or "—"
+        # 规则层没交出 DSL 时，原文数字全都会被算成"丢"——那是噪声，
+        # 不是"它读漏了"。这种情况只报兜底读漏了什么。
+        if not r["rule_items"]:
+            fb = "、".join(str(int(x)) for x in r["rule_fallback_dropped"])
+            dropped = f"—（兜底丢 {fb}）" if fb else "—"
+        else:
+            dropped = "、".join(str(int(x)) for x in r["rule_dropped"]) or "—"
         fails = "、".join(r["llm_fails"]) or "全过"
-        body += (f"| {r['tag']} | {r['utterance']} | {rule} | {dropped} | "
+        body += (f"| {r['tag']} | {r['utterance']} | {_rule_cell(r)} | {dropped} | "
                  f"{r['llm_route']} | {r['llm_items']} | {fails} | {r['llm_ms']}ms |\n")
-    return head + body
+    return lead + head + body
 
 
 def main() -> None:
@@ -84,8 +112,14 @@ def main() -> None:
     print(md)
     if args.save:
         target = ROOT / "docs" / "对照结果.md"
-        target.write_text("# 对照跑批结果\n\n> 由 `python scripts/bench_compare.py --save` 生成\n\n" + md,
-                          encoding="utf-8")
+        head = (
+            "# 对照跑批结果\n\n"
+            "> 由 `python scripts/bench_compare.py --save` 生成\n>\n"
+            "> **这是一次快照。** 模型侧同一句话重跑可能给出不同结果，\n"
+            "> 单次胜负不能当结论——要看 `稳定性.md`（每条跑 5 遍的分布）。\n"
+            "> 规则侧那一列是确定性的，重跑不变。\n\n"
+        )
+        target.write_text(head + md, encoding="utf-8")
         print(f"已写入 {target}")
 
 

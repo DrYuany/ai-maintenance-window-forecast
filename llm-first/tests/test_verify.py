@@ -319,3 +319,71 @@ def test_date_with_source_is_accepted():
     }
     report = verify.verify("11月5日风大，别出海", product)
     assert not report.blocked, [(c.code, c.detail) for c in report.failures]
+
+
+def test_relative_time_cannot_dodge_by_literal_or_other_span():
+    """同一个错误换身衣服：把相对时间词留在上一段，日期记到这一段的 literal 上。
+
+    真实跑批里见过这样的产物——span 写"先别出海"（里面没有"明天"），
+    from 写 literal（不走文字推导那支），value 直接给一个 ISO 日期。
+    旧判据只看 span，于是这条一路绿灯，数字对账还显示"没丢数"。
+    所以条件要抬到整句：**整句有相对时间词、且整句没有绝对日期**，落出日期就算猜。
+    """
+    product = {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "明天风大", "kind": "action"},
+                   {"id": 2, "text": "先别出海", "kind": "action"}],
+        "fills": [
+            {"claim": 2, "row": "D04", "span": "先别出海", "from": "literal",
+             "value": {"kind": "weather", "day": "2026-10-31", "state": "不可作业"}},
+        ],
+        "unassigned": [],
+        "dsl": {"data": [{"kind": "weather", "day": "2026-10-31", "state": "不可作业"}]},
+    }
+    assert "A4" in _codes(verify.verify("明天风大，先别出海", product))
+
+
+def test_relative_token_smuggled_into_value_is_rejected():
+    """第三种绕法，也是实测撞到的：不编日期，直接把"明天"写进日期字段。
+
+    产物长这样：`from=default` + `why="原文未给具体日期"` + `day="明天"`。
+    A4 的 default 分支只看 why 写没写，于是放行；A9 只看形状和枚举，也放行；
+    最后 `{"day": "明天"}` 一路进编译器。**没编造不等于能用。**
+    两头都要堵：value 里不许留相对时间词（A4），日期字段必须是日期（A9）。
+    """
+    product = {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "明天风大", "kind": "action"},
+                   {"id": 2, "text": "先别出海", "kind": "action"}],
+        "fills": [
+            {"claim": 1, "row": "D04", "span": "明天风大", "from": "default",
+             "why": "原文只说风大，未给具体风速，按不可作业处理",
+             "value": {"day": "明天", "state": "不可作业"}},
+            {"claim": 2, "row": "C09", "span": "先别出海", "from": "default",
+             "why": "原文未给具体日期，明天按不可作业日处理",
+             "value": {"dates": ["明天"]}},
+        ],
+        "unassigned": [],
+        "dsl": {"data": [{"kind": "weather", "day": "明天", "state": "不可作业"}],
+                "constraints": [{"type": "forbidden_dates", "dates": ["明天"]}]},
+    }
+    codes = _codes(verify.verify("明天风大，先别出海", product))
+    assert "A4" in codes, "value 里的相对时间词必须判死"
+    assert "A9" in codes, "日期字段里是「明天」也必须判死"
+
+
+def test_date_fields_accept_iso_and_month_day():
+    """反过来：正常的日期写法不许被这条新判据误伤（ISO 与"11月9日"都算）。"""
+    product = {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "任务003最晚11月9日修完", "kind": "action"}],
+        "fills": [
+            {"claim": 1, "row": "C07", "span": "11月9日", "from": "literal",
+             "value": "2026-11-09T08:00:00+08:00"},
+        ],
+        "unassigned": [],
+        "dsl": {"constraints": [{"type": "deadline", "task": "任务003",
+                                 "finish": "2026-11-09T08:00:00+08:00"}]},
+    }
+    codes = _codes(verify.verify("任务003最晚11月9日修完", product))
+    assert "A9" not in codes

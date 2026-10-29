@@ -165,11 +165,11 @@
     </div>
   </section>
 
-  <div class="verdict" id="verdict">输入一句话，左右两栏会用各自的方式读它。左边只认规则，右边让模型读整句、再由验收器逐条核。</div>
+  <div class="verdict" id="verdict">输入一句话，左右两栏会用各自的方式读它。左边是规则层能独自走到哪（拆段、逐层认领，到调模型之前就停），右边让模型读整句、再由验收器逐条核。</div>
 
   <div class="cols">
     <section class="card">
-      <h2>规则主导版<span class="tag">backend/ · 规则认领 + 旧编译器，不调用大模型</span></h2>
+      <h2>规则主导版<span class="tag">backend/ · 规则/桥接/门控逐段认领，到调用大模型之前就停</span></h2>
       <div class="body" id="left"><div class="empty">等待输入</div></div>
     </section>
     <section class="card">
@@ -229,21 +229,50 @@ function renderLeft(d) {
   if (d.error && !d.stage) return void ($("left").innerHTML = `<div class="err">${esc(d.error)}</div>`);
   let html = `<div class="badges">
       ${routeBadge(d.route)}${badge(d.stage_label || d.stage, "")}
-      ${badge(ms(d.latency_ms), "dim")}${badge("不调用大模型", "dim")}</div>`;
+      ${badge(ms(d.latency_ms), "dim")}${badge("在调模型之前就停", "dim")}</div>`;
 
-  if (!d.summary || !d.summary.length) {
-    html += `<div class="empty">这一层没有认出任何改动 —— 在真实链路里，这句话会继续往右走（向量 → 大模型）。</div>`;
-  } else {
-    html += `<div><h3>读出来的改动（人话）</h3><ul class="plain">` +
+  if (d.parts && d.parts.length) {
+    const hit = d.parts.filter((p) => p.claimed).length;
+    html += `<div><h3>拆段逐层认领　${hit}/${d.parts.length} 段认下</h3><table>
+      <tr><th>段</th><th>落在哪层</th><th>结果</th></tr>` +
+      d.parts.map((p) => `<tr><td>${esc(p.text)}</td><td class="mono">${esc(p.label)}</td>
+        <td>${p.claimed ? '<span class="ok">认下</span>' : '<span class="hit">读不出</span>'}</td></tr>`).join("") +
+      `</table></div>`;
+  }
+
+  if (d.notes && d.notes.length) {
+    html += `<ul class="plain">` + d.notes.map((n) => `<li class="note">${esc(n)}</li>`).join("") + `</ul>`;
+  }
+
+  if (d.summary && d.summary.length) {
+    html += `<div><h3>规则层读出来的改动（人话）</h3><ul class="plain">` +
       d.summary.map((s) => `<li>${esc(s)}</li>`).join("") + `</ul></div>`;
   }
+
   html += compileHtml(d.compile_errors);
-  html += numbersHtml(d.numbers);
+  // 规则层没交出 DSL 时，数字对账只会把原文数字全算成"丢"，那是噪声不是结论。
+  if (d.dsl && Object.keys(d.dsl).length) html += numbersHtml(d.numbers);
+
   if (d.dsl && Object.keys(d.dsl).length) {
-    html += `<details><summary>DSL 原文</summary><pre>${json(d.dsl)}</pre></details>`;
+    html += `<details><summary>DSL 原文（规则层交出的）</summary><pre>${json(d.dsl)}</pre></details>`;
   }
-  html += `<div class="note">规则侧不交工作记录（没有 claims/fills），所以 A1~A4、A8 无从验收——
-    这不是判它错，是它没有这项产物。可比的是：编译校验、数字对账、以及它认出了什么。</div>`;
+
+  if (d.fallback && (d.fallback.summary || []).length) {
+    const fb = d.fallback;
+    const miss = (fb.numbers.missing || []).map(num).join("、") || "无";
+    html += `<details><summary>最后兜底：旧规划编译器读到什么（不是主路径）</summary>
+      <ul class="plain">` + fb.summary.map((s) => `<li>${esc(s)}</li>`).join("") + `</ul>
+      <div class="note">丢数：<span class="${miss === "无" ? "ok" : "hit"}">${esc(miss)}</span></div>
+      <pre>${json(fb.dsl)}</pre></details>`;
+  }
+
+  if (!d.dsl || !Object.keys(d.dsl).length) {
+    html += `<div class="note">这一句规则层没交出 DSL —— 在真实链路里，它此刻会去调大模型。
+      右栏要回答的正是：模型读出来的东西，有没有人逐条核过。</div>`;
+  } else {
+    html += `<div class="note">规则侧不交工作记录（没有 claims/fills），所以 A1~A4、A8 无从验收——
+      这不是判它错，是它没有这项产物。可比的是：编译校验、数字对账、以及它认出了什么。</div>`;
+  }
   $("left").innerHTML = html;
 }
 
@@ -302,13 +331,25 @@ function renderVerdict(d) {
   const r = d.rule || {}, l = d.llm || {};
   const rN = (r.summary || []).length;
   const lN = Object.keys(l.dsl || {}).reduce((a, k) => a + (l.dsl[k] || []).length, 0);
+  const fails = l.report ? l.report.checks.filter((c) => c.verdict === "fail").length : 0;
   const rDrop = (r.numbers && r.numbers.missing || []).length;
   const lDrop = (l.numbers && l.numbers.missing || []).length;
-  const fails = l.report ? l.report.checks.filter((c) => c.verdict === "fail").length : 0;
+
+  let left;
+  if (r.parts && r.parts.length) {
+    const hit = r.parts.filter((p) => p.claimed).length;
+    left = `左边拆 <b>${r.parts.length}</b> 段、规则层认下 <b>${hit}</b> 段`;
+    left += hit === r.parts.length
+      ? `，纯规则交出 <b>${rN}</b> 项`
+      : `，剩下那段它读不出来 → <b>整句交给大模型</b>`;
+  } else {
+    left = rN ? `左边纯规则读出 <b>${rN}</b> 项` : `左边规则层一句都没认出来`;
+  }
+
   $("verdict").innerHTML =
-    `这句话，左边读出 <b>${rN}</b> 项改动、丢掉 <b>${rDrop}</b> 个原文数字；` +
-    `右边读出 <b>${lN}</b> 项改动、丢掉 <b>${lDrop}</b> 个数字、验收未过 <b>${fails}</b> 条。` +
-    `<span class="sep">|</span>右边最终交出的动作是 <b>${esc(l.route || "—")}</b>` +
+    `这句话：${left}（丢 <b>${rDrop}</b> 个原文数字）。` +
+    `<span class="sep">|</span>右边一次读出 <b>${lN}</b> 项、丢 <b>${lDrop}</b> 个数字、验收未过 <b>${fails}</b> 条，` +
+    `最终动作 <b>${esc(l.route || "—")}</b>` +
     (l.route === "clarify" ? "　——它选了问，而不是猜。" : "。");
 }
 
