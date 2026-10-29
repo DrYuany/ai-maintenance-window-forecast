@@ -92,3 +92,23 @@ data.modelDiffs = [
 | P4 | 评测口径改为「最终行为」断言 | 221 题库 + 70 对抗集 |
 
 **兜底原则**：agent 不可用（无 key / 调用失败）时，仍走原有确定性链路，离线与测试行为不变。
+
+## 7. 落地结果（2026-10-29）
+
+| 阶段 | 状态 | 说明 |
+|---|---|---|
+| P1 | ✅ | `read_versions(include=["model"])` 支持 N 版投影 + `modelDiffs`；删除 `compare_versions` |
+| P2 | ✅ | 新增 `core/change_planning.py`；`solve` 工具 DSL 优先；`_submit_message` 整体委派 agent |
+| P3 | ⚠️ 部分 | 语义门控已移出主链路；`_compare_versions_reply`、对话修复正则保留为**无 LLM 时的兜底**，删除只会降低离线可用性 |
+| P4 | ✅ 初始 | 题库 99.5%（单条波动，复跑为 100%）、对抗集 94.3%、后端 293 测试通过 |
+
+实测（总链路）：
+
+| 输入 | 结果 |
+|---|---|
+| 你好 | `assistant_reply`，不调工具，3.5s |
+| 任务001和任务002不能在同一天出海维修 | 调 `solve` → `change_preview`（DSL 待确认），6.2s |
+| 这两版本方案的数学模型区别是什么 | 调 `read_versions(include=[model])` → 指纹/目标/约束/参数差异 |
+
+顺带修复：`同一条线` 被旧编译器误当成「作业线数=1」；DSL 待确认缺 `request` 段导致落库 500。
+
