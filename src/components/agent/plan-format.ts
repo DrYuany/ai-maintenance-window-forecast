@@ -80,6 +80,12 @@ export function getSolverPresentation(summary: Record<string, unknown>): SolverP
     Number(summary.scheduledTaskCount ?? 0) > 0 ||
     Number(summary.windowCount ?? 0) > 0;
   const allOptimal = Boolean(solver["分层全部最优"]);
+  // 求解器没给出排程、只回落到启发式基线时，方案来源会写成 HEURISTIC_FALLBACK。
+  // 这种结果既不是求解器给出的可行解，也没有最优性证明，不能按“可行方案”展示。
+  const heuristicFallback = String(solver["方案来源"] ?? "").toUpperCase() === "HEURISTIC_FALLBACK";
+  const scheduled = Number(summary.scheduledTaskCount ?? 0);
+  const totalTasks = Number(summary.totalTaskCount ?? 0);
+  const coverage = totalTasks > 0 ? `仅排入 ${scheduled}/${totalTasks} 个任务` : "只覆盖部分任务";
 
   let code: SolverCode = "UNKNOWN";
   if (explicit === "OPTIMAL" || explicit === "FEASIBLE" || explicit === "INFEASIBLE") {
@@ -88,6 +94,19 @@ export function getSolverPresentation(summary: Record<string, unknown>): SolverP
     code = "OPTIMAL";
   } else if (hasSolution) {
     code = "FEASIBLE";
+  }
+
+  if (heuristicFallback) {
+    return {
+      code: code === "INFEASIBLE" ? "INFEASIBLE" : "FEASIBLE",
+      label: code === "INFEASIBLE" ? "全量不可行 · 启发式部分方案" : "启发式兜底方案 · 未证明最优",
+      shortLabel: code === "INFEASIBLE" ? "部分方案" : "启发式兜底",
+      tone: code === "INFEASIBLE" ? "danger" : "warning",
+      description:
+        code === "INFEASIBLE"
+          ? `求解器已证明全量排程不可行，当前方案是启发式基线给出的部分排程，${coverage}，不代表最优。`
+          : `求解器在时限内没有产出排程，当前方案由启发式基线生成，${coverage}；它不是求解器给出的可行解，也没有最优性证明。`,
+    };
   }
 
   if (code === "OPTIMAL") {

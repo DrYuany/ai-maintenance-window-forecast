@@ -16,6 +16,7 @@ import type {
   Message,
   PendingModelChange,
   SolveJob,
+  StageEvent,
   WindowVersion,
 } from "../../store/types";
 import { ScheduleResultCard } from "./ScheduleResultCard";
@@ -30,10 +31,12 @@ interface Props {
   streamingMessageId?: string | null;
   activeJob?: SolveJob | null;
   pendingChange?: PendingModelChange | null;
+  stages?: StageEvent[];
   contextVersion?: WindowVersion | null;
   onSend: (message: string) => Promise<void>;
   onOpenVersion: (versionId: string) => void;
   onClearContext?: () => void;
+  onControlJob?: (action: "wait" | "background" | "use_incumbent" | "stop") => Promise<void>;
 }
 
 const suggestions = [
@@ -89,6 +92,42 @@ function buildMessageVersionLinks(messages: Message[], versions: WindowVersion[]
   return { links, orphans };
 }
 
+function describeDslConstraint(constraint: Record<string, unknown>): string {
+  if (Array.isArray(constraint.tasks)) return constraint.tasks.map(String).join(" / ");
+  if (typeof constraint.task === "string") return constraint.task;
+  if (typeof constraint.before === "string" || typeof constraint.after === "string") {
+    return [constraint.before, constraint.after].filter(Boolean).map(String).join(" → ");
+  }
+  if (constraint.line !== undefined) return `作业线 ${String(constraint.line)}`;
+  if (typeof constraint.time === "string") return constraint.time.slice(0, 16).replace("T", " ");
+  if (constraint.value !== undefined) return String(constraint.value);
+  return "变更";
+}
+
+function dslChangeItems(dsl: Record<string, unknown> | undefined) {
+  if (!dsl) return [];
+  const items: Array<{ label: string; value: string }> = [];
+  for (const constraint of Array.isArray(dsl.constraints) ? dsl.constraints : []) {
+    const spec = constraint as Record<string, unknown>;
+    items.push({ label: `约束 · ${String(spec.type ?? "dsl")}`, value: describeDslConstraint(spec) });
+  }
+  for (const objective of Array.isArray(dsl.objectives) ? dsl.objectives : []) {
+    const spec = objective as Record<string, unknown>;
+    items.push({ label: "目标", value: String(spec.type ?? "objective") });
+  }
+  if (dsl.parameters && typeof dsl.parameters === "object") {
+    for (const [key, value] of Object.entries(dsl.parameters as Record<string, unknown>)) {
+      items.push({ label: `参数 · ${key}`, value: String(value) });
+    }
+  }
+  if (dsl.data && typeof dsl.data === "object") {
+    for (const [key, value] of Object.entries(dsl.data as Record<string, unknown>)) {
+      items.push({ label: `数据 · ${key}`, value: Array.isArray(value) ? `${value.length} 项` : String(value) });
+    }
+  }
+  return items;
+}
+
 export function ConversationCanvas({
   messages,
   versions = [],
@@ -97,15 +136,19 @@ export function ConversationCanvas({
   streamingMessageId = null,
   activeJob,
   pendingChange,
+  stages = [],
   contextVersion,
   onSend,
   onOpenVersion,
   onClearContext = () => undefined,
+  onControlJob,
 }: Props) {
   const [value, setValue] = useState("");
+  const [showProcess, setShowProcess] = useState(true);
   const submitting = useRef(false);
   const threadEnd = useRef<HTMLDivElement>(null);
   const solving = activeJob?.status === "QUEUED" || activeJob?.status === "RUNNING";
+  const backgrounded = Boolean(activeJob?.backgrounded);
   const chronologicalVersions = useMemo(
     () => sortVersionsChronologically(versions),
     [versions],
@@ -232,19 +275,62 @@ export function ConversationCanvas({
           </article>
         ) : null}
 
-        {(sending && !streamingMessageId) || solving ? (
+        {sending || (solving && !backgrounded) ? (
           <div className="agent-thinking" aria-live="polite">
-            <div className="thinking-line">
-              <span /><span /><span />
-              {sending
-                ? streamStatus || "正在读取事实并组织回答"
-                : (activeJob?.statusMessage || `真实求解进行中 · 已运行 ${activeJob?.elapsedSeconds ?? 0} 秒`)}
-            </div>
+            {stages.length === 0 ? (
+              <div className="thinking-line">
+                <span /><span /><span />
+                {sending
+                  ? streamStatus || "正在读取事实并组织回答"
+                  : (activeJob?.statusMessage || `真实求解进行中 · 已运行 ${activeJob?.elapsedSeconds ?? 0} 秒`)}
+              </div>
+            ) : null}
+            {stages.length > 0 ? (
+              <div className="process-panel">
+                <button
+                  type="button"
+                  className="process-toggle"
+                  onClick={() => setShowProcess((previous) => !previous)}
+                >
+                  <ChevronDown size={12} className={showProcess ? "rotated" : ""} />
+                  {showProcess ? "收起过程" : `展开过程（${stages.length} 步）`}
+                </button>
+                {showProcess ? (
+                  <ol className="process-steps">
+                    {stages.map((stage) => (
+                      <li key={stage.id} className={`process-step is-${stage.status}`}>
+                        <span className="process-icon" aria-hidden="true">
+                          {stage.status === "running"
+                            ? <i className="spin-dot" />
+                            : stage.status === "done" ? "✓" : "✗"}
+                        </span>
+                        <span className="process-label">{stage.label}</span>
+                        {stage.detail ? <small className="process-detail">{stage.detail}</small> : null}
+                      </li>
+                    ))}
+                  </ol>
+                ) : null}
+              </div>
+            ) : null}
             {solving ? (
               <div className="solve-progress">
                 <i style={{ width: `${activeJob?.progressPercent ?? 15}%` }} />
                 <small>{activeJob?.progressPercent ?? 15}% · {activeJob?.elapsedSeconds ?? 0}s</small>
+                {onControlJob ? (
+                  <span className="solve-actions">
+                    <button type="button" onClick={() => void onControlJob("background")}>后台运行</button>
+                    <button type="button" className="danger" onClick={() => void onControlJob("stop")}>停止</button>
+                  </span>
+                ) : null}
               </div>
+            ) : null}
+          </div>
+        ) : null}
+        {solving && backgrounded ? (
+          <div className="agent-thinking slim" aria-live="polite">
+            <span>后台求解中 · {activeJob?.progressPercent ?? 15}%</span>
+            {onControlJob ? (
+              <button type="button" className="danger" onClick={() => void onControlJob("stop")}>停止</button>
             ) : null}
           </div>
         ) : null}
@@ -267,37 +353,48 @@ export function ConversationCanvas({
           </div>
         ) : null}
         {pendingChange ? (
-          <div className="pending-change-card" aria-live="polite">
-            <div className="pending-change-head">
-              <span><Sparkles size={14} />待确认模型变更</span>
-              <strong>{pendingChange.operations.length} 项</strong>
-            </div>
-            <div className="pending-change-list">
-              {pendingChange.operations.slice(0, 4).map((operation) => (
-                <span key={`${operation.kind}-${operation.key}`}>
-                  <small>{operation.key}</small>
-                  <strong>{String(operation.after ?? "移除")}</strong>
-                </span>
-              ))}
-            </div>
-            <div className="pending-change-actions">
-              <button
-                type="button"
-                className="confirm"
-                disabled={sending}
-                onClick={() => void submit("确认生成沙盘")}
-              >
-                <Play size={13} />确认生成沙盘
-              </button>
-              <button
-                type="button"
-                disabled={sending}
-                onClick={() => void submit("取消变更")}
-              >
-                <X size={13} />取消
-              </button>
-            </div>
-          </div>
+          (() => {
+            const isDsl = pendingChange.kind === "dsl" || Array.isArray(pendingChange.dsl?.constraints);
+            const dslItems = isDsl ? dslChangeItems(pendingChange.dsl) : [];
+            const operationItems = (pendingChange.operations ?? []).map((operation) => ({
+              label: operation.key,
+              value: String(operation.after ?? "移除"),
+            }));
+            const items = isDsl ? dslItems : operationItems;
+            return (
+              <div className="pending-change-card" aria-live="polite">
+                <div className="pending-change-head">
+                  <span><Sparkles size={14} />待确认模型变更</span>
+                  <strong>{isDsl ? `${items.length} 条` : `${items.length} 项`}</strong>
+                </div>
+                <div className="pending-change-list">
+                  {items.slice(0, 4).map((item, index) => (
+                    <span key={`${item.label}-${index}`}>
+                      <small>{item.label}</small>
+                      <strong>{item.value}</strong>
+                    </span>
+                  ))}
+                </div>
+                <div className="pending-change-actions">
+                  <button
+                    type="button"
+                    className="confirm"
+                    disabled={sending}
+                    onClick={() => void submit("确认生成沙盘")}
+                  >
+                    <Play size={13} />确认生成沙盘
+                  </button>
+                  <button
+                    type="button"
+                    disabled={sending}
+                    onClick={() => void submit("取消变更")}
+                  >
+                    <X size={13} />取消
+                  </button>
+                </div>
+              </div>
+            );
+          })()
         ) : null}
         <div className="suggestion-row">
           {suggestions.map((item) => (

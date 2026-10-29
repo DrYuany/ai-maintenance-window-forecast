@@ -1,12 +1,16 @@
 import { CheckCircle2, CircleDashed, FileJson2, Fingerprint, ShieldCheck } from "lucide-react";
 import type { DecisionArtifact, SolveEvidence, SolveJob, WindowVersion } from "../../store/types";
 
-function statusTitle(evidence: SolveEvidence | null, job: SolveJob | null) {
+function statusTitle(evidence: SolveEvidence | null, job: SolveJob | null, version: WindowVersion | null) {
   if (job?.status === "QUEUED") return "任务已排队";
   if (job?.status === "RUNNING") return "真实求解进行中";
   if (job?.status === "FAILED") return "执行失败，未判定可行性";
   if (job?.status === "CANCELLED") return "求解已停止";
   if (!evidence) return "等待生成模型";
+  const solver = (version?.resultSummary?.solver ?? {}) as Record<string, unknown>;
+  if (String(solver["方案来源"] ?? "") === "HEURISTIC_FALLBACK" && evidence.hasIncumbent) {
+    return "启发式兜底方案 · 未证明最优";
+  }
   if (evidence.status === "OPTIMAL" && evidence.proof) return "已证明最优";
   if (evidence.status === "FEASIBLE" || evidence.hasIncumbent) return "已找到可行方案";
   if (evidence.status === "INFEASIBLE" && evidence.proof) return "已证明当前约束不可行";
@@ -30,7 +34,7 @@ export function EvidencePanel({ artifact, evidence, job, version }: { artifact: 
       </header>
       <section className="evidence-hero">
         <div><CircleDashed size={17} /><span>求解状态</span></div>
-        <strong>{statusTitle(evidence, job)}</strong>
+        <strong>{statusTitle(evidence, job, version)}</strong>
         <p>{running ? `任务 ${job?.id} 已运行 ${job?.elapsedSeconds ?? 0} 秒。超过 3 分钟会询问是否继续。` : evidence?.status === "UNKNOWN" ? "UNKNOWN 仅表示当前未取得结论，不等于无解。" : "可行性、最优性与复核状态分别记录，不混为一谈。"}</p>
       </section>
       {version ? (

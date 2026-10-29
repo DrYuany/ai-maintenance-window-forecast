@@ -73,3 +73,34 @@ def test_status_answer_explains_unknown_stage_in_business_language() -> None:
     assert "UNKNOWN" not in answer
     assert "在时限内未证明最优" in answer
     assert "总用时：300.5 秒" in answer
+
+
+def test_status_answer_names_heuristic_fallback_instead_of_claiming_a_feasible_solve() -> None:
+    version = WindowVersion(
+        id="ver_status02",
+        conversationId="conv_test",
+        generatedAt="2026-10-29T15:35:00+08:00",
+        userPrompt="测试",
+        focusTag="成本最低优先",
+        intentType="generate_version",
+        parameterSnapshot={},
+        resultSummary={
+            "scheduledTaskCount": 15,
+            "totalTaskCount": 28,
+            "solver": {
+                "有解": True,
+                "解状态": "FEASIBLE",
+                "方案来源": "HEURISTIC_FALLBACK",
+                "终止原因": "TIME_LIMIT",
+                "阶段": [
+                    {"目标": "总经济成本", "状态": "UNKNOWN", "耗时秒": 299.9},
+                ],
+            },
+        },
+    )
+
+    answer = render_status_answer(version)
+
+    assert "启发式" in answer
+    assert "15/28" in answer
+    assert "已复核可行方案" not in answer

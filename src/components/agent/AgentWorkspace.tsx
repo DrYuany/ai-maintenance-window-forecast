@@ -21,6 +21,7 @@ export function AgentWorkspace() {
     decisionArtifact,
     activeJob,
     pendingChange,
+    stages,
     versions,
     createConversation,
     selectConversation,
@@ -78,6 +79,7 @@ export function AgentWorkspace() {
           streamingMessageId={streamingMessageId}
           activeJob={activeJob}
           pendingChange={pendingChange}
+          stages={stages}
           contextVersion={contextVersion}
           onClearContext={() => setContextVersionId(null)}
           onSend={(message) =>
@@ -89,6 +91,7 @@ export function AgentWorkspace() {
             )
           }
           onOpenVersion={openVersion}
+          onControlJob={(action) => controlActiveJob(action)}
         />
       )}
       {error ? <div className="agent-error">{error}</div> : null}

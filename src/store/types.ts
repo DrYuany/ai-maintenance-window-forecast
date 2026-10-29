@@ -147,14 +147,17 @@ export interface ModelArtifact {
 }
 
 export interface PendingModelChange {
+  /** "dsl" 表示受控 DSL 变更（只有 dsl 段）；缺省或其它值表示旧规划语言变更（只有 operations）。 */
+  kind?: string;
   baseVersionId: string | null;
-  request: Record<string, unknown>;
-  operations: Array<{
+  request?: Record<string, unknown>;
+  operations?: Array<{
     kind: string;
     key: string;
     before: unknown;
     after: unknown;
   }>;
+  dsl?: Record<string, unknown>;
   preview: string;
   sourcePrompt: string;
 }
@@ -167,6 +170,14 @@ export interface Message {
   createdAt: string;
   versionIds?: string[];
   jobId?: string | null;
+}
+
+/** agent 过程可视化：后端 SSE `stage` 事件的一步。 */
+export interface StageEvent {
+  id: string;
+  label: string;
+  status: "running" | "done" | "error";
+  detail?: string | null;
 }
 
 export interface WorkingMemory {

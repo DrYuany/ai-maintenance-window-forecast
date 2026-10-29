@@ -21,6 +21,7 @@ import type {
   DecisionArtifact,
   SolveEvidence,
   SolveJob,
+  StageEvent,
 } from "@/store/types";
 import { createOfflineDemo, isStandaloneFileProtocol } from "@/store/offline-demo";
 
@@ -43,6 +44,7 @@ interface AgentStoreValue {
   solveEvidence: SolveEvidence | null;
   activeJob: SolveJob | null;
   pendingChange: PendingModelChange | null;
+  stages: StageEvent[];
   createConversation: () => Promise<void>;
   selectConversation: (conversationId: string) => Promise<void>;
   sendMessage: (
@@ -100,6 +102,7 @@ export function AgentStoreProvider({
   const [sending, setSending] = useState(false);
   const [streamStatus, setStreamStatus] = useState<string | null>(null);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
+  const [stages, setStages] = useState<StageEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [decisionArtifact, setDecisionArtifact] = useState<DecisionArtifact | null>(offline ? offlineDemo.decisionArtifact : null);
   const [solveEvidence, setSolveEvidence] = useState<SolveEvidence | null>(offline ? offlineDemo.solveEvidence : null);
@@ -261,6 +264,7 @@ export function AgentStoreProvider({
       };
       setStreamingMessageId(assistantPlaceholder.id);
       setStreamStatus("正在读取事实…");
+      setStages([]);
       try {
         const response = await apiClient.sendMessageStream(
           currentConversationId,
@@ -269,6 +273,16 @@ export function AgentStoreProvider({
           selectedWindowId,
           {
             onStatus: (label) => setStreamStatus(label),
+            onStage: (stage) =>
+              setStages((previous) => {
+                const index = previous.findIndex((item) => item.id === stage.id);
+                if (index >= 0) {
+                  const next = previous.slice();
+                  next[index] = stage;
+                  return next;
+                }
+                return [...previous, stage];
+              }),
             onToken: (text) => {
               streamed = true;
               setStreamStatus(null);
@@ -571,6 +585,7 @@ export function AgentStoreProvider({
       solveEvidence,
       activeJob,
       pendingChange,
+      stages,
       createConversation,
       selectConversation,
       sendMessage,
@@ -599,6 +614,7 @@ export function AgentStoreProvider({
       solveEvidence,
       activeJob,
       pendingChange,
+      stages,
       loading,
       messages,
       refreshCurrentConversation,

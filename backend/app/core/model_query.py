@@ -364,7 +364,14 @@ def render_status_answer(version: WindowVersion) -> str:
         lines.append(f"总用时：{float(solver.get('总耗时秒')):.1f} 秒。")
     if solver.get("终止原因"):
         lines.append(f"终止原因：{solver.get('终止原因')}。")
-    if _solver_status(version) == "FEASIBLE":
+    if str(solver.get("方案来源") or "") == "HEURISTIC_FALLBACK":
+        scheduled = summary.get("scheduledTaskCount", 0)
+        total = summary.get("totalTaskCount", 0)
+        lines.append(
+            f"本次结果来自启发式兜底：求解器没有产出排程，当前排程只覆盖 {scheduled}/{total} 个任务，"
+            "不是求解器给出的可行解，也没有最优性证明。"
+        )
+    elif _solver_status(version) == "FEASIBLE":
         lines.append("这是已复核可行方案，但尚未证明在所有分层目标上最优。")
     elif _solver_status(version) == "UNKNOWN":
         lines.append("UNKNOWN 只表示当前未取得结论，不代表无解。")

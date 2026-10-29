@@ -6,6 +6,7 @@ import type {
   ModelArtifact,
   SortMode,
   SolveJob,
+  StageEvent,
 } from "@/store/types";
 
 const API_BASE_URL =
@@ -15,6 +16,7 @@ export interface StreamHandlers {
   onToken?: (text: string) => void;
   onReplace?: (text: string) => void;
   onStatus?: (label: string) => void;
+  onStage?: (stage: StageEvent) => void;
 }
 
 async function request<T>(
@@ -116,6 +118,8 @@ export const apiClient = {
         handlers.onReplace?.(data.text);
       } else if (event === "status" && typeof data.label === "string") {
         handlers.onStatus?.(data.label);
+      } else if (event === "stage" && typeof data.id === "string" && typeof data.label === "string") {
+        handlers.onStage?.(data as unknown as StageEvent);
       } else if (event === "done") {
         outcome.response = data as unknown as AgentResponse;
       } else if (event === "error") {

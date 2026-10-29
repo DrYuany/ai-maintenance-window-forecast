@@ -203,6 +203,30 @@ def test_planning_request_returns_immediately_without_llm_dependency(temp_db_pat
     assert payload["solveJob"]["modelFingerprint"] == payload["decisionArtifact"]["modelFingerprint"]
 
 
+def test_overtime_daily_hours_phrase_returns_preview_without_llm(temp_db_path, monkeypatch) -> None:
+    os.environ.pop("MINIMAX_API_KEY", None)
+    client = _client(temp_db_path, monkeypatch)
+    conversation = client.post("/api/conversations", json={"title": "overtime"}).json()
+
+    preview = client.post(
+        "/api/agent/message",
+        json={
+            "conversationId": conversation["id"],
+            "message": "每天可以加班，最多维修10小时",
+        },
+    ).json()
+    detail = client.get(f"/api/conversations/{conversation['id']}").json()
+
+    assert preview["actionType"] == "change_preview"
+    pending = detail["workingMemory"]["activeFilters"]["pendingChange"]
+    assert pending["operations"] == [{
+        "kind": "parameter",
+        "key": "每天最多维修小时数",
+        "before": None,
+        "after": 10.0,
+    }]
+
+
 def test_capability_question_is_answered_without_any_solution(temp_db_path, monkeypatch) -> None:
     os.environ.pop("MINIMAX_API_KEY", None)
     client = _client(temp_db_path, monkeypatch)
@@ -668,3 +692,59 @@ def test_remove_completed_version_updates_dashboard(temp_db_path, monkeypatch) -
     assert response.status_code == 204
     assert dashboard["versions"] == []
     assert dashboard["candidateWindowPool"] == []
+
+
+def test_solve_reply_calls_out_heuristic_fallback_instead_of_a_proven_solve() -> None:
+    from types import SimpleNamespace
+
+    version = SimpleNamespace(
+        windows=[
+            SimpleNamespace(
+                windowId="窗口03",
+                metrics=SimpleNamespace(startTime="2026-11-15 00:00", endTime="2026-11-20 00:00"),
+            )
+        ]
+    )
+    summary = {
+        "totalCost": 4991263.49,
+        "scheduledTaskCount": 15,
+        "totalTaskCount": 28,
+        "baselineSavings": {},
+        "solver": {"解状态": "FEASIBLE", "方案来源": "HEURISTIC_FALLBACK", "终止原因": "TIME_LIMIT"},
+    }
+
+    reply = AgentRuntime._format_product_reply("FEASIBLE", summary, version)
+
+    assert "启发式" in reply
+    assert "15/28" in reply
+    assert "已找到并复核可行方案" not in reply
+
+
+def test_reject_route_short_circuits_without_llm(temp_db_path, monkeypatch) -> None:
+    """越界诉求（非线性/无意义）应直接拒绝，不再回退旧 conversation_agent 二次调 LLM。"""
+    os.environ.pop("MINIMAX_API_KEY", None)
+    client = _client(temp_db_path, monkeypatch)
+    conversation = client.post("/api/conversations", json={"title": "reject"}).json()
+
+    resp = client.post(
+        "/api/agent/message",
+        json={"conversationId": conversation["id"], "message": "最小化成本的平方"},
+    ).json()
+
+    assert resp["actionType"] == "change_rejected"
+    assert "超出" in resp["assistantMessage"]["content"]
+
+
+def test_clarify_route_short_circuits_without_llm(temp_db_path, monkeypatch) -> None:
+    """歧义/低置信诉求应直接澄清，不再回退旧 conversation_agent。"""
+    os.environ.pop("MINIMAX_API_KEY", None)
+    client = _client(temp_db_path, monkeypatch)
+    conversation = client.post("/api/conversations", json={"title": "clarify"}).json()
+
+    resp = client.post(
+        "/api/agent/message",
+        json={"conversationId": conversation["id"], "message": "应急模式"},
+    ).json()
+
+    assert resp["actionType"] == "change_clarification"
+    assert "拿不准" in resp["assistantMessage"]["content"]

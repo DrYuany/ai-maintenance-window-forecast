@@ -138,3 +138,17 @@ def test_ship_rent_can_be_set_as_an_absolute_value() -> None:
 
     assert compiled.overrides["船租（元每艘每天）"] == 15_000
 
+
+def test_overtime_daily_hours_phrase_is_recognized_by_the_compiler() -> None:
+    compiler = PlanningIntentCompiler()
+    message = "每天可以加班，最多维修10小时"
+
+    assert compiler.is_planning_request(message) is True
+    assert compiler.compile(message).overrides["每天最多维修小时数"] == 10
+
+
+def test_daily_hours_two_digit_value_is_not_truncated() -> None:
+    compiled = PlanningIntentCompiler().compile("每天最多维修10小时")
+
+    assert compiled.overrides["每天最多维修小时数"] == 10
+

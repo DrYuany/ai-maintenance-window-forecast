@@ -21,9 +21,10 @@ import json
 import math
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .validator import validate_dsl
 
@@ -157,7 +158,7 @@ RULE_PATTERNS: list[tuple[str, str]] = [
     (r"船租(?:改成|改为|设为)\s*(\d+(?:\.\d+)?)\s*(万|元)?", "param_ship_rent_abs"),
     (r"人工(?:单价|成本|费用|费|工资|工钱)\s*(?:改成|改为|设为|调整为|涨到|降到|上调|下调|提高|降低)?\s*(\d+(?:\.\d+)?)\s*(?:元|块钱|块)?", "param_labor"),
     (r"(?:最多|不超过|限定|只上|只剩)\s*([\d一两二三]+)\s*条(?:作业)?(?:线|船)", "param_lines"),
-    (r"(?:每天|每日|一天).{0,6}(?:最多|只能|干|工作)\s*(\d+(?:\.\d+)?)\s*小时", "param_daily_hours"),
+    (r"(?:每天|每日|一天).{0,6}(?:最多|只能|干|工作)(?:维修|作业|施工|检修|干活|时间)?\s*(\d+(?:\.\d+)?)\s*小时", "param_daily_hours"),
     (r"(?:每天|每日)?(?:有效)?工时.{0,4}(?:改为|改成|设为|调整为|调到)\s*(\d+(?:\.\d+)?)\s*小时", "param_daily_hours"),
     (r"(?:人员|人手|工人|施工人员|作业人员)(?:总)?(?:人数|人员|人力|上限)\s*(?:改成|设为|为)?\s*(\d+)\s*人", "param_headcount"),
     (r"(?:最多|不超过|限定|只有)\s*(\d+)\s*人", "param_headcount"),
@@ -189,6 +190,8 @@ RULE_PATTERNS: list[tuple[str, str]] = [
     (rf"{_TASK}.*?最早.{{0,8}}?{_MONTH_DAY}", "earliest"),
     (rf"{_TASK}.*?(?:不得|不能)早于.{0,8}?{_MONTH_DAY}", "earliest"),
     (r"(\d{3})\s*(?:最早|不得早于|不能早于).{0,8}?(\d{1,2})月(\d{1,2})[日号]", "earliest_bare"),
+    # 推迟/延后/顺延 到某日 → earliest（相对"顺延 N 天"无基准需澄清，绝对日期可规则化）
+    (rf"{_TASK}.*?(?:推迟到|延后到|顺延到|推迟至|延至|推到).{{0,4}}?{_MONTH_DAY}", "earliest"),
     # 必修
     (rf"{_TASK}.*?(?:必须|一定|务必).*?(?:修|安排|完成|做)", "must"),
     # 排除
@@ -473,17 +476,34 @@ _PARSE_SYSTEM = """你是检修排程 DSL 生成器。把用户的排程约束�
   {"kind":"hourly","time":"2026-11-03T12:00:00+08:00","price":400}
   {"kind":"window","window":"窗口02","start":"2026-11-01T00:00:00+08:00"}
 
-如果这句话不是排程修改诉求（闲聊、查询、解释、对比），输出 {"route": "not_change"}；
-如果是非线性、无意义或越界诉求（如"最小化成本的平方""改颜色"），输出 {"route": "reject"}。"""
+如果这句话不是排程修改诉求（闲聊、查询、解释、对比），输出 {"route": "not_change", "confidence": 0.9}；
+如果是非线性、无意义或越界诉求（如"最小化成本的平方""改颜色"），输出 {"route": "reject", "confidence": 0.9}。
+
+输出必须是统一 JSON 包装（不要只输出 DSL，也不要加 markdown 围栏或解释）：
+{"route": "dsl", "confidence": 0.95, "dsl": {约束或目标或参数或数据}}
+其中 confidence 是 0~1 的把握度：非常确定写 0.9~1.0，吃不准写 0.5~0.7；吃不准时宁可 route 填 "clarify"（confidence 0.5）。"""
 
 
 @dataclass
 class ParseResult:
     dsl: dict[str, Any] | None
-    source: str  # rule / llm
-    route: str = "dsl"  # dsl / batch / data_patch / reject / not_change
+    source: str  # rule / legacy / vector / llm
+    route: str = "dsl"  # dsl / batch / data_patch / reject / not_change / clarify
     confidence: float = 1.0
     templates_used: list[str] = field(default_factory=list)
+    source_scores: dict[str, float] = field(default_factory=dict)
+    latency_ms: float = 0.0
+
+
+# LLM 置信度低于此值 → 降级为 clarify（EchoMind 的置信度阈值思路）。
+LLM_CONFIDENCE_THRESHOLD = 0.6
+
+# 向量直接命中阈值：与已验证模板几乎一致（任务号保留）→ 跳过 LLM。
+VECTOR_HIT_THRESHOLD = 0.95
+
+# LLM 解析缓存：重复话术即时返回（EchoMind 的 LRU 缓存思路）。
+_PARSE_CACHE: dict[str, ParseResult] = {}
+_PARSE_CACHE_MAX = 1000
 
 
 class ParseUnavailable(RuntimeError):
@@ -512,13 +532,16 @@ def parse_with_llm(
         raise ParseUnavailable("未配置 MINIMAX_API_KEY，LLM 解析不可用")
     if client is None:
         from anthropic import Anthropic
+        import httpx
 
         api_key, model, base_url = config
         # 本机 Claude Code 代理环境里有 ANTHROPIC_AUTH_TOKEN=PROXY_MANAGED：
         # SDK 在 auth_token=None 时读环境变量并优先于 api_key 发 Bearer 头，
         # 导致真实 key 被劫持（401 ****AGED）。构造时传空串跳过环境读取、
         # 构造后置回 None 让 SDK 走 x-api-key 头。
-        client = Anthropic(api_key=api_key, auth_token="", base_url=base_url, timeout=60.0)
+        # trust_env=False 让 httpx 不走全局 HTTPS_PROXY（deepseek.com 国内直连，走代理反而慢）。
+        http_client = httpx.Client(trust_env=False, timeout=60.0)
+        client = Anthropic(api_key=api_key, auth_token="", base_url=base_url, http_client=http_client)
         client.auth_token = None
         model_name = model
     else:
@@ -548,20 +571,51 @@ def parse_with_llm(
         payload = json.loads(content)
     except (json.JSONDecodeError, TypeError):
         # LLM 产出空/坏 JSON → 澄清（低置信），不静默不崩溃
-        return ParseResult(dsl=None, source="llm", route="clarify", confidence=0.5)
-    if payload.get("route") in ("not_change", "reject"):
-        return ParseResult(dsl=None, source="llm", route=payload["route"], confidence=1.0)
-    errors = validate_dsl(payload)
+        return ParseResult(dsl=None, source="llm", route="clarify", confidence=0.5,
+                           source_scores={"llm": 0.0})
+
+    def _conf(raw: Any) -> float:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return 0.5
+        return max(0.0, min(1.0, value))
+
+    # 统一包装格式：{"route": ..., "confidence": ..., "dsl": ...}；
+    # 兼容旧格式：直接输出 DSL JSON（视为 route=dsl、confidence=1.0）。
+    if isinstance(payload, dict) and "route" in payload:
+        route = str(payload.get("route", "dsl"))
+        confidence = _conf(payload.get("confidence", 0.5))
+        dsl = payload.get("dsl") if route == "dsl" else None
+    else:
+        route, confidence, dsl = "dsl", 1.0, payload
+
+    if route in ("not_change", "reject"):
+        return ParseResult(dsl=None, source="llm", route=route, confidence=confidence,
+                           source_scores={"llm": confidence})
+    if route == "clarify":
+        return ParseResult(dsl=None, source="llm", route="clarify", confidence=confidence,
+                           source_scores={"llm": confidence})
+    if not isinstance(dsl, dict):
+        return ParseResult(dsl=None, source="llm", route="clarify", confidence=0.5,
+                           source_scores={"llm": confidence})
+    errors = validate_dsl(dsl)
     if errors:
         # 产物过不了校验 → 不静默也不抛异常，路由为"澄清"（低置信），
         # 由上层决定重试、换说法或转人工。
-        return ParseResult(dsl=None, source="llm", route="clarify", confidence=0.5)
+        return ParseResult(dsl=None, source="llm", route="clarify", confidence=0.5,
+                           source_scores={"llm": confidence})
+    if confidence < LLM_CONFIDENCE_THRESHOLD:
+        # 低置信产物不可信 → 澄清（EchoMind 阈值降级思路）。
+        return ParseResult(dsl=None, source="llm", route="clarify", confidence=confidence,
+                           source_scores={"llm": confidence})
     return ParseResult(
-        dsl=payload,
+        dsl=dsl,
         source="llm",
         route="dsl",
-        confidence=1.0,
+        confidence=confidence,
         templates_used=[entry.get("id", entry.get("utterance", "")) for entry in templates],
+        source_scores={"llm": confidence},
     )
 
 
@@ -595,24 +649,96 @@ def parse_by_legacy(message: str) -> dict[str, Any] | None:
     return request_to_dsl(compiled.request)
 
 
-def parse(message: str, library: list[dict] | None = None, client=None) -> ParseResult:
+def parse(
+    message: str,
+    library: list[dict] | None = None,
+    client=None,
+    on_stage: Callable[[str, str, str, str | None], None] | None = None,
+) -> ParseResult:
     """三层解析入口：批量 → 规则 → 旧规划语言桥接 → 意图门控 → 向量 → LLM。
 
     路由结果：dsl / batch / data_patch / parameter / strategy / reject / not_change / clarify。
+
+    on_stage(id, label, status, detail) 在每层切换处回调（过程可视化 / 评测埋点）。
     """
+    def stage(stage_id: str, label: str, status: str = "running", detail: str | None = None) -> None:
+        if on_stage:
+            on_stage(stage_id, label, status, detail)
+
+    t0 = time.monotonic()
+
+    stage("route", "判断意图路由", "running")
     if _BATCH_RE.search(message):
-        return ParseResult(dsl=None, source="rule", route="batch", confidence=1.0)
+        stage("route", "判断意图路由", "done", "批量场景")
+        return ParseResult(dsl=None, source="rule", route="batch", confidence=1.0,
+                           source_scores={"rule": 1.0}, latency_ms=_elapsed(t0))
     ruled = parse_by_rules(message)
     if ruled is not None:
-        return ParseResult(dsl=ruled, source="rule", route="dsl", confidence=1.0)
+        stage("parse.rule", "规则层命中", "done")
+        stage("route", "判断意图路由", "done", "dsl")
+        return ParseResult(dsl=ruled, source="rule", route="dsl", confidence=1.0,
+                           source_scores={"rule": 1.0}, latency_ms=_elapsed(t0))
     if _classify_not_change_only(message) is not None:
-        return ParseResult(dsl=None, source="rule", route="not_change", confidence=0.9)
+        stage("route", "判断意图路由", "done", "not_change")
+        return ParseResult(dsl=None, source="rule", route="not_change", confidence=0.9,
+                           source_scores={"rule": 0.9}, latency_ms=_elapsed(t0))
     bridged = parse_by_legacy(message)
     if bridged is not None:
-        return ParseResult(dsl=bridged, source="rule", route="dsl", confidence=1.0)
+        stage("parse.legacy", "旧规划语言桥接", "done")
+        stage("route", "判断意图路由", "done", "dsl")
+        return ParseResult(dsl=bridged, source="rule", route="dsl", confidence=1.0,
+                           source_scores={"rule": 1.0}, latency_ms=_elapsed(t0))
     classified = _classify_non_change(message)
     if classified is not None:
-        return ParseResult(dsl=None, source="rule", route=classified, confidence=0.9)
+        stage("route", "判断意图路由", "done", classified)
+        return ParseResult(dsl=None, source="rule", route=classified, confidence=0.9,
+                           source_scores={"rule": 0.9}, latency_ms=_elapsed(t0))
     library = library if library is not None else load_library()
+
+    # LLM 结果缓存：重复/接近重复的话术即时返回（EchoMind 的 LRU 缓存思路）。
+    cache_key = message.strip()
+    if cache_key in _PARSE_CACHE:
+        result = _PARSE_CACHE[cache_key]
+        stage("parse.llm", "缓存命中", "done", result.route)
+        stage("route", "判断意图路由", "done", result.route)
+        return result
+
+    stage("parse.retrieve", "检索相似模板", "running")
     templates = retrieve(message, library, top_k=3)
-    return parse_with_llm(message, templates, client=client)
+    top1 = templates[0] if templates else None
+    top_sim = float(top1.get("similarity", 0.0)) if top1 else 0.0
+    stage("parse.retrieve", "检索相似模板", "done",
+          f"top-{len(templates)} 条（相似度 {top_sim:.2f}）")
+
+    # 向量直接命中：与已验证模板几乎一致（任务号保留）→ 跳过 LLM。
+    if top1 is not None and top_sim >= VECTOR_HIT_THRESHOLD:
+        result = ParseResult(
+            dsl=top1["dsl"], source="vector", route="dsl", confidence=top_sim,
+            templates_used=[top1.get("id", top1.get("utterance", ""))],
+            source_scores={"vector": top_sim}, latency_ms=_elapsed(t0),
+        )
+        stage("parse.llm", "向量直接命中", "done", f"相似度 {top_sim:.2f}")
+        stage("route", "判断意图路由", "done", "dsl")
+        _cache_put(cache_key, result)
+        return result
+
+    stage("parse.llm", "调用大模型解析", "running")
+    result = parse_with_llm(message, templates, client=client)
+    result.source_scores["vector"] = top_sim
+    result.latency_ms = _elapsed(t0)
+    stage("parse.llm", "调用大模型解析", "done",
+          f"{result.route}（置信度 {result.confidence:.2f}）")
+    stage("route", "判断意图路由", "done", result.route)
+    _cache_put(cache_key, result)
+    return result
+
+
+def _cache_put(key: str, result: ParseResult) -> None:
+    if len(_PARSE_CACHE) >= _PARSE_CACHE_MAX:
+        for k in list(_PARSE_CACHE)[:_PARSE_CACHE_MAX // 2]:
+            del _PARSE_CACHE[k]
+    _PARSE_CACHE[key] = result
+
+
+def _elapsed(t0: float) -> float:
+    return round((time.monotonic() - t0) * 1000, 1)

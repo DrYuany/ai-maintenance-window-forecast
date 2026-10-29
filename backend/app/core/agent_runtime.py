@@ -83,6 +83,19 @@ class StreamSink:
     def status(self, label: str) -> None:
         self.emit({"event": "status", "data": {"label": label}})
 
+    def stage(
+        self,
+        stage_id: str,
+        label: str,
+        status: str = "running",
+        detail: str | None = None,
+    ) -> None:
+        """结构化步骤事件（过程可视化 + 评测阶段 span 同源）。"""
+        data: dict[str, Any] = {"id": stage_id, "label": label, "status": status}
+        if detail is not None:
+            data["detail"] = detail
+        self.emit({"event": "stage", "data": data})
+
     def replace(self, text: str) -> None:
         self.text = text
         self.emit({"event": "replace", "data": {"text": text}})
@@ -476,7 +489,39 @@ class AgentRuntime:
                     sink=sink,
                 )
             # DSL 增量（第一期）：约束/自定义目标类修改，走预览→确认→求解。
-            dsl_result = self._try_dsl_parse(content)
+            dsl_result = self._try_dsl_parse(content, sink=sink)
+            if dsl_result is not None and dsl_result.route == "reject":
+                # 越界诉求：明确拒绝，不再回退旧 conversation_agent（避免二次 LLM）。
+                if sink:
+                    sink.stage("route", "判断意图路由", "done", "reject")
+                return self._finalize_response(
+                    conversation_id,
+                    (
+                        "这类诉求超出了当前排程模型的能力范围（比如非线性/无意义的修改），"
+                        "我没法把它编译成约束，也不会假装能排。\n\n"
+                        "可以试试这些我能处理的：具体任务的时间（最早/期限）、互斥或先后、"
+                        "固定作业线、预算、目标策略或参数调整。"
+                    ),
+                    "change_rejected",
+                    memory.activeView,
+                    [],
+                )
+            if dsl_result is not None and dsl_result.route == "clarify":
+                # 低置信/歧义诉求：直接澄清，不再回退旧 conversation_agent（避免二次 LLM）。
+                if sink:
+                    sink.stage("route", "判断意图路由", "done", "clarify")
+                return self._finalize_response(
+                    conversation_id,
+                    (
+                        "这句话我有点拿不准，没法确定性地编译成约束。请说得更明确一点，比如：\n"
+                        "1. 具体任务编号（如 任务001）或风机/部件；\n"
+                        "2. 约束类型（最早/期限/互斥/先后/作业线/预算）或要改的参数；\n"
+                        "3. 相对基准（例如“顺延”相对哪一版方案）。"
+                    ),
+                    "change_clarification",
+                    memory.activeView,
+                    [],
+                )
             if (
                 dsl_result is not None
                 and dsl_result.route == "dsl"
@@ -498,7 +543,11 @@ class AgentRuntime:
                 )
                 from app.core.model_change import _diff_requests, _format_preview
 
+                if sink:
+                    sink.stage("dsl.validate", "校验并编译 DSL", "running")
                 updated, residual, timeline = dsl_to_request(dsl_result.dsl, current)
+                if sink:
+                    sink.stage("dsl.validate", "校验并编译 DSL", "done")
                 expressible = not (residual or timeline or custom_objectives(dsl_result.dsl))
                 operations = _diff_requests(current, updated)
                 pending_dsl = (
@@ -620,7 +669,7 @@ class AgentRuntime:
                 pass
         # 第三期：统一解析器优先（旧正则作为其规则层），DSL 表达不了的再回退旧规划器。
         change_plan = self._change_plan_from_dsl(
-            content, current, base_version_id,
+            content, current, base_version_id, sink=sink,
         )
         dsl_pending: dict[str, Any] | None = None
         if change_plan is None:
@@ -639,7 +688,7 @@ class AgentRuntime:
                 request_to_dsl,
             )
 
-            dsl = self._try_dsl_parse(content)
+            dsl = self._try_dsl_parse(content, sink=sink)
             if dsl is not None and dsl.dsl:
                 residual, timeline = dsl_to_request(dsl.dsl, current)[1:]
                 pending_dsl = (
@@ -877,23 +926,39 @@ class AgentRuntime:
         ])
         return "\n".join(lines)
 
-    def _try_dsl_parse(self, content: str):
+    def _try_dsl_parse(self, content: str, sink: StreamSink | None = None):
         """DSL 三层解析（增量能力）。解析不了/LLM 不可用返回 None，回退现有路径。
 
         规则层与门控是确定性的，不产生 API 调用；只有真正的新话术才走到 LLM。
+        sink 用于把解析各阶段（规则/桥接/检索/LLM）作为 stage 事件推给前端。
+
+        LLM 失败（超时/网络/坏响应）降级为 clarify，不再回退旧 conversation_agent
+        二次调 LLM；只有「未配置 key」（ParseUnavailable）才返回 None 走旧路径。
         """
         try:
-            from app.core.dsl.llm_parser import ParseUnavailable, parse as dsl_parse
+            from app.core.dsl.llm_parser import ParseResult, ParseUnavailable, parse as dsl_parse
         except Exception:  # pragma: no cover - DSL 包缺失时静默回退
             return None
-        try:
-            return dsl_parse(content)
-        except (ParseUnavailable, Exception):  # noqa: BLE001 - 解析失败回退现有路径
-            return None
 
-    def _change_plan_from_dsl(self, content: str, current, base_version_id):
+        def on_stage(stage_id: str, label: str, status: str = "running", detail: str | None = None) -> None:
+            if sink:
+                sink.stage(stage_id, label, status, detail)
+
+        try:
+            return dsl_parse(content, on_stage=on_stage)
+        except ParseUnavailable:
+            return None
+        except Exception:  # noqa: BLE001 - LLM 调用失败 → 澄清，不二次 LLM
+            if sink:
+                sink.stage("parse.llm", "调用大模型解析", "done", "失败，降级澄清")
+            return ParseResult(
+                dsl=None, source="llm", route="clarify", confidence=0.0,
+                source_scores={"llm": 0.0},
+            )
+
+    def _change_plan_from_dsl(self, content: str, current, base_version_id, sink: StreamSink | None = None):
         """统一解析器 → 变更计划（第三期）。DSL 表达不了或没有变化时返回 None 走旧路径。"""
-        parsed = self._try_dsl_parse(content)
+        parsed = self._try_dsl_parse(content, sink=sink)
         if parsed is None or parsed.route != "dsl" or not parsed.dsl:
             return None
         try:
@@ -1328,7 +1393,9 @@ class AgentRuntime:
                     "read_site": "已读取现场数据",
                     "solve": "已准备变更预览",
                 }
-                sink.status(labels.get(name, f"已执行 {name}"))
+                label = labels.get(name, f"已执行 {name}")
+                sink.status(label)
+                sink.stage(f"tool.{name}", label, "done")
 
         return AgentToolbox(
             conversation_id=conversation_id,
@@ -1595,6 +1662,15 @@ class AgentRuntime:
             for item in version.windows
         )
         proof = "已证明最优" if status == "OPTIMAL" else "已找到并复核可行方案，尚未证明最优"
+        solver = summary.get("solver") or {}
+        if str(solver.get("方案来源") or "") == "HEURISTIC_FALLBACK":
+            # 求解器没产出排程时，给出的是启发式基线的部分排程，不能按“可行方案”汇报。
+            opening = (
+                f"本次未得到求解器排程：现在这版是启发式基线兜底，"
+                f"只完成 {completed}/{total} 个任务，尚未证明最优。"
+            )
+        else:
+            opening = f"排程完成：{proof}。"
         savings = summary.get("baselineSavings", {})
         savings_text = "；".join(
             f"较{name}节省 {value / 10000:.2f} 万元"
@@ -1602,7 +1678,7 @@ class AgentRuntime:
             if value is not None and value >= 0
         )
         return (
-            f"排程完成：{proof}。\n"
+            f"{opening}\n"
             f"建议窗口：{windows or '暂无'}\n"
             f"完成任务：{completed}/{total}；总成本：{total_cost / 10000:.2f} 万元"
             + (f"；{savings_text}" if savings_text else "")
