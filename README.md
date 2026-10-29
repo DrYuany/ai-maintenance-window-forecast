@@ -27,6 +27,8 @@ Agent 下一阶段的场景、工具契约、验收用例和优先级见
 
 ## 安装后端依赖
 
+要求 Python 3.12（求解器依赖的 OR-Tools `ortools` 目前主要提供 3.12 的 wheel）。
+
 ```powershell
 python -m pip install -r backend\requirements.txt
 ```
@@ -56,6 +58,14 @@ python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --
 `http://127.0.0.1:8000/docs`
 
 ## 启动前端
+
+首次先安装依赖：
+
+```powershell
+npm install
+```
+
+然后启动：
 
 ```powershell
 npm run dev

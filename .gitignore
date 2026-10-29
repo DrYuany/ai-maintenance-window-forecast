@@ -43,3 +43,6 @@ backend/data/
 *.db
 *.db-wal
 *.db-shm
+
+# ── git worktree（多窗口并行开发）─────────────────────────────
+.worktrees/
