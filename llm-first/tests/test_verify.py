@@ -514,3 +514,63 @@ def test_multi_value_kinds_come_from_registry():
     """名单从注册表算，不手抄——不然加了同样形状的原语，判据会静默不认。"""
     kinds = verify._multi_value_kinds()
     assert "lexmin" in kinds
+
+
+# ── 12. A7 退回消息要说清楚缺哪个键 ───────────────────────────────────────
+
+def test_a7_names_the_missing_key():
+    """「严重故障11月8日前必须修完」被写成 `deadline{severity:...}`——少了个 `task`。
+
+    退回消息只写"1 项缺必填字段"，模型下一轮还是不知道改哪儿；重试机制就等于没用。
+    """
+    product = {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "严重故障11月8日前必须修完", "kind": "action"}],
+        "fills": [{"claim": 1, "row": "C07", "span": "严重故障11月8日前必须修完",
+                   "from": "convert", "op": "<=",
+                   "value": {"severity": "高", "time": "2026-11-08T08:00:00+08:00"},
+                   "calc": "严重故障=高"}],
+        "unassigned": [],
+        "dsl": {"constraints": [{"type": "deadline", "severity": "高",
+                                 "time": "2026-11-08T08:00:00+08:00"}]},
+    }
+    check = verify.verify("严重故障11月8日前必须修完", product).get("A7")
+    assert check.verdict == "fail"
+    assert "task" in check.detail, "要说清缺的是哪个键，不然重试拿不到能改的信息"
+    assert "deadline" in check.detail
+
+
+# ── 13. A6 合并：同一条数据补丁的两半不是两个值 ───────────────────────────
+
+def _part_arrival_product():
+    return {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "叶片11月5日到2套", "kind": "action"},
+                   {"id": 2, "text": "到货前不能开工", "kind": "action"}],
+        "fills": [
+            {"claim": 1, "row": "D02", "span": "叶片11月5日到2套", "from": "literal",
+             "value": {"kind": "part_arrival", "part": "叶片",
+                       "at": "2026-11-05T08:00:00+08:00", "quantity": 2}},
+            {"claim": 2, "row": "D02", "span": "到货前不能开工", "from": "literal",
+             "value": {"kind": "part_arrival", "part": "叶片",
+                       "at": "2026-11-05T08:00:00+08:00", "blockBefore": True}},
+        ],
+        "unassigned": [],
+        "dsl": {"data": [{"kind": "part_arrival", "part": "叶片",
+                          "at": "2026-11-05T08:00:00+08:00",
+                          "quantity": 2, "blockBefore": True}]},
+    }
+
+
+def test_two_halves_of_one_patch_are_merged():
+    """一句话切成两条 claim，各填一半字段——合起来才是完整的一条补丁。"""
+    check = verify.verify("叶片11月5日到2套，到货前不能开工", _part_arrival_product()).get("A6")
+    assert check.verdict == "pass", check.detail
+
+
+def test_same_key_different_value_is_still_a_clash():
+    """放宽的是"补不同键"，不是"同键填两个值"。真冲突还是必须拦。"""
+    product = _part_arrival_product()
+    product["fills"][1]["value"]["quantity"] = 5        # 同一个键，两个不同的数
+    check = verify.verify("叶片11月5日到2套，到货前不能开工", product).get("A6")
+    assert check.verdict == "fail"

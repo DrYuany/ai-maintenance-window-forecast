@@ -683,6 +683,20 @@ def _multi_value_kinds() -> set[str]:
 _MULTI_VALUE = _multi_value_kinds()
 
 
+def _mergeable(left: Any, right: Any) -> bool:
+    """两个值能不能并成一条：**只要没有同一个键取值不同，就能并。**
+
+    "叶片11月5日到2套，到货前不能开工" 会被切成两条 claim：
+    一条填 `{part, at, quantity:2}`，另一条填 `{part, at, blockBefore:true}`。
+    它们不是两个互相矛盾的值，是同一条数据补丁的两半——合并起来正好是完整的一条。
+    真正该拦的是"同一个键填了两个不同的数"（船租今天说5万、明天说8万），
+    那条路还在：`_clash_keys` 只放宽了"补不同键"，没放宽"同键不同值"。
+    """
+    if isinstance(left, dict) and isinstance(right, dict):
+        return all(_same_value(left[key], right[key]) for key in left.keys() & right.keys())
+    return _same_value(left, right)
+
+
 def check_single_value(product: dict[str, Any]) -> Check:
     fills = product.get("fills") or []
     if not fills:
@@ -693,22 +707,33 @@ def check_single_value(product: dict[str, Any]) -> Check:
         row_id = str(fill.get("row") or "")
         grouped.setdefault(row_id, []).append(fill)
 
-    clashes, skipped = [], []
+    clashes, skipped, merged_rows = [], [], []
     for row_id, items in grouped.items():
         row = row_book.by_id(row_id)
         if row is not None and row.kind in _MULTI_VALUE:
             skipped.append(row_id)      # 这一行本来就是一串（lexmin 的阶段）
             continue
         distinct: list[Any] = []
+        merged_keys = False
         for item in items:
             value = item.get("value")
-            if not any(_same_value(value, existing) for existing in distinct):
-                distinct.append(value)
+            hit = next((d for d in distinct if _mergeable(d, value)), None)
+            if hit is not None:
+                # 同一件事的两个方面（数量 / 到货前不许开工），合并进同一条
+                if isinstance(hit, dict) and isinstance(value, dict):
+                    hit.update(value)
+                    merged_keys = True
+                continue
+            distinct.append(value)
         if len(distinct) > 1:
             clashes.append({"row": row_id, "values": distinct,
                             "claims": [i.get("claim") for i in items]})
+        elif merged_keys:
+            merged_rows.append(row_id)
 
     tail = f"；{len(skipped)} 行本来就要装一串（{'、'.join(skipped)}）" if skipped else ""
+    if merged_rows:
+        tail += f"；{len(merged_rows)} 行是两半合成一条（{'、'.join(merged_rows)}）"
     if clashes:
         if product.get("route") == "clarify":
             return Check("A6", "单值", "pass", "同一行多个值，已按 clarify 处理" + tail, clashes)
@@ -752,7 +777,11 @@ def check_required(utterance: str, product: dict[str, Any]) -> Check:
     if not checked:
         return Check("A7", "必填", "na", "fills 没有对应的 dsl 项，交给 A8 判")
     if bad:
-        return Check("A7", "必填", "fail", f"{len(bad)} 项缺必填字段", bad)
+        # 说清"哪一项、缺哪个键"——只写"1 项缺必填"，模型下一轮还是不知道改哪儿。
+        head = "；".join(
+            f"{item['kind']} 缺 {'/'.join(item['missing'])}（必填是 {'/'.join(item['required'])}）"
+            for item in bad[:3])
+        return Check("A7", "必填", "fail", f"{len(bad)} 项缺必填字段：{head}", bad)
     return Check("A7", "必填", "pass", f"{checked} 项必填齐全")
 
 

@@ -88,6 +88,9 @@
 | A8 一致 | dsl 每项有 fill 背书；每个 fill 在 dsl 里有对应项 | 整份退回 |
 | A9 形状 | 结构合法、枚举合法；**日期字段里必须是日期** | 整份退回 |
 | A10 不改 | `not_change` 不许藏 `action`；`reject` 每条都要给理由 | 整份退回 |
+| A11 方向 | 说「不超过/最多」→ op 必须 `<=`；说「至少/不低于」→ `>=` | 方向反了 → 整份退回 |
+| A12 不轻拒 | `reject` 时原文有表内线索词 → 只记线索 | 不拦，只提示 |
+| A13 量词 | 说「全部/所有/全修」时不许写成 `cardinality{">=",1}` | 拿近似顶替 → 整份退回 |
 
 四态：`pass` / `fail` / `unclear` / `na`。**`unclear` 只记日志不拦截**——
 把"我判不了"说成"你错了"，一条假警报就足以让人关掉整套验收器。
@@ -101,6 +104,8 @@
 
 - 原文有、DSL 没有 → 丢话
 - DSL 有、原文没有 → 编造或默认值
+- **route 不是 `dsl` 时整个对账不适用**：没交出 DSL 就没有"丢"这回事。
+  这条是跑批跑出来的——正确拒绝的一句话也被记了"丢数"，比漏报更伤。
 
 实测 `人工单价涨到200，任务003最晚11月9日修完`：
 LLM 侧交 2 项、丢 0 个；规则侧这一句**交不出 DSL**（它只认下两段里的第一段），
@@ -119,19 +124,27 @@ llm-first/
 │   ├── rows.py       行号目录 P/X/C/O/D（提示词与验收器共用一份）
 │   ├── segment.py    系统切段（A1 的分母）+ 连接词表（提示词从这里取）
 │   ├── contract.py   产物形状、枚举、键名归一化
-│   ├── verify.py     A1~A10 + 数字对账
+│   ├── verify.py     A1~A13 + 数字对账
 │   ├── guardrail.py  结构性护栏（只否决，不认领）
 │   ├── client.py     DeepSeek（JSON 模式，标准库 urllib，无额外依赖）
 │   ├── pipeline.py   护栏 → 缓存 → 模型 → 验收 → 退回重试 → 澄清
+│   ├── context.py    会话基准（今天几号）+ 相对时间换算
+│   ├── answer.py     读请求执行器：fact 查数 / reason 拆账 / diff 比策略
+│   ├── execute.py    执行侧客户端（子进程 + 限时，不 import 求解器）
 │   ├── rulebench.py  规则侧理解层复刻（只读复用 backend，走到 LLM 之前就停）
-│   └── paths.py      把 ../backend 挂进 sys.path
-├── tests/            51 条：提示词结构 + 验收判据 + 切段 + 数字对账 + 规则侧边界
+│   └── paths.py      把 ../backend 与求解内核挂进 sys.path
+├── eval/cases.py     分层评测集：49 条手写（每条写清在证明什么）+ 221 条 backend 压力集
+├── tests/            94 条：提示词结构 + 验收判据 + 切段 + 数字对账 + 规则侧边界
+│                     + 基准日期 + 读请求 + 执行侧 + 18 条错误分类学
 ├── web/index.html    单页双栏对照台
-├── scripts/          bench_compare.py（一次快照）+ bench_stability.py（跑多遍看抖动）
+├── scripts/          bench_compare.py（两侧对照）+ bench_stability.py（跑多遍看抖动）
+│                     + bench_suite.py（跑评测集）+ worker.py（求解子进程）
 ├── server.py         FastAPI :8011
 └── docs/
     ├── 对照结果.md            十句话两边各读一遍（一次快照）
     ├── 稳定性.md              同样十句各跑 5 遍的分布
+    ├── 评测-core.md           49 条分层评测：通过率 + 失败归因
+    ├── 评测-backend.md        221 条压力集（按原标签）
     ├── 2026-10-30-落地记录.md 施工日志：十个坑 + 实测数
     ├── 2026-10-30-五段方案复查.md
     └── 2026-10-30-原语该讲成能力不是清单.md
@@ -153,6 +166,8 @@ cd llm-first
 
 # 4. 回归
 "D:/env/conda/2024/python.exe" -m pytest tests/ -q
+"D:/env/conda/2024/python.exe" scripts/bench_suite.py --suite core --save    # 49 条分层
+"D:/env/conda/2024/python.exe" scripts/bench_suite.py --suite backend --save # 221 条压力
 "D:/env/conda/2024/python.exe" scripts/bench_compare.py --save
 ```
 

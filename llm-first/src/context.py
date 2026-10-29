@@ -52,6 +52,8 @@ class Context:
     base_id: str = "基座01"
     # 当前场景的参数现值（参数名 → (值, 单位)）。空的就不给这一段提示词。
     params: tuple[tuple[str, Any, str], ...] = ()
+    # 海事窗口的起止（编号 → (开始, 结束)）。"窗口02提前两天"要它才能算。
+    windows: tuple[tuple[str, str, str], ...] = ()
 
     # ── 展示 ────────────────────────────────────────────────────────────
     @property
@@ -97,13 +99,20 @@ class Context:
         if not self.params:
             return ""
         rows = "\n".join(f"| {name} | {value} | {unit} |" for name, value, unit in self.params)
-        return (
+        block = (
             "# 现在是多少\n\n"
             "下表是当前场景的参数值。用户说「少一条」「涨两成」「砍一半」这类**相对改动**时，\n"
             "在这个基础上算出目标值，`op` 用 `=` 写绝对值，并在 `calc` 里写清算式\n"
             "（例如 `calc=\"3-1=2\"`）。\n\n"
             "| 参数 | 现值 | 单位 |\n|---|---|---|\n" + rows
         )
+        if self.windows:
+            win = "\n".join(f"| {name} | {start} | {end} |" for name, start, end in self.windows)
+            block += (
+                "\n\n海事窗口的起止也在这里——「窗口02提前两天开始」这种改动要用它换算：\n\n"
+                "| 窗口 | 开始 | 结束（不含） |\n|---|---|---|\n" + win
+            )
+        return block
 
     def explain(self) -> str:
         """给提示词的一段：基准 + 换算表 + 换算不出怎么办。"""
@@ -168,6 +177,24 @@ def param_values() -> tuple[tuple[str, Any, str], ...]:
 _CACHE: dict[str, Context] = {}
 
 
+def window_values() -> tuple[tuple[str, str, str], ...]:
+    """读海事窗口的起止。**失败就返回空**，同 param_values。"""
+    try:
+        import paths  # noqa: F401
+        from pathlib import Path
+
+        from product_data import load_project
+
+        root = Path(__file__).resolve().parents[2]
+        data = load_project(root, base_id="基座01")
+        out = []
+        for win in data.observation_windows:
+            out.append((win["编号"], data.stamp(win["开始"]), data.stamp(win["结束"])))
+        return tuple(out)
+    except Exception:
+        return ()
+
+
 def with_params_for(ctx: Context) -> Context:
     """给上下文接上现值。按"基准日 + 基座"缓存，同一进程里只读一次数据。"""
     if ctx.params:
@@ -175,7 +202,8 @@ def with_params_for(ctx: Context) -> Context:
     key = f"{ctx.iso}|{ctx.base_id}"
     hit = _CACHE.get(key)
     if hit is None:
-        hit = Context(today=ctx.today, tz=ctx.tz, base_id=ctx.base_id, params=param_values())
+        hit = Context(today=ctx.today, tz=ctx.tz, base_id=ctx.base_id,
+                      params=param_values(), windows=window_values())
         _CACHE[key] = hit
     return hit
 

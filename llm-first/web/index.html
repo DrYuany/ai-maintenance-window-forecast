@@ -215,6 +215,9 @@ function checksHtml(report) {
 
 function numbersHtml(n) {
   if (!n) return "";
+  if (n.applicable === false) {
+    return `<div><h3>数字对账</h3><div class="note">${esc(n.why || "这一句没有交出 DSL，对账不适用")}</div></div>`;
+  }
   const miss = (n.missing || []).map(num).join("、") || "无";
   const extra = (n.extra || []).map(num).join("、") || "无";
   return `<div><h3>数字对账</h3>

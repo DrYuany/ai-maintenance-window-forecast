@@ -67,7 +67,7 @@ def index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict:
-    ctx = session.default()
+    ctx = session.with_params_for(session.default())
     return {
         "llm_ready": client.configured(),
         "model": __import__("os").environ.get("DEEPSEEK_MODEL", "deepseek-chat"),

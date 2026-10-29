@@ -188,3 +188,30 @@ def test_a12_never_blocks():
     """线索不拦截。判不了的事说成"你错了"，一条假警报就能让人关掉验收器。"""
     report = verify.verify("只排风机003的任务", _reject_product("只排风机003的任务"))
     assert not report.blocked
+
+
+# ── 窗口起止也要进现值表 ──────────────────────────────────────────────────
+
+def _params_ctx() -> context.Context:
+    return context.with_params_for(CTX)
+
+
+def test_window_dates_are_available_for_relative_change():
+    """「窗口02提前两天」要知道窗口02原来哪天开始，否则只能反问。
+
+    和「船少一条」是同一件事：现值系统自己知道，让用户重说一遍是产品的问题。
+    """
+    ctx = _params_ctx()
+    if not ctx.windows:                 # 读不到数据就跳过，不算失败
+        return
+    first = ctx.windows[0]
+    name, start, end = first
+    assert name.startswith("窗口")
+    assert len(start) >= 10 and len(end) >= 10
+    body = ctx.param_block()
+    assert "海事窗口" in body and name in body and start[:10] in body
+
+
+def test_param_block_falls_back_when_no_data():
+    """没有现值就不要编一段。宁可提示词短一点，也不要出现"现值未知"这种空话。"""
+    assert context.Context(today=datetime.date(2026, 10, 30)).param_block() == ""
