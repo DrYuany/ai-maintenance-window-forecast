@@ -22,9 +22,9 @@ class MaintenanceProductExecutor:
         if str(self.scripts_dir) not in sys.path:
             sys.path.insert(0, str(self.scripts_dir))
 
-        self._lock = threading.Lock()
         self._cancel_events: dict[str, threading.Event] = {}
         self._solvers: dict[str, Any] = {}
+        self._dir_locks: dict[str, threading.Lock] = {}
 
     def prepare(self, request: PlanningRequest) -> tuple[PlanningRequest, dict[str, Any]]:
         from product_data import load_project
@@ -115,7 +115,10 @@ class MaintenanceProductExecutor:
                 if not has_cached_solution or not has_cached_artifact:
                     output = base_output.with_name(f"{base_output.name}-{job_id[-8:]}")
                     result_path = output / "结果.json"
-            with self._lock:
+            # 并发求解：按输出目录加锁——指纹不同则目录不同、可并发互不覆盖；
+            # 指纹相同（同一请求重复提交）则串行复用缓存，避免后一个撞已存在结果。
+            dir_lock = self._dir_locks.setdefault(str(output), threading.Lock())
+            with dir_lock:
                 if result_path.exists():
                     report = json.loads(result_path.read_text(encoding="utf-8"))
                 else:
