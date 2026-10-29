@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.core.conversation_memory import (
+    ConversationMemoryCache,
     ConversationMemoryRepository,
     build_memory_snapshot,
     render_memory_context,
@@ -134,3 +135,39 @@ def test_conversation_memory_repository_roundtrip(temp_db_path: Path) -> None:
     assert loaded.conversationId == "c1"
     assert loaded.messageCount == 0
     assert loaded.state["latestResultId"] == "v1"
+
+
+def test_llm_summary_is_stored_and_rendered() -> None:
+    snapshot = build_memory_snapshot("c1", [], _memory(), [], llm_summary="用户偏好先修高风险风机。")
+    assert snapshot.llmSummary == "用户偏好先修高风险风机。"
+    assert "会话背景（LLM 摘要）" in render_memory_context(snapshot)
+    assert "用户偏好先修高风险风机" in render_memory_context(snapshot)
+
+
+def test_memory_cache_hits_on_same_message_count_and_misses_on_change() -> None:
+    cache = ConversationMemoryCache()
+    snapshot = build_memory_snapshot("c1", [], _memory(), [])
+
+    cache.put(snapshot)
+    assert cache.get("c1", 0) is snapshot
+    assert cache.get("c1", 1) is None
+    assert cache.get("other", 0) is None
+
+
+def test_memory_cache_evicts_oldest_beyond_maxsize() -> None:
+    cache = ConversationMemoryCache(maxsize=2)
+    for conversation_id in ("a", "b", "c"):
+        cache.put(build_memory_snapshot(conversation_id, [], _memory(), []))
+
+    assert cache.get("a", 0) is None
+    assert cache.get("b", 0) is not None
+    assert cache.get("c", 0) is not None
+
+
+def test_summarize_returns_none_when_llm_disabled(monkeypatch) -> None:
+    from app.core.conversation_agent import ConversationAgent
+
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    agent = ConversationAgent()
+    assert not agent.enabled
+    assert agent.summarize([_msg("m1", "user", "船租上涨20%")]) is None

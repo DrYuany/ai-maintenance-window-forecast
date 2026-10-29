@@ -21,7 +21,11 @@ from app.core.agent_memory import (
 )
 from app.core.agent_trace import AgentTrace, AgentTraceRepository, ToolCallRecord, new_trace_id
 from app.core.conversation_agent import ConversationAgent, ConversationAgentError
-from app.core.conversation_memory import ConversationMemoryRepository, build_memory_snapshot
+from app.core.conversation_memory import (
+    ConversationMemoryCache,
+    ConversationMemoryRepository,
+    build_memory_snapshot,
+)
 from app.core.decision_contract import DecisionCompiler
 from app.core.maintenance_product_executor import MaintenanceProductExecutor, solver_status
 from app.core.model_change import (
@@ -148,6 +152,7 @@ class AgentRuntime:
         self.profile_repo = profile_repo
         self.decision_repo = decision_repo
         self.memory_repo = memory_repo
+        self.memory_cache = ConversationMemoryCache()
         self._tls = threading.local()
 
     # ── trace ────────────────────────────────────────────────────────────────
@@ -1420,17 +1425,21 @@ class AgentRuntime:
         sink: StreamSink | None,
     ) -> str:
         toolbox = self._build_toolbox(conversation_id, selected_version, sink)
-        snapshot = build_memory_snapshot(
-            conversation_id,
-            history,
-            memory,
-            self.versions.list_by_conversation(conversation_id),
-        )
-        if self.memory_repo is not None:
-            try:
-                self.memory_repo.upsert(snapshot)
-            except Exception:  # pragma: no cover - 记忆落库失败不阻断对话
-                pass
+        snapshot = self.memory_cache.get(conversation_id, len(history))
+        if snapshot is None:
+            snapshot = build_memory_snapshot(
+                conversation_id,
+                history,
+                memory,
+                self.versions.list_by_conversation(conversation_id),
+                llm_summary=self.conversation_agent.summarize(history) or "",
+            )
+            self.memory_cache.put(snapshot)
+            if self.memory_repo is not None:
+                try:
+                    self.memory_repo.upsert(snapshot)
+                except Exception:  # pragma: no cover - 记忆落库失败不阻断对话
+                    pass
         reply = self.conversation_agent.answer(
             message=content,
             history=history,

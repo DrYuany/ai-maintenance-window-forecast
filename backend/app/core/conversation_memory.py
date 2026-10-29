@@ -7,6 +7,7 @@ LLM 摘要可选。快照落库 + 增量可重建，冷启动时从现有表重�
 from __future__ import annotations
 
 import re
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -21,6 +22,7 @@ from app.db.database import Database, dumps, loads
 from app.schemas.agent import Message, WindowVersion, WorkingMemory
 
 # 有界参数（默认值，可调）
+RECENT_MESSAGES = 8
 RECENT_ACTIONS = 10
 RECENT_QA = 5
 RECENT_ARTIFACTS = 5
@@ -43,6 +45,7 @@ class ConversationMemory(BaseModel):
     actions: list[dict[str, Any]] = Field(default_factory=list)
     qa: list[dict[str, Any]] = Field(default_factory=list)
     summary: str = ""
+    llmSummary: str = ""
     updatedAt: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -102,6 +105,8 @@ def build_memory_snapshot(
     messages: list[Message],
     memory: WorkingMemory,
     versions: list[WindowVersion],
+    *,
+    llm_summary: str = "",
 ) -> ConversationMemory:
     """确定性构建会话记忆快照：约束 + 产物 + 动作 + 问答 + 摘要 + 状态。"""
     constraints = extract_constraints(messages)
@@ -148,6 +153,7 @@ def build_memory_snapshot(
         actions=actions,
         qa=qa,
         summary="\n".join(parts),
+        llmSummary=llm_summary,
     )
 
 
@@ -188,9 +194,35 @@ def render_memory_context(snapshot: ConversationMemory) -> str:
     if snapshot.qa:
         lines = [f"- 问：{qa['q']}\n  答：{qa['a']}" for qa in snapshot.qa[-RECENT_QA:]]
         blocks.append("近期问答：\n" + "\n".join(lines))
+    if snapshot.llmSummary:
+        blocks.append("会话背景（LLM 摘要）：\n" + snapshot.llmSummary[:SUMMARY_MAX_CHARS])
     if snapshot.summary:
         blocks.append("会话摘要：\n" + snapshot.summary[:SUMMARY_MAX_CHARS])
     return "\n\n".join(blocks)
+
+
+class ConversationMemoryCache:
+    """进程内 LRU：按 conversation_id 缓存最近构建的快照。
+
+    仅当快照的 messageCount 与当前消息数一致时命中（消息未变），否则重建。
+    """
+
+    def __init__(self, maxsize: int = 128) -> None:
+        self._maxsize = maxsize
+        self._items: OrderedDict[str, ConversationMemory] = OrderedDict()
+
+    def get(self, conversation_id: str, message_count: int) -> ConversationMemory | None:
+        item = self._items.get(conversation_id)
+        if item is not None and item.messageCount == message_count:
+            self._items.move_to_end(conversation_id)
+            return item
+        return None
+
+    def put(self, memory: ConversationMemory) -> None:
+        self._items[memory.conversationId] = memory
+        self._items.move_to_end(memory.conversationId)
+        while len(self._items) > self._maxsize:
+            self._items.popitem(last=False)
 
 
 class ConversationMemoryRepository:

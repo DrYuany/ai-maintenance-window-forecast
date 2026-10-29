@@ -10,7 +10,12 @@ from anthropic import Anthropic
 
 from app.core import objective_catalog
 from app.core.agent_tools import AgentToolbox
-from app.core.conversation_memory import ConversationMemory, render_memory_context
+from app.core.conversation_memory import (
+    RECENT_MESSAGES,
+    SUMMARY_MAX_CHARS,
+    ConversationMemory,
+    render_memory_context,
+)
 from app.schemas.agent import Message, WorkingMemory, WindowVersion
 
 
@@ -184,6 +189,43 @@ class ConversationAgent:
         if text:
             return text
         raise ConversationAgentError("工具调用轮次已用完，仍未得到回答")
+
+    def summarize(self, messages: list[Message]) -> str | None:
+        """用 LLM 把旧消息压缩成自由文本摘要；未启用/失败返回 None，绝不抛。"""
+        if not self.enabled or len(messages) <= RECENT_MESSAGES:
+            return None
+        old = messages[:-RECENT_MESSAGES]
+        text = "\n".join(f"{item.role}: {item.content[:200]}" for item in old)
+        try:
+            client = Anthropic(
+                api_key=self.api_key,
+                auth_token="",
+                base_url=self.base_url,
+                timeout=30.0,
+            )
+            client.auth_token = None
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=400,
+                temperature=0.0,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            "用 2-3 句话总结这段对话里已确认的约束、已否决的方案、待办和关键结论；"
+                            "不要编造数字，不确定就不写：\n" + text
+                        ),
+                    }
+                ],
+            )
+            content = "".join(
+                block.text
+                for block in response.content
+                if getattr(block, "type", "") == "text"
+            ).strip()
+            return content[:SUMMARY_MAX_CHARS] or None
+        except Exception:  # pragma: no cover - LLM 摘要失败不阻断
+            return None
 
     @staticmethod
     def _build_messages(message: str, history: list[Message]) -> list[dict[str, Any]]:
