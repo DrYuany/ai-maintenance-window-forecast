@@ -574,3 +574,42 @@ def test_same_key_different_value_is_still_a_clash():
     product["fills"][1]["value"]["quantity"] = 5        # 同一个键，两个不同的数
     check = verify.verify("叶片11月5日到2套，到货前不能开工", product).get("A6")
     assert check.verdict == "fail"
+
+
+# ── 14. A4 认中文数字：用户说了数，就不能算"推不出" ────────────────────────
+
+def test_chinese_number_in_span_is_read():
+    """「只剩两条作业线」里的"两条"就是 2。不认这个，等于把明确的话判成猜的。"""
+    product = {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "船坏了，只剩两条作业线", "kind": "action"}],
+        "fills": [{"claim": 1, "row": "P05", "span": "两条作业线",
+                   "from": "literal", "op": "=", "value": 2}],
+        "unassigned": [],
+        "dsl": {"parameters": [{"field": "最大作业线", "op": "=", "value": 2}]},
+    }
+    assert "A4" not in _codes(verify.verify("船坏了，只剩两条作业线", product))
+
+
+def test_chinese_number_with_unit():
+    """「预算三百万」→ 3000000，不是 3。带量词的中文数字要把量词算进去。"""
+    assert verify._numbers("预算三百万") == [3000000.0]
+
+
+def test_words_that_only_look_like_numbers():
+    """「明天一定别开工」不能读出一个 1。所以只认"数字 + 量词"的组合。"""
+    assert verify._numbers("明天一定别开工") == []
+    assert verify._numbers("安全第一") == []
+
+
+def test_value_written_in_chinese_is_still_rejected():
+    """反过来：填进 dsl 的值不能是中文写法。「八小时」不是求解器能用的数。"""
+    product = {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "每天只能干8小时", "kind": "action"}],
+        "fills": [{"claim": 1, "row": "P04", "span": "8小时",
+                   "from": "literal", "op": "=", "value": "八小时"}],
+        "unassigned": [],
+        "dsl": {"parameters": [{"field": "每日有效维修上限", "op": "=", "value": "八小时"}]},
+    }
+    assert "A4" in _codes(verify.verify("每天只能干8小时", product))

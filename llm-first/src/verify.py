@@ -86,7 +86,70 @@ def _locate(needle: str, hay: str) -> int | None:
     return None
 
 
-def _numbers(text: str) -> list[float]:
+# 中文数字。**用户说的数就是数**——"两条作业线"里的"两条"和"2条"是同一回事。
+# 不认中文数字，就会把"用户原话里明明白白写了2"判成"推不出出处"。
+_CN_DIGIT = {"零": 0, "一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5,
+             "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+# 只认"数字 + 量词/单位"的组合。**为什么这么窄**：中文里到处是"一定""一次""一样"，
+# 见到单个汉字就当数字，"明天一定别开工"都会被读出个 1 来。
+# 加了量词才说明它在数东西。
+_CN_CLASSIFIER = {"万": 1e4, "千": 1e3, "百": 1e2,
+                  "条": 1, "个": 1, "人": 1, "天": 1, "艘": 1, "台": 1, "名": 1,
+                  "小时": 1, "米": 1, "元": 1, "次": 1, "班": 1, "度": 1, "周": 1}
+_CN_NUMBER_RE = re.compile(
+    r"([零一二两三四五六七八九十]+)((?:[" + "".join(_CN_CLASSIFIER) + "])+)")
+
+
+def _cn_digits(body: str) -> float | None:
+    """读一到九十九的中文数字。
+
+    **读不准就返回 None，不返回"看起来像"的值**：这里读出来的数会去和用户填的值比对，
+    猜出来的数一旦凑巧对上，A4 就会放过一条本来错的东西。
+    """
+    if not body:
+        return None
+    if len(body) == 1:
+        return float(_CN_DIGIT[body])
+    if "十" not in body:
+        return None
+    head, _, tail = body.partition("十")
+    if len(head) > 1 or len(tail) > 1:      # "一百二十" 这种读法这里不认
+        return None
+    tens = _CN_DIGIT.get(head, 1) if head else 1
+    ones = _CN_DIGIT.get(tail, 0) if tail else 0
+    return float(tens * 10 + ones)
+
+
+def _cn_numbers(text: str) -> list[float]:
+    """读中文数字。用户说"两条"，就是说了 2——不认这个会把明确的话判成推不出。
+
+    量词可能连着写（"三百万" 是 3×100×10000），逐个乘上去。
+    """
+    out: list[float] = []
+    for raw, units in _CN_NUMBER_RE.findall(text or ""):
+        value = _cn_digits(raw)
+        if value is None:
+            continue
+        step, rest = 1.0, units
+        while rest:
+            hit = next((u for u in _CN_CLASSIFIER if rest.startswith(u)), None)
+            if hit is None:
+                break
+            rest = rest[len(hit):]
+            step *= _CN_CLASSIFIER[hit]
+        if rest:                             # 有没认出来的量词，宁可不要这个数
+            continue
+        out.append(value * step)
+    return out
+
+
+def _numbers(text: str, *, chinese: bool = True) -> list[float]:
+    """读文本里的数。`chinese=False` 只认阿拉伯数字，用在**填进去的值**上。
+
+    两边不一样是有意的：原文里"两条"就是 2，读不出来等于没听见用户说话；
+    但填进 dsl 的 value 必须是求解器能用的数字，"八小时"这种写法本身就不合格
+    （它会被 A9/校验器说"形状不对"，不该被 A4 当成一个对上了 8 的值放过去）。
+    """
     out: list[float] = []
     for raw, unit in _NUM.findall(text or ""):
         try:
@@ -96,6 +159,8 @@ def _numbers(text: str) -> list[float]:
         if unit:
             value *= _CN_UNIT[unit]
         out.append(value)
+    if chinese:
+        out += _cn_numbers(text)
     return out
 
 
@@ -144,7 +209,7 @@ def _to_float(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):
-        found = _numbers(value)
+        found = _numbers(value, chinese=False)   # 填的值必须是阿拉伯数字
         if len(found) == 1:
             return found[0]
     return None
