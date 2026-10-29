@@ -3,9 +3,9 @@
 > 由 `python scripts/bench_suite.py --suite backend --save` 生成，基准日期 2026-10-30。
 > 模型侧同一句重跑可能不同，这个表是**一次快照**。
 
-**221 条：通过 197，未通过 24（89%）。需重试 19 条，平均 1195 ms。**
+**221 条：通过 200，未通过 21（90%）。需重试 21 条，平均 1186 ms。**
 
-归因：通过 197；判断分歧（route 不同，其余都对） 16；其他 6；判据误伤（route 对、验收退） 2
+归因：通过 200；判断分歧（route 不同，其余都对） 19；其他 2
 
 | # | 场景 | 原话 | route | 期望 | 结果 |
 |---|---|---|---|---|---|
@@ -77,16 +77,16 @@
 | Q111 | backend·modify_parameter | 船少一条看看 | dsl | dsl | 过 |
 | Q112 | backend·modify_parameter | 每天只能干8小时 | dsl | dsl | 过 |
 | Q113 | backend·modify_parameter | 少干点，每天6小时 | dsl | dsl | 过 |
-| Q114 | backend·modify_parameter | 人手砍一半 | dsl | dsl | 过 |
+| Q114 | backend·modify_parameter | 人手砍一半 | clarify | dsl | route=clarify（要 ['dsl']）；验收退回 A4 |
 | Q115 | backend·modify_parameter | 风机之间挪动要3小时 | dsl | dsl | 过 |
 | Q116 | backend·modify_parameter | 早上8点开始干活 | dsl | dsl | 过 |
 | Q117 | backend·modify_parameter | 人员上限设为2人 | dsl | dsl | 过 |
 | Q120 | backend·modify_data | 叶片备件11月5日到货 | dsl | dsl | 过 |
 | Q121 | backend·modify_data | 叶片备件11月5日到货，之前不能开工 | dsl | dsl | 过 |
 | Q122 | backend·modify_data | 齿轮箱维修工时上涨20% | dsl | dsl | 过 |
-| Q123 | backend·modify_data | 齿轮箱修起来更费时了，加20% | dsl | dsl | 过 |
+| Q123 | backend·modify_data | 齿轮箱修起来更费时了，加20% | clarify | dsl | route=clarify（要 ['dsl']）；验收退回 A4 |
 | Q124 | backend·modify_data | 严重故障11月8日前必须修完 | clarify | dsl | route=clarify（要 ['dsl']） |
-| Q125 | backend·modify_data | 高危的8号前修完 | clarify | dsl | route=clarify（要 ['dsl']）；验收退回 A7 |
+| Q125 | backend·modify_data | 高危的8号前修完 | clarify | dsl | route=clarify（要 ['dsl']） |
 | Q126 | backend·modify_data | 中等故障9号前搞定 | clarify | clarify/dsl/not_change/reject | 过 |
 | Q127 | backend·modify_data | 补库延期2天 | clarify | dsl | route=clarify（要 ['dsl']） |
 | Q140 | backend·modify_constraint | 任务001和任务002不能在同一天出海维修 | dsl | dsl | 过 |
@@ -121,7 +121,7 @@
 | Q177 | backend·modify_objective | 尽量让大家都早点干完 | dsl | dsl | 过 |
 | Q178 | backend·modify_objective | 最短完成优先 | dsl | dsl | 过 |
 | Q179 | backend·modify_objective | 检修最多器件优先 | dsl | dsl | 过 |
-| Q190 | backend·modify_batch | 先按默认方法算一遍，再按每天8小时算一遍，然后对比 | clarify | clarify/not_change/reject | 验收退回 A8 |
+| Q190 | backend·modify_batch | 先按默认方法算一遍，再按每天8小时算一遍，然后对比 | clarify | clarify/not_change/reject | 过 |
 | Q191 | backend·modify_batch | 算两个场景：船租涨20%和最多两条线，对比一下 | clarify | clarify/not_change/reject | 过 |
 | Q192 | backend·modify_batch | 先算成本优先再算风险优先，看看差多少 | clarify | clarify/not_change/reject | 过 |
 | Q193 | backend·modify_batch | 做一下船租的敏感性分析，0.8、1、1.2三档 | clarify | clarify/not_change/reject | 过 |
@@ -135,7 +135,7 @@
 | Q206 | backend·modify_illegal | 明天的天气改好一点 | clarify | reject | route=clarify（要 ['reject']） |
 | Q207 | backend·modify_illegal | 把这台风机删掉 | clarify | reject | route=clarify（要 ['reject']） |
 | Q210 | backend·modify_constraint | 我今天累了，少干一点 | clarify | clarify | 过 |
-| Q211 | backend·modify_constraint | 这周人手紧，先把严重故障处理掉，成本别太高 | clarify | clarify/dsl/not_change/reject | 验收退回 A8 |
+| Q211 | backend·modify_constraint | 这周人手紧，先把严重故障处理掉，成本别太高 | dsl | clarify/dsl/not_change/reject | 过 |
 | Q212 | backend·modify_constraint | 优先修高风险故障，预算别超过500万 | dsl | clarify | route=dsl（要 ['clarify']） |
 | Q213 | backend·modify_constraint | 台风来了，先保安全，别管成本 | dsl | clarify | route=dsl（要 ['clarify']） |
 | Q214 | backend·modify_constraint | 明天只有5个人能出海 | clarify | clarify | 过 |
@@ -150,14 +150,14 @@
 | Q233 | backend·modify_parameter | 禁止夜间转移 | dsl | dsl | 过 |
 | Q300 | backend·modify_parameter | 船租调整为8000元 | dsl | dsl | 过 |
 | Q301 | backend·modify_parameter | 船舶日租金设为15000 | dsl | dsl | 过 |
-| Q302 | backend·modify_parameter | 人工工资涨到200一小时 | dsl | dsl | 丢数 [1] |
+| Q302 | backend·modify_parameter | 人工工资涨到200一小时 | dsl | dsl | 过 |
 | Q303 | backend·modify_parameter | 把人工费降到100 | dsl | dsl | 过 |
 | Q304 | backend·modify_parameter | 作业线最多开两条 | dsl | dsl | 过 |
 | Q305 | backend·modify_parameter | 只能开一条线 | dsl | dsl | 过 |
 | Q306 | backend·modify_parameter | 人员控制在15人以内 | dsl | dsl | 过 |
 | Q307 | backend·modify_parameter | 总人数不超过12 | dsl | dsl | 过 |
 | Q308 | backend·modify_parameter | 每日工时改为6小时 | dsl | dsl | 过 |
-| Q309 | backend·modify_parameter | 一天只能干5小时 | dsl | dsl | 丢数 [1] |
+| Q309 | backend·modify_parameter | 一天只能干5小时 | dsl | dsl | 过 |
 | Q310 | backend·modify_parameter | 早上7点开工 | dsl | dsl | 过 |
 | Q311 | backend·modify_parameter | 下午6点收工 | dsl | dsl | 过 |
 | Q312 | backend·modify_parameter | 换风机留4小时路上时间 | dsl | dsl | 过 |
@@ -168,10 +168,10 @@
 | Q322 | backend·modify_data | 齿轮箱备件11月7日前到货 | dsl | dsl | 过 |
 | Q323 | backend·modify_data | 主轴维修工时增加30% | dsl | dsl | 过 |
 | Q324 | backend·modify_data | 发电机维修时间上涨15% | dsl | dsl | 过 |
-| Q325 | backend·modify_data | 高严重任务11月9日前修完 | clarify | dsl | route=clarify（要 ['dsl']）；验收退回 A4 |
-| Q326 | backend·modify_data | 中严重11月10号前搞定 | clarify | dsl | route=clarify（要 ['dsl']）；验收退回 A7 |
+| Q325 | backend·modify_data | 高严重任务11月9日前修完 | clarify | dsl | route=clarify（要 ['dsl']） |
+| Q326 | backend·modify_data | 中严重11月10号前搞定 | clarify | dsl | route=clarify（要 ['dsl']） |
 | Q327 | backend·modify_data | 低严重任务11月12日前完成 | clarify | dsl | route=clarify（要 ['dsl']） |
-| Q340 | backend·modify_constraint | 任务003和任务005不能安排在同一天 | dsl | dsl | 丢数 [1] |
+| Q340 | backend·modify_constraint | 任务003和任务005不能安排在同一天 | dsl | dsl | 过 |
 | Q341 | backend·modify_constraint | 003和005不要一起出海 | dsl | dsl | 过 |
 | Q342 | backend·modify_constraint | 先修任务004然后修任务006 | dsl | dsl | 过 |
 | Q343 | backend·modify_constraint | 任务004做完才轮到006 | dsl | dsl | 过 |
