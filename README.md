@@ -1,95 +1,107 @@
-# AI窗口期预测产品
+# 「一修」—— 海上风电检修排程 Agent
 
-当前版本的核心形态是独立的“检修排程 Agent”：
+> 用一句话排检修：中文描述目标与约束 → 可审计的整数规划 → 真实求解 → 独立复核 → 方案入库。
 
-- 左侧保存和切换规划会话
-- 中间通过自然语言持续调整检修目标与约束；每次求解结果作为一条助手回答进入消息流，历史窗口卡不会被新结果覆盖
-- 窗口卡只展示时间段、总成本、完成量、船天和基准差异；任务明细、求解证据与模型指纹可在方案详情中查看
-- 右侧按生成顺序保存本会话的全部方案，点击任意记录可回看概览、检修排程和审计证据
-- 方案详情新增“数学模型”，展示本次 CP-SAT 模型的变量组、有限上下界、目标层、约束组、参数来源和原始模型文件
-- 对话发送时会绑定当前选中的方案版本；模型公式、参数来源、方案解释和求解状态从已保存证据读取
-- 参数、约束和目标调整先生成变更预览，确认后才启动独立沙盘求解，不覆盖原方案
-- 旧会话缺少消息与方案的关联字段时，前端会按生成时间兼容配对，仍可回看历史窗口
-- 后端为每次执行生成规范化决策产物和求解证据
-- `UNKNOWN`、`FEASIBLE`、`INFEASIBLE`、`OPTIMAL` 使用独立状态，不把超时描述为无解
-- 对话 Agent 先调用只读工具读取方案事实，再组织回答；不再凭历史消息编造数字
-- “对比方案 01 和 02”由确定性工具计算三层差异：事实与差值、差异归因、下钻索引；解读由模型完成
-- 回答通过 SSE 流式输出，前端用 KaTeX 渲染 LaTeX 公式，支持 Markdown 表格
-- 数学模型问题原样输出模型产物生成的公式，不改写系数、变量或约束
-- 方案可以下发生成检修单和出海清单，任务状态随之下沉；现场回填完工后任务才真正关闭、退出待安排池
+**一修**是面向海上风电场的对话式检修排程决策系统。计划员用自然语言说出「优先修高风险」「船租上涨 20%」「每天最多 2 条作业线」这类诉求，系统把它编译成**固定的 CP-SAT 整数规划模型**，用 OR-Tools 真实求解，再由独立的费用与排程计算器复核，每一步都留下模型指纹与审计证据。
 
-Agent 下一阶段的场景、工具契约、验收用例和优先级见
-[`docs/2026-10-27-agent-scenario-requirement-matrix.md`](docs/2026-10-27-agent-scenario-requirement-matrix.md)。
-本版工具循环与对比契约见
-[`docs/2026-10-27-tool-agent-and-compare-contract.md`](docs/2026-10-27-tool-agent-and-compare-contract.md)。
-全项目文件地图（每个文件管什么、从哪看起）见
-[`docs/2026-10-28-项目全景与学习路线.md`](docs/2026-10-28-项目全景与学习路线.md)。
+核心原则只有一条：**大模型负责「翻译」，求解器负责「计算」**——不让 LLM 凭概率生成数字，所有数字只能来自求解器与只读工具。
 
-## 安装后端依赖
+## 核心能力
 
-要求 Python 3.12（求解器依赖的 OR-Tools `ortools` 目前主要提供 3.12 的 wheel）。
+**① 自然语言 → 可验证的数学模型**
+三层解析（规则直出 / 向量检索 / LLM 生成），产物必过确定性校验器，杜绝幻觉。122 项建模参数、8 类部件、100 台风机、4 个优化策略、7 个可加权指标全部登记在册，LLM 只能引用、不能编造。
 
-```powershell
-python -m pip install -r backend\requirements.txt
+**② 可复现的决策，可回查的证据**
+每次求解生成模型指纹、决策契约与原始 `solver_model.pbtxt`，同一份契约同一时限必得同一结论。方案可回看数学模型、参数来源、成本构成与审计证据。
+
+**③ 求解状态诚实**
+严格区分 `OPTIMAL / FEASIBLE / UNKNOWN / INFEASIBLE` 四种状态，**不把「超时」说成「无解」**；启发式兜底会明确标注「未证明最优」。
+
+**④ 会话记忆：多轮不遗忘**
+结构化记忆快照（状态 / 约束 / 产物 / 动作 / 问答）+ 滚动摘要，长对话不再丢早期背景。
+
+**⑤ 并发求解互不覆盖**
+多个求解任务并行运行、各自独立入库，新方案不会挤掉仍在后台跑的任务。
+
+**⑥ 多方案对比**
+「对比方案 01 和 02」由确定性工具算出三层差异：事实与差值、差异归因、下钻索引。
+
+## 系统架构
+
+```mermaid
+flowchart LR
+    NL[自然语言诉求] --> FE[React 对话工作台]
+    FE <-->|SSE 流式| BE[FastAPI Agent 运行时]
+    BE --> IC[意图编译<br/>planning_intent]
+    IC --> DS[数据快照<br/>product_data]
+    DS --> SO[CP-SAT 求解<br/>product_planner]
+    SO --> VR[独立复核<br/>费用 / 排程]
+    VR --> DB[(版本库 SQLite)]
+    DB --> FE
 ```
 
-## 配置 DeepSeek Flash
+一条链路：**自然语言 → 固定模型契约 → 真实求解 → 独立复核 → 版本入库**。
 
-后端会优先读取项目根目录或 `backend` 目录下的 `.env.local`。当前默认使用 DeepSeek 的 Anthropic 兼容接口。
+## 难点与解法
 
-示例：
+| 难点 | 解法 |
+| --- | --- |
+| 大模型会把自然语言「算」出幻觉数字 | 只让 LLM 做结构化翻译，产物过确定性校验器，数字只能来自求解器与工具 |
+| 长多轮对话丢失早期约束与方案 | 结构化会话记忆快照 + 滚动摘要 + 有界上下文组装 |
+| 求解超时被误报成「无解」 | 四态严格区分，启发式兜底明确标注「未证明最优」 |
+| 新求解覆盖后台运行的旧任务 | 求解器按输出目录并发加锁，前端多任务跟踪 |
+| 多方案说不清差在哪 | 确定性三层对比，数字与差值全部来自工具 |
 
-```env
-MINIMAX_API_KEY=你的 DeepSeek API Key
-MINIMAX_MODEL=deepseek-flash
-MINIMAX_BASE_URL=https://api.deepseek.com/anthropic
-```
+## 技术栈
 
-如果未配置 `MINIMAX_API_KEY`，系统会退回到本地规则解析模式，不会调用真实大模型。
+| 层 | 技术 |
+| --- | --- |
+| 前端 | React · TypeScript · Vite · shadcn/ui |
+| 后端 | Python 3.12 · FastAPI · SQLite |
+| 求解器 | OR-Tools CP-SAT（有界整数调度） |
+| 对话模型 | DeepSeek（Anthropic 兼容接口），未配置时回退确定性规则解析 |
 
-## 启动后端
+## 快速开始
 
-```powershell
-python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --reload
-```
+要求 Python 3.12（求解器依赖的 OR-Tools 目前主要提供 3.12 的 wheel）。
 
-接口文档：
+```bash
+# 后端依赖
+python -m pip install -r backend/requirements.txt
 
-`http://127.0.0.1:8000/docs`
+# 配置对话模型（可选：不配则回退确定性规则解析）
+# 项目根或 backend/ 下新建 .env.local：
+#   MINIMAX_API_KEY=你的 DeepSeek API Key
+#   MINIMAX_MODEL=deepseek-flash
+#   MINIMAX_BASE_URL=https://api.deepseek.com/anthropic
 
-## 启动前端
+# 启动后端
+python -m uvicorn app.main:app --app-dir backend --port 8000
 
-首次先安装依赖：
-
-```powershell
+# 前端（另开终端）
 npm install
-```
-
-然后启动：
-
-```powershell
 npm run dev
 ```
 
-默认地址：
+界面截图：
 
-`http://127.0.0.1:3000`
+![一修对话工作台](agent-workspace.png)
 
-## 当前体验重点
+## 评测
 
-- `检修窗口原型.html` 是无外链依赖的单文件，可直接双击查看产品界面
-- 本地开发仍使用 `npm run dev`，真实对话与求解需要同时启动 FastAPI 后端
-- 模型指纹由完整上下文、决策契约和求解模型分别计算
-- 新运行会额外保存 `model_artifact.json` 和原始 `solver_model.pbtxt`；旧版本没有完整产物时会明确提示，而不是事后重建冒充原模型
-- 3 分钟是软提醒阈值，不是“无解”阈值；等待、后台运行、使用 incumbent、停止是独立动作
+- 后端单元测试 **279 项**、前端测试 **29 项**、慢速真求解端到端 **22 项**（`-m slow`）全部通过
+- 确定性评测作为发布闸门：状态诚实性、模型指纹重复性、证据链完整性
+- 本地程序判分，不依赖在线 LLM 打分
 
-## 确定性评测
-
-本地程序判分是发布闸门，Langfuse 只负责 trace、数据集、实验对比和人工标注。
-
-```powershell
-$env:PYTHONPATH='backend'
-python -m app.evals.run_eval backend\eval_cases\compile_cases.jsonl
+```bash
+cd backend
+python -m pytest -q            # 默认套件
+python -m pytest -m slow -q    # 真求解端到端（较慢）
 ```
 
-当前 evaluator 已覆盖状态诚实性、模型指纹重复性和证据链完整性。持久化异步求解任务、独立解复核器和真实 `maintenance-milp-modeler` adapter 仍属于 MVP 后续必做项，完成前不应把当前版本描述为生产完成。
+## 文档
+
+- [项目全景与学习路线](docs/2026-10-28-项目全景与学习路线.md) — 每个文件管什么、从哪看起
+- [Agent 场景与验收矩阵](docs/2026-10-27-agent-scenario-requirement-matrix.md)
+- [工具循环与对比契约](docs/2026-10-27-tool-agent-and-compare-contract.md)
+- [会话记忆机制设计](docs/superpowers/specs/2026-10-29-conversation-memory-design.md)
