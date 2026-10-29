@@ -725,7 +725,38 @@ def parse_by_legacy(message: str) -> dict[str, Any] | None:
     compiled = compiler.compile_detailed(message)
     if compiled.blocked:
         return None
+    if not _request_consumed_anything(compiled):
+        # 路由认领了这句话，但一个字段都没解析出来——最典型的是
+        # "钱不超过300万"：命中路由词「不超过」，预算正则只认「总成本/预算/
+        # 现金支出」，于是返回一份纯默认方案，预算凭空消失且置信度 1.0。
+        # 这种情况必须交回大模型，不能交给一个"看起来正常"的空结果。
+        return None
     return request_to_dsl(compiled.request)
+
+
+def _request_consumed_anything(compiled) -> bool:
+    """规则层是否真的从这句话里取到了东西。
+
+    两条证据取其一：字段相对默认请求有实质变化，或编译过程明确记录了
+    "读懂策略"。只看字段变化会误伤"按成本最低优先排"——所读的策略恰好
+    就是默认值，字段没变，但这句话是读懂的。
+    """
+    request = compiled.request
+    if getattr(compiled, "consumed", None):
+        return True
+    from app.core.planning_intent import PlanningRequest
+
+    blank = PlanningRequest()
+    return any((
+        request.strategy != blank.strategy,
+        request.mode != blank.mode,
+        bool(request.weights),
+        bool(request.overrides),
+        bool(request.relative_overrides),
+        bool(request.limits),
+        bool(request.data_patches),
+        request.seconds != blank.seconds,
+    ))
 
 
 def parse(

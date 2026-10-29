@@ -83,6 +83,11 @@ class CompiledIntent:
     request: PlanningRequest
     notes: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # 这句话里"确实读懂并取走"的部分。注意与 request 的差异不同：
+    # 用户说"按成本最低优先排"，而默认策略恰好就是成本最低优先——
+    # 字段没变化，但这句话读懂了。没有这个信号，就会把已识别的句子
+    # 误判成"什么都没取到"而丢给大模型。
+    consumed: list[str] = field(default_factory=list)
 
     @property
     def blocked(self) -> bool:
@@ -137,11 +142,13 @@ class PlanningIntentCompiler:
         request = replace(current) if current else PlanningRequest()
         notes: list[str] = []
         errors: list[str] = []
+        consumed: list[str] = []
 
         original_strategy = request.strategy
         for phrases, strategy in self._STRATEGIES:
             if any(phrase in text for phrase in phrases):
                 request = replace(request, strategy=strategy)
+                consumed.append(f"策略={strategy}")
                 break
         strategy_changed = request.strategy != original_strategy
 
@@ -170,7 +177,8 @@ class PlanningIntentCompiler:
             overrides["最多作业线数"] = number or int(work_lines.group(1))
 
         daily_hours = re.search(
-            r"每天[^\d]{0,6}(?:最多|不超过|只能|限定|只有|至多)(?:维修|作业|施工|检修|干活|工作|时间)?\s*"
+            r"每天[^\d]{0,6}(?:最多|不超过|只能|限定|只有|至多|只|仅)"
+            r"(?:维修|作业|施工|检修|干活|干|做|工作|时间)?\s*"
             r"(\d+(?:\.\d+)?)\s*(?:个)?小时",
             text,
         )
@@ -240,7 +248,12 @@ class PlanningIntentCompiler:
         if budget:
             limits["最大总成本"] = float(budget.group(1)) * 10_000
 
-        fee_budget = re.search(r"预算(?:最多|不超过|控制在|上限)?\s*(\d+(?:\.\d+)?)\s*万", text)
+        # "钱"和"预算"同口径：都是花出去的钱（现金支出），不是含发电损失的机会成本。
+        fee_budget = re.search(
+            r"(?:预算|钱|花费|开销)(?:最多|不超过|不能超过|别超过|控制在|上限|封顶)?\s*"
+            r"(\d+(?:\.\d+)?)\s*万",
+            text,
+        )
         if fee_budget and "最大总成本" not in limits:
             limits["现金预算"] = float(fee_budget.group(1)) * 10_000
 
@@ -321,6 +334,7 @@ class PlanningIntentCompiler:
             ),
             notes=notes,
             errors=errors,
+            consumed=consumed,
         )
 
     # ------------------------------------------------------------- 行级数据补丁
@@ -697,7 +711,7 @@ class PlanningIntentCompiler:
         r"现金(?:支出|预算)(?:最多|不超过|控制在|上限)\s*\d",
         r"(?:T|任务)\s*\d{1,3}(?:必须|一定要|务必)(?:修|安排|完成)",
         r"(?:最多|不超过|限定|只能)?\s*(?<![同这那])(?:\d+|一|两|二|三|四)\s*条(?:作业)?线",
-        r"每天[^\d]{0,6}(?:只能|最多|不超过|限定|只有|至多)(?:维修|作业|施工|检修|干活|工作|时间)?\s*\d+(?:\.\d+)?\s*(?:个)?小时",
+        r"每天[^\d]{0,6}(?:只能|最多|不超过|限定|只有|至多|只|仅)(?:维修|作业|施工|检修|干活|干|做|工作|时间)?\s*\d+(?:\.\d+)?\s*(?:个)?小时",
         r"人工(?:单价|成本|费用|工时费)?\s*(?:改成|改为|设为|调整为|定为|调成|涨到|降到|上涨|上调|下降|降低)\s*\d",
         r"(?:人员|人手|工人|施工|作业)?(?:总)?(?:人数|人员|人力|上限)\s*(?:改成|改为|设为|调整为|定为|控制在|不超过|最多|只有|限定)?\s*\d",
         r"(?:最多|不超过|限定|只有)\s*\d+\s*人",

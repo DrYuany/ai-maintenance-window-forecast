@@ -39,13 +39,34 @@ def test_pure_strategy_sentence_is_fully_covered_by_rules() -> None:
     assert "parameters" not in dsl and "constraints" not in dsl
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "已知缺口：策略词命中后规则层直接返回，同一句里的其它改动被丢掉，"
-    "而大模型没机会看。修法：规则层只认领'完全消费'的句子，"
-    "有未消费片段时交出控制权并把已解析部分合并进去。"
-))
 def test_strategy_plus_other_change_keeps_both() -> None:
+    """同一句里的两处改动都要保留。
+
+    曾经这里标着 xfail：策略词一命中就整句返回，工时改动蒸发，大模型还没机会看。
+    2026-10-30 修的是更根本的一层：路由词「不超过」会认领整句，而预算正则
+    只认「总成本/预算/现金支出」——"钱不超过300万"于是变成一份纯默认方案。
+    现在规则层多了两道闸：零消费不认领、动作词表补全（干/做/只/仅）。
+    """
     dsl = parse_by_legacy("按成本最低优先排每天只能干8小时")
     assert dsl is not None
     assert "parameters" in dsl, f"工时改动被丢掉了，实际只解析出 {json.dumps(dsl, ensure_ascii=False)}"
     assert any(p["field"] == "每日有效维修上限" for p in dsl["parameters"])
+
+
+def test_budget_word_qian_is_understood() -> None:
+    """"钱不超过300万"必须变成现金预算约束。
+
+    这句曾经被路由词「不超过」认领，却解析不出任何字段，返回默认方案、
+    预算凭空消失，置信度还是 1.0——空的但看起来正常。
+    """
+    dsl = parse_by_legacy("钱不超过300万")
+    assert dsl is not None, "规则层应当认领这句"
+    budget = [c for c in dsl.get("constraints") or [] if c["type"] == "budget"]
+    assert budget and budget[0]["value"] == 3_000_000
+    assert budget[0]["quantity"] == "现金支出"
+
+
+def test_unconsumed_sentence_is_handed_to_llm() -> None:
+    """规则层读不懂的句子不许硬认领——否则"看起来正常"的空结果会盖住原话。"""
+    assert parse_by_legacy("船租翻倍了") is None
+    assert parse_by_legacy("这段时间到底该怎么安排比较妥当") is None
