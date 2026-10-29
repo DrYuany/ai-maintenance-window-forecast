@@ -191,7 +191,7 @@ export function ConversationCanvas({
       <header className="agent-topbar">
         <div>
           <strong>一修</strong>
-          <span>风机检修排程 Agent</span>
+          <span>东海一号风场</span>
         </div>
       </header>
 
