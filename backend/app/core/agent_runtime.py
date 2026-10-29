@@ -66,6 +66,26 @@ from app.schemas.dashboard import DashboardResponse
 SHANGHAI_TZ = timezone(timedelta(hours=8))
 SKILL_NAME = "maintenance-milp-modeler"
 
+# 实体快照缓存：load_project 首次约 0.6s，之后内部缓存 0.01s；
+# 这里再缓存一层，避免每次解析都走 import/路径拼接。
+_ENTITY_SNAPSHOT_CACHE: dict[str, Any] = {}
+
+
+def _entity_snapshot() -> Any:
+    """给 LLM 的极简快照（只有实体清单，不含数值）。失败返回 None。"""
+    if "value" in _ENTITY_SNAPSHOT_CACHE:
+        return _ENTITY_SNAPSHOT_CACHE["value"]
+    snapshot = None
+    try:
+        from app.core.dsl.runner import PROJECT_ROOT, _solver_modules
+
+        load_project = _solver_modules()[0]
+        snapshot = load_project(PROJECT_ROOT, base_id="基座01", as_of=None)
+    except Exception:  # noqa: BLE001 - 快照缺失不阻塞解析
+        snapshot = None
+    _ENTITY_SNAPSHOT_CACHE["value"] = snapshot
+    return snapshot
+
 
 class StreamSink:
     """Small adapter so one runtime can both return JSON and stream SSE."""
@@ -489,7 +509,10 @@ class AgentRuntime:
                     sink=sink,
                 )
             # DSL 增量（第一期）：约束/自定义目标类修改，走预览→确认→求解。
-            dsl_result = self._try_dsl_parse(content, sink=sink)
+            dsl_result = self._try_dsl_parse(
+                content, sink=sink,
+                context_block=self._dsl_context_block(conversation_id, memory, selected_version),
+            )
             if dsl_result is not None and dsl_result.route == "reject":
                 # 越界诉求：明确拒绝，不再回退旧 conversation_agent（避免二次 LLM）。
                 if sink:
@@ -670,6 +693,7 @@ class AgentRuntime:
         # 第三期：统一解析器优先（旧正则作为其规则层），DSL 表达不了的再回退旧规划器。
         change_plan = self._change_plan_from_dsl(
             content, current, base_version_id, sink=sink,
+            context_block=self._dsl_context_block(conversation_id, memory, selected_version),
         )
         dsl_pending: dict[str, Any] | None = None
         if change_plan is None:
@@ -926,11 +950,12 @@ class AgentRuntime:
         ])
         return "\n".join(lines)
 
-    def _try_dsl_parse(self, content: str, sink: StreamSink | None = None):
+    def _try_dsl_parse(self, content: str, sink: StreamSink | None = None, context_block: str | None = None):
         """DSL 三层解析（增量能力）。解析不了/LLM 不可用返回 None，回退现有路径。
 
         规则层与门控是确定性的，不产生 API 调用；只有真正的新话术才走到 LLM。
         sink 用于把解析各阶段（规则/桥接/检索/LLM）作为 stage 事件推给前端。
+        context_block 是每轮动态上下文（快照清单 + 当前方案 + 待确认变更）。
 
         LLM 失败（超时/网络/坏响应）降级为 clarify，不再回退旧 conversation_agent
         二次调 LLM；只有「未配置 key」（ParseUnavailable）才返回 None 走旧路径。
@@ -945,7 +970,7 @@ class AgentRuntime:
                 sink.stage(stage_id, label, status, detail)
 
         try:
-            return dsl_parse(content, on_stage=on_stage)
+            return dsl_parse(content, on_stage=on_stage, context_block=context_block)
         except ParseUnavailable:
             return None
         except Exception:  # noqa: BLE001 - LLM 调用失败 → 澄清，不二次 LLM
@@ -956,9 +981,54 @@ class AgentRuntime:
                 source_scores={"llm": 0.0},
             )
 
-    def _change_plan_from_dsl(self, content: str, current, base_version_id, sink: StreamSink | None = None):
+    def _dsl_context_block(self, conversation_id: str, memory, selected_version) -> str:
+        """把「现在是什么状态」拼成上下文：快照清单 + 当前方案 + 待确认变更 + 最近对话。"""
+        try:
+            from app.core.dsl.registry import schema_prompt as sp
+        except Exception:  # pragma: no cover
+            return ""
+
+        blocks = [sp.snapshot_block(_entity_snapshot())]
+        context: dict[str, Any] = {}
+        if selected_version is not None:
+            label = getattr(selected_version, "id", None)
+            try:
+                ordered = chronological_versions(
+                    self.versions.list_by_conversation(conversation_id)
+                )
+                for index, item in enumerate(ordered, start=1):
+                    if item.id == selected_version.id:
+                        label = f"方案{index:02d}（{selected_version.id}）"
+                        break
+            except Exception:  # noqa: BLE001
+                pass
+            context["plan_label"] = label
+        filters = getattr(memory, "activeFilters", None) or {}
+        pending = filters.get("pendingChange") if isinstance(filters, dict) else None
+        if isinstance(pending, dict):
+            context["pending"] = str(pending.get("preview") or pending.get("request") or pending)[:300]
+        try:
+            history = self.messages.list_by_conversation(conversation_id)[-3:]
+            turns, user_text = [], None
+            for item in history:
+                if item.role == "user":
+                    user_text = item.content[:120]
+                elif user_text is not None:
+                    turns.append({"user": user_text, "assistant": item.content[:120]})
+                    user_text = None
+            context["history"] = turns
+        except Exception:  # noqa: BLE001
+            pass
+        ctx_block = sp.context_block(context)
+        if ctx_block:
+            blocks.append(ctx_block)
+        return "\n\n".join(blocks)
+
+    def _change_plan_from_dsl(self, content: str, current, base_version_id,
+                              sink: StreamSink | None = None,
+                              context_block: str | None = None):
         """统一解析器 → 变更计划（第三期）。DSL 表达不了或没有变化时返回 None 走旧路径。"""
-        parsed = self._try_dsl_parse(content, sink=sink)
+        parsed = self._try_dsl_parse(content, sink=sink, context_block=context_block)
         if parsed is None or parsed.route != "dsl" or not parsed.dsl:
             return None
         try:

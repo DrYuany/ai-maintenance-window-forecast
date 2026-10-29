@@ -77,7 +77,13 @@ def _validate_parameter(spec: Any, where: str) -> list[str]:
         errors.append(f"{where}: 缺少 value")
     else:
         value = spec["value"]
-        if isinstance(value, bool) or isinstance(value, str):
+        if isinstance(value, list):
+            # 列表型参数（候选风机/候选部件/强制维修任务/禁止新开工风机…）
+            if not value:
+                errors.append(f"{where}: value 不能为空列表")
+            elif not all(isinstance(item, (str, int, float)) for item in value):
+                errors.append(f"{where}: 列表 value 的元素必须是字符串或数字")
+        elif isinstance(value, bool) or isinstance(value, str):
             # 开关类（是/否）与时刻类（HH:MM）参数：取值由 load_project 校验
             if isinstance(value, str) and not value.strip():
                 errors.append(f"{where}: value 不能为空")

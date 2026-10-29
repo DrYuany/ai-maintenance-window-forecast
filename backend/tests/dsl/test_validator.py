@@ -149,3 +149,15 @@ def test_strategy_objective_unknown_name_rejected() -> None:
 def test_solver_seconds_bounds() -> None:
     assert validate_dsl({"solver": {"seconds": 60}}) == []
     assert any("最大 1800" in e for e in validate_dsl({"solver": {"seconds": 9999}}))
+
+
+# ── 列表型参数（2026-10-29 重构：LLM 会产出数组，校验器需支持）──────────────
+
+def test_list_valued_parameter_is_accepted() -> None:
+    assert validate_dsl({"parameters": [{"field": "候选风机", "op": "=", "value": ["风机001", "风机002"]}]}) == []
+    assert validate_dsl({"parameters": [{"field": "强制维修任务", "op": "=", "value": ["任务001"]}]}) == []
+
+
+def test_empty_list_parameter_is_rejected() -> None:
+    errors = validate_dsl({"parameters": [{"field": "候选风机", "op": "=", "value": []}]})
+    assert errors and "空列表" in errors[0]
