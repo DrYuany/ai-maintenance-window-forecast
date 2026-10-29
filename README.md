@@ -30,14 +30,14 @@
 
 ```mermaid
 flowchart LR
-    NL[自然语言诉求] --> FE[React 对话工作台]
-    FE <-->|SSE 流式| BE[FastAPI Agent 运行时]
-    BE --> IC[意图编译<br/>planning_intent]
-    IC --> DS[数据快照<br/>product_data]
-    DS --> SO[CP-SAT 求解<br/>product_planner]
-    SO --> VR[独立复核<br/>费用 / 排程]
-    VR --> DB[(版本库 SQLite)]
-    DB --> FE
+    A[自然语言诉求] --> B[React 对话工作台]
+    B --> C[FastAPI Agent 运行时]
+    C --> D[意图编译 planning_intent]
+    D --> E[数据快照 product_data]
+    E --> F[CP-SAT 求解 product_planner]
+    F --> G[独立复核]
+    G --> H[版本库 SQLite]
+    H --> B
 ```
 
 一条链路：**自然语言 → 固定模型契约 → 真实求解 → 独立复核 → 版本入库**。
@@ -82,10 +82,6 @@ python -m uvicorn app.main:app --app-dir backend --port 8000
 npm install
 npm run dev
 ```
-
-界面截图：
-
-![一修对话工作台](agent-workspace.png)
 
 ## 评测
 
