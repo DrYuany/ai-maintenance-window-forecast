@@ -21,15 +21,16 @@ STRATEGIES = ('成本最低优先','高风险优先抢修','最短完成优先',
 
 
 def _worker_count():
-    """求解线程数。默认 1 = 结果可复现（并行会让同一题在不同次跑出不同解）。
+    """求解线程数。默认 min(8, CPU)：多线程实测比单线程快两个数量级。
 
-    演示场景用环境变量放开：MWA_SOLVER_WORKERS=8。实测 12 项任务从 300 秒
-    压到秒级，目标值不变，但不再保证逐位可复现。
+    单线程（MWA_SOLVER_WORKERS=1）留给需要"逐字段复现"的归档场景：
+    并行搜索在时间被截断时可能取到不同的中间解；正常跑完的阶段不受影响。
     """
+    default = min(8, os.cpu_count() or 1)
     try:
-        value = int(os.environ.get('MWA_SOLVER_WORKERS', '1'))
+        value = int(os.environ.get('MWA_SOLVER_WORKERS', default))
     except ValueError:
-        return 1
+        return default
     return max(1, min(32, value))
 
 

@@ -109,7 +109,11 @@ def param_names() -> list[str]:
 
 
 def param_catalog() -> str:
-    """L0：每个可改参数一行（名称 + 单位 + 取值约束）。"""
+    """L0：每个可改参数一行（名称 + 单位 + 取值约束）。
+
+    有些名字虽然在注册表里，却不是"系统参数"，写进 parameters 会被拒。
+    这里当场标注该往哪写，比让模型去猜再报错便宜得多。
+    """
     lines = ["可改参数目录（名称｜单位｜取值约束；需要细节时会自动展开）："]
     for row in param_reg._rows():
         name = row["参数名称"]
@@ -117,8 +121,19 @@ def param_catalog() -> str:
             continue
         unit = row.get("单位", "") or "-"
         rule = _compact_value(row.get("取值约束", ""), 28) or "-"
-        lines.append(f"- {name}｜{unit}｜{rule}")
+        note = _NOT_A_PARAM.get(name)
+        lines.append(f"- {name}｜{unit}｜{rule}" + (f"（{note}）" if note else ""))
     return "\n".join(lines)
+
+
+# 写在 parameters 里会被拒的名字 → 正确写法。
+# 只登记"确实有别的出口"的那几个；其余不支持的不要在这里编造出口。
+_NOT_A_PARAM = {
+    "标准目标策略": "不是 parameters 项，写进 objectives：{type:strategy,name:四选一}",
+    "共同最低完成任务数": "不是 parameters 项，写进 constraints：cardinality",
+    "费用预算上限": "不是 parameters 项，写进 constraints：budget/总经济成本",
+    "强制维修任务": "不是 parameters 项，写进 constraints：must",
+}
 
 
 def param_detail(name: str) -> str:
@@ -285,10 +300,14 @@ def _parse_contract() -> str:
 - 任务编号写全称"任务018"；风机"风机003"；窗口"窗口02"。
 - 时间一律 ISO 带时区，形如 2026-11-05T08:00:00+08:00；只说到"某日"默认 08:00。
 - 金额一律元（"500万"→5000000）。
-- parameters 的 field 必须来自上面的可改参数目录，不得自造。
+- parameters 的 field 只能用目录里没标注"不是 parameters 项"的名字。
 - parameters 每项必须写 op："="（绝对值）或 "*"（相对倍率，如"涨两成"→1.2）。
-- 取值形态：开关类写 "是"/"否"；时刻类写 "07:00"；列表类（候选风机/候选部件/强制维修任务/
-  禁止新开工风机）写数组，如 {"field":"候选风机","op":"=","value":["风机001","风机002"]}。
+- 取值形态：开关类写 "是"/"否"；时刻类写 "07:00"；数值类写数字。
+- 下面四类不写 parameters，各有专门位置：
+  策略 → objectives：{"type":"strategy","name":"成本最低优先"}
+  成本上限 → constraints：{"type":"budget","quantity":"总经济成本","op":"<=","value":5000000}
+  必修任务 → constraints：{"type":"must","task":"任务018"}
+  最低完成数 → constraints：{"type":"cardinality","op":">=","value":5}
 - 标准目标策略四选一：高风险优先抢修 / 成本最低优先 / 最短完成优先 / 检修最多器件优先。
   用户说"按风险来排""重视安全"→高风险优先抢修；"省钱""成本优先"→成本最低优先。
 - 一句话里有多条诉求时，全部输出（不要只取第一条）。"""
