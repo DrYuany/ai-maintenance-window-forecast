@@ -682,3 +682,30 @@ def test_read_site_overview_counts_all_site_domains(temp_db_path: Path) -> None:
     assert counts["inventorySkus"] == 8
     assert counts["workOrders"] == 0
     assert "没有接入实时 SCADA" in result["data"]["markdown"]
+
+
+# ── compare_versions 工具（agent-first：差异在工具侧算好）──────────────────
+
+def test_compare_versions_tool_is_registered() -> None:
+    from app.core.agent_tools import AgentToolbox
+
+    names = {spec["name"] for spec in AgentToolbox.tool_specs(AgentToolbox.__new__(AgentToolbox))}
+    assert "compare_versions" in names
+
+
+def test_compare_versions_returns_model_and_results_sections(temp_db_path: Path) -> None:
+    result = _toolbox(temp_db_path).execute("compare_versions", {})
+
+    assert result["status"] == "ok"
+    markdown = result["data"]["markdown"]
+    assert "模型层差异" in markdown
+    assert "模型指纹" in markdown
+    assert result["data"]["model"]["left"]["planNumber"] == 1
+    assert result["data"]["model"]["right"]["planNumber"] == 2
+
+
+def test_compare_versions_focus_model_only(temp_db_path: Path) -> None:
+    result = _toolbox(temp_db_path).execute("compare_versions", {"focus": "model"})
+
+    assert result["status"] == "ok"
+    assert "模型层差异" in result["data"]["markdown"]

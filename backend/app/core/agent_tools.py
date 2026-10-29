@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from app.core.version_compare import compare_versions
+from app.core.version_compare import compare_versions, render_compare_summary
 from app.core.model_change import build_change_plan
 from app.core.planning_intent import PlanningIntentCompiler, PlanningRequest
 from app.core.tool_runtime import ToolRuntime, ToolRuntimeError
@@ -130,7 +130,7 @@ class AgentToolbox:
         }
         self._trace: list[dict[str, Any]] = []
         self._specs = {spec["name"]: spec for spec in self.tool_specs()}
-        self.runtime = ToolRuntime(read_only_tools={"read_versions", "read_environment", "read_catalog", "read_alarms", "read_site"})
+        self.runtime = ToolRuntime(read_only_tools={"read_versions", "compare_versions", "read_environment", "read_catalog", "read_alarms", "read_site"})
 
     # ------------------------------------------------------------------ tools
     def tool_specs(self) -> list[dict[str, Any]]:
@@ -432,11 +432,34 @@ class AgentToolbox:
                     },
                 },
             },
+            {
+                "name": "compare_versions",
+                "description": (
+                    "对比两个方案的差异，只读，结果已经是算好的差异，你只负责解读。"
+                    "包含：模型指纹是否相同、目标函数层级变化、约束增删、参数取值变化、"
+                    "任务集合变动、成本驱动与可比性。"
+                    "用户说「这两版/两个方案/上一版和这版」时，指代省略则自动取会话最近两版。"
+                    "只传一个或都不传时，按最近两版对比。"
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "left": {**version_arg, "description": "基准方案，省略时取最近两版中较早的一版。"},
+                        "right": {**version_arg, "description": "对比方案，省略时取最近两版中较新的一版。"},
+                        "focus": {
+                            "type": "string",
+                            "enum": ["model", "results", "all"],
+                            "description": "关注点，默认 all；model 只看模型层差异。",
+                        },
+                    },
+                },
+            },
         ]
 
     def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "read_versions": self._read_versions,
+            "compare_versions": self._compare_versions,
             "read_environment": self._read_environment,
             "read_catalog": self._read_catalog,
             "read_alarms": self._read_alarms,
@@ -594,6 +617,68 @@ class AgentToolbox:
                 or _dict(summary.get("data")).get("数据时点")
             ),
         }
+
+    def _compare_versions(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """两版对比：工具直接返回算好的差异，模型只负责解读。
+
+        为什么单独做成工具：让模型自己读两份完整模型再合并，弱模型会只倒出其中一份
+        （实测 deepseek-flash 只讲了方案02）。把 diff 在工具侧算好，模型只需叙述。
+        """
+        ordered = list(self.ordered)
+        if len(ordered) < 2:
+            return self._envelope(
+                "not_available",
+                {"count": len(ordered)},
+                warnings=["本会话不足两版方案，无法对比；先再生成一版方案。"],
+            )
+
+        def resolve(ref: Any, fallback: WindowVersion) -> WindowVersion:
+            if not ref:
+                return fallback
+            found = self.resolve_version(str(ref))
+            return found or fallback
+
+        left = resolve(arguments.get("left"), ordered[-2])
+        right = resolve(arguments.get("right"), ordered[-1])
+        if left.id == right.id:
+            return self._envelope(
+                "invalid",
+                {"versionId": left.id},
+                warnings=["左右两版相同，请指定不同的两个方案。"],
+            )
+
+        payload = self.compare_pair(left, right)
+        drivers = _dict(payload.get("layer2Drivers"))
+        left_fp = getattr(left, "modelFingerprint", None)
+        right_fp = getattr(right, "modelFingerprint", None)
+        model_diff = {
+            "left": {"id": left.id, "planNumber": self.plan_numbers.get(left.id, 1),
+                     "modelFingerprint": left_fp},
+            "right": {"id": right.id, "planNumber": self.plan_numbers.get(right.id, 1),
+                      "modelFingerprint": right_fp},
+            "fingerprintSame": bool(left_fp and right_fp and left_fp == right_fp),
+            "objectiveChanges": drivers.get("objectiveChanges"),
+            "constraintChanges": drivers.get("constraintChanges"),
+            "parameterChanges": drivers.get("parameterChanges"),
+        }
+
+        focus = str(arguments.get("focus") or "all")
+        blocks: list[str] = []
+        if focus in ("model", "all"):
+            blocks.append(_render_model_diff(model_diff))
+        if focus in ("results", "all"):
+            try:
+                blocks.append(render_compare_summary(payload))
+            except Exception:  # noqa: BLE001 - 渲染失败不阻断模型层结论
+                pass
+        return self._envelope(
+            "ok",
+            {
+                "markdown": "\n\n".join(block for block in blocks if block),
+                "model": model_diff,
+                "comparisonId": payload.get("comparisonId"),
+            },
+        )
 
     def _read_versions(self, arguments: dict[str, Any]) -> dict[str, Any]:
         raw_versions = arguments.get("versions")
@@ -1929,3 +2014,57 @@ class AgentToolbox:
             "参数取值与来源可在方案详情“数学模型”页核对；本回答不重建系数。",
         ])
         return "\n".join(lines)
+
+
+def _render_model_diff(model_diff: dict[str, Any]) -> str:
+    """把工具算好的模型层差异渲染成 markdown（模型只需转述）。"""
+    left = _dict(model_diff.get("left"))
+    right = _dict(model_diff.get("right"))
+    left_no = left.get("planNumber")
+    right_no = right.get("planNumber")
+    left_label = f"方案{left_no:02d}" if isinstance(left_no, int) else str(left.get("id") or "左版")
+    right_label = f"方案{right_no:02d}" if isinstance(right_no, int) else str(right.get("id") or "右版")
+    lines = ["**模型层差异**", f"- 对比：{left_label} → {right_label}"]
+
+    left_fp = left.get("modelFingerprint")
+    right_fp = right.get("modelFingerprint")
+    if left_fp and right_fp:
+        lines.append(f"- 模型指纹：{'相同' if model_diff.get('fingerprintSame') else '不同'}")
+    else:
+        lines.append("- 模型指纹：至少一版缺少完整模型产物")
+
+    objectives = _list(model_diff.get("objectiveChanges"))
+    if objectives:
+        for item in objectives[:6]:
+            before = _dict(_dict(item).get("left"))
+            after = _dict(_dict(item).get("right"))
+            lines.append(
+                f"- 目标第{_dict(item).get('priority')}级："
+                f"{before.get('name') or '无'}（{before.get('sense') or '-'}） → "
+                f"{after.get('name') or '无'}（{after.get('sense') or '-'}）"
+            )
+    else:
+        lines.append("- 目标函数：各层级一致")
+
+    constraints = _list(model_diff.get("constraintChanges"))
+    if constraints:
+        parts = [
+            f"{_dict(item).get('meaning') or _dict(item).get('kind')} "
+            f"{_dict(item).get('left')}→{_dict(item).get('right')} 条"
+            for item in constraints[:8]
+        ]
+        lines.append("- 约束：" + "；".join(parts))
+    else:
+        lines.append("- 约束：分组计数一致")
+
+    parameters = _list(model_diff.get("parameterChanges"))
+    if parameters:
+        parts = []
+        for item in parameters[:10]:
+            entry = _dict(item)
+            unit = entry.get("unit") or ""
+            parts.append(f"{entry.get('label') or entry.get('id')}: {entry.get('left')} → {entry.get('right')}{unit}")
+        lines.append("- 参数：" + "；".join(parts))
+    else:
+        lines.append("- 参数：取值一致")
+    return "\n".join(lines)

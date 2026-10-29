@@ -388,9 +388,34 @@ class AgentRuntime:
                 memory=memory,
             )
 
-        # 版本对比优先于"模型是什么"：问"这两版区别"时要给具体差异，
-        # 而不是讲通用模型结构。
+        # ── Agent-first：读类问题交给模型自己判断和调工具 ──────────────────
+        # 以前这里用关键词表先分诊（模型问答 / 版本对比），模型永远看不到原话，
+        # 结果"这两版本区别"被当成"模型是什么"讲通用结构。
+        # 现在：只要对话 agent 可用，且这句话不是明确的排程修改/求解命令，
+        # 就交给 agent 用 read_versions（含 model/constraints/parameters）自己答；
+        # agent 不可用（无 key）时回落到下面的确定性分诊，保证离线与测试可用。
         compare_reply = self._compare_versions_reply(conversation_id, content, selected_version)
+        model_question = detect_model_question(content)
+        if self.conversation_agent.enabled and (model_question or compare_reply is not None):
+            try:
+                reply = self._answer_with_conversation_agent(
+                    conversation_id=conversation_id,
+                    content=content,
+                    history=self.messages.list_by_conversation(conversation_id),
+                    memory=memory,
+                    selected_version=selected_version,
+                    sink=sink,
+                )
+                return self._finalize_response(
+                    conversation_id,
+                    reply,
+                    "assistant_reply",
+                    memory.activeView,
+                    [],
+                )
+            except ConversationAgentError:
+                pass  # 落到确定性兜底
+
         if compare_reply is not None:
             return self._finalize_response(
                 conversation_id,
@@ -400,7 +425,6 @@ class AgentRuntime:
                 [],
             )
 
-        model_question = detect_model_question(content)
         if model_question:
             if model_question == "capability":
                 return self._answer_capability_question(
