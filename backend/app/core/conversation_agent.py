@@ -10,6 +10,7 @@ from anthropic import Anthropic
 
 from app.core import objective_catalog
 from app.core.agent_tools import AgentToolbox
+from app.core.conversation_memory import ConversationMemory, render_memory_context
 from app.schemas.agent import Message, WorkingMemory, WindowVersion
 
 
@@ -79,6 +80,7 @@ class ConversationAgent:
         memory: WorkingMemory,
         toolbox: AgentToolbox,
         selected_version: WindowVersion | None,
+        snapshot: ConversationMemory | None = None,
         on_token: Callable[[str], None] | None = None,
         on_status: Callable[[str], None] | None = None,
     ) -> str:
@@ -96,7 +98,7 @@ class ConversationAgent:
         )
         client.auth_token = None
         messages = self._build_messages(message, history)
-        system = self._system_prompt(memory, toolbox, selected_version)
+        system = self._system_prompt(memory, toolbox, selected_version, snapshot)
         tools = toolbox.tool_specs()
         collected: list[str] = []
         tool_used = False
@@ -201,6 +203,7 @@ class ConversationAgent:
         memory: WorkingMemory,
         toolbox: AgentToolbox,
         selected_version: WindowVersion | None,
+        snapshot: ConversationMemory | None = None,
     ) -> str:
         plans = []
         for index, item in enumerate(toolbox.ordered, start=1):
@@ -221,6 +224,7 @@ class ConversationAgent:
             catalog_block = objective_catalog.catalog_markdown()
         except Exception:  # pragma: no cover - 目录缺失时降级，不阻断对话
             catalog_block = "（目标模板目录暂不可读）"
+        memory_block = render_memory_context(snapshot) if snapshot else ""
         return f"""你是海上风电检修排程产品的对话 Agent。你正在和生产环境中的检修计划员对话。
 
 当前时间：{datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M")}（Asia/Shanghai）
@@ -229,6 +233,9 @@ class ConversationAgent:
 
 本会话方案：
 {plan_block}
+
+本会话背景记忆（只读背景，具体数字仍以工具为准）：
+{memory_block}
 
 可配置的目标（能力目录，唯一来源是目标模板文件）：
 {catalog_block}

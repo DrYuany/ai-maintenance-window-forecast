@@ -21,6 +21,7 @@ from app.core.agent_memory import (
 )
 from app.core.agent_trace import AgentTrace, AgentTraceRepository, ToolCallRecord, new_trace_id
 from app.core.conversation_agent import ConversationAgent, ConversationAgentError
+from app.core.conversation_memory import ConversationMemoryRepository, build_memory_snapshot
 from app.core.decision_contract import DecisionCompiler
 from app.core.maintenance_product_executor import MaintenanceProductExecutor, solver_status
 from app.core.model_change import (
@@ -126,6 +127,7 @@ class AgentRuntime:
         summary_repo: ConversationSummaryRepository | None = None,
         profile_repo: UserProfileRepository | None = None,
         decision_repo: DecisionMemoryRepository | None = None,
+        memory_repo: ConversationMemoryRepository | None = None,
     ) -> None:
         self.conversations = conversations
         self.messages = messages
@@ -145,6 +147,7 @@ class AgentRuntime:
         self.summary_repo = summary_repo
         self.profile_repo = profile_repo
         self.decision_repo = decision_repo
+        self.memory_repo = memory_repo
         self._tls = threading.local()
 
     # ── trace ────────────────────────────────────────────────────────────────
@@ -1417,12 +1420,24 @@ class AgentRuntime:
         sink: StreamSink | None,
     ) -> str:
         toolbox = self._build_toolbox(conversation_id, selected_version, sink)
+        snapshot = build_memory_snapshot(
+            conversation_id,
+            history,
+            memory,
+            self.versions.list_by_conversation(conversation_id),
+        )
+        if self.memory_repo is not None:
+            try:
+                self.memory_repo.upsert(snapshot)
+            except Exception:  # pragma: no cover - 记忆落库失败不阻断对话
+                pass
         reply = self.conversation_agent.answer(
             message=content,
             history=history,
             memory=memory,
             toolbox=toolbox,
             selected_version=selected_version,
+            snapshot=snapshot,
             on_token=sink.token if sink else None,
             on_status=sink.status if sink else None,
         )
