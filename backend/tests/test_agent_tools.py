@@ -302,15 +302,17 @@ def test_read_model_section_limits_output(temp_db_path: Path) -> None:
     assert "决策变量" not in constraints
 
 
-def test_read_model_include_rejected_for_multiple(temp_db_path: Path) -> None:
+def test_read_model_include_supported_for_multiple(temp_db_path: Path) -> None:
+    """2026-10-29：多版 + include=model 不再是拒绝，而是返回结构化投影与 modelDiffs。"""
     result = _toolbox(temp_db_path).execute(
         "read_versions",
         {"versions": ["方案01", "方案02"], "include": ["model"]},
     )
 
     assert result["status"] == "ok"
-    assert "markdown" not in result["data"]
-    assert any("完整模型" in warning for warning in result["warnings"])
+    assert len(result["data"]["plans"]) == 2
+    assert "model" in result["data"]["plans"][1]
+    assert isinstance(result["data"]["modelDiffs"], list)
 
 
 def test_read_missing_artifact_reports_unavailable_model(temp_db_path: Path) -> None:
@@ -684,28 +686,40 @@ def test_read_site_overview_counts_all_site_domains(temp_db_path: Path) -> None:
     assert "没有接入实时 SCADA" in result["data"]["markdown"]
 
 
-# ── compare_versions 工具（agent-first：差异在工具侧算好）──────────────────
+# ── N 版模型投影（compare_versions 并入 read_versions）─────────────────────
 
-def test_compare_versions_tool_is_registered() -> None:
-    from app.core.agent_tools import AgentToolbox
-
-    names = {spec["name"] for spec in AgentToolbox.tool_specs(AgentToolbox.__new__(AgentToolbox))}
-    assert "compare_versions" in names
-
-
-def test_compare_versions_returns_model_and_results_sections(temp_db_path: Path) -> None:
-    result = _toolbox(temp_db_path).execute("compare_versions", {})
+def test_read_versions_projects_model_for_multiple_versions(temp_db_path: Path) -> None:
+    result = _toolbox(temp_db_path).execute(
+        "read_versions",
+        {"versions": ["方案01", "方案02"], "include": ["model"]},
+    )
 
     assert result["status"] == "ok"
-    markdown = result["data"]["markdown"]
-    assert "模型层差异" in markdown
-    assert "模型指纹" in markdown
-    assert result["data"]["model"]["left"]["planNumber"] == 1
-    assert result["data"]["model"]["right"]["planNumber"] == 2
+    plans = result["data"]["plans"]
+    assert len(plans) == 2
+    # 只有方案02 有模型产物
+    assert plans[0]["model"]["available"] is False
+    assert plans[1]["model"]["available"] is True
+    assert isinstance(result["data"]["modelDiffs"], list)
 
 
-def test_compare_versions_focus_model_only(temp_db_path: Path) -> None:
-    result = _toolbox(temp_db_path).execute("compare_versions", {"focus": "model"})
+def test_single_version_model_read_returns_markdown(temp_db_path: Path) -> None:
+    """单版读模型仍走 detail：给 markdown/latex，不是对比矩阵。"""
+    result = _toolbox(temp_db_path).execute(
+        "read_versions",
+        {"versions": ["方案02"], "include": ["model"]},
+    )
 
     assert result["status"] == "ok"
-    assert "模型层差异" in result["data"]["markdown"]
+    assert result["data"]["mode"] == "single"
+    assert "markdown" in result["data"]
+    assert result["data"]["modelFingerprint"]
+
+
+def test_single_version_read_is_not_a_compare(temp_db_path: Path) -> None:
+    result = _toolbox(temp_db_path).execute(
+        "read_versions",
+        {"versions": ["方案02"], "include": ["model"]},
+    )
+    # 单版走 detail 路径，不产生差异
+    assert result["data"]["mode"] != "compare"

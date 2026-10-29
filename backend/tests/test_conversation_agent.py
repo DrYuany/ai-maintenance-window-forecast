@@ -15,7 +15,7 @@ def test_math_passthrough_ignores_cost_questions() -> None:
     assert not MATH_PASSTHROUGH.search("为什么这版成本更低")
 
 
-def test_tool_surface_is_five_readers_plus_compare_plus_solve_and_ledger() -> None:
+def test_tool_surface_is_five_readers_plus_solve_and_ledger() -> None:
     toolbox = object.__new__(AgentToolbox)
     specs = toolbox.tool_specs()
 
@@ -27,11 +27,10 @@ def test_tool_surface_is_five_readers_plus_compare_plus_solve_and_ledger() -> No
         "read_site",
         "solve",
         "ledger",
-        "compare_versions",
     ]
     # 读类工具必须自报"只读"，写类工具（solve 预览、ledger 台账）不能这么标。
     for spec in specs:
-        if spec["name"].startswith("read_") or spec["name"] == "compare_versions":
+        if spec["name"].startswith("read_"):
             assert "只读" in spec["description"]
 
 

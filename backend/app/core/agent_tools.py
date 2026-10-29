@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from app.core.version_compare import compare_versions, render_compare_summary
+from app.core.version_compare import compare_versions
 from app.core.model_change import build_change_plan
 from app.core.planning_intent import PlanningIntentCompiler, PlanningRequest
 from app.core.tool_runtime import ToolRuntime, ToolRuntimeError
@@ -130,7 +130,7 @@ class AgentToolbox:
         }
         self._trace: list[dict[str, Any]] = []
         self._specs = {spec["name"]: spec for spec in self.tool_specs()}
-        self.runtime = ToolRuntime(read_only_tools={"read_versions", "compare_versions", "read_environment", "read_catalog", "read_alarms", "read_site"})
+        self.runtime = ToolRuntime(read_only_tools={"read_versions", "read_environment", "read_catalog", "read_alarms", "read_site"})
 
     # ------------------------------------------------------------------ tools
     def tool_specs(self) -> list[dict[str, Any]]:
@@ -146,6 +146,8 @@ class AgentToolbox:
                     "传 1 个给单方案事实；传 2 个及以上给同一张指标矩阵、相对基准的差值、"
                     "任务存在性变化和可比性限制，供你解读，不替你下结论。"
                     "include 按需追加：tasks、unscheduled、model、costs、parameters、constraints、status。"
+                    "多版同时读 model 时返回每版的结构化投影，并额外给出 modelDiffs"
+                    "（模型指纹、目标层级、约束分组差异），差异已算好，你只负责解读。"
                 ),
                 "input_schema": {
                     "type": "object",
@@ -432,34 +434,11 @@ class AgentToolbox:
                     },
                 },
             },
-            {
-                "name": "compare_versions",
-                "description": (
-                    "对比两个方案的差异，只读，结果已经是算好的差异，你只负责解读。"
-                    "包含：模型指纹是否相同、目标函数层级变化、约束增删、参数取值变化、"
-                    "任务集合变动、成本驱动与可比性。"
-                    "用户说「这两版/两个方案/上一版和这版」时，指代省略则自动取会话最近两版。"
-                    "只传一个或都不传时，按最近两版对比。"
-                ),
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "left": {**version_arg, "description": "基准方案，省略时取最近两版中较早的一版。"},
-                        "right": {**version_arg, "description": "对比方案，省略时取最近两版中较新的一版。"},
-                        "focus": {
-                            "type": "string",
-                            "enum": ["model", "results", "all"],
-                            "description": "关注点，默认 all；model 只看模型层差异。",
-                        },
-                    },
-                },
-            },
         ]
 
     def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "read_versions": self._read_versions,
-            "compare_versions": self._compare_versions,
             "read_environment": self._read_environment,
             "read_catalog": self._read_catalog,
             "read_alarms": self._read_alarms,
@@ -617,68 +596,6 @@ class AgentToolbox:
                 or _dict(summary.get("data")).get("数据时点")
             ),
         }
-
-    def _compare_versions(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """两版对比：工具直接返回算好的差异，模型只负责解读。
-
-        为什么单独做成工具：让模型自己读两份完整模型再合并，弱模型会只倒出其中一份
-        （实测 deepseek-flash 只讲了方案02）。把 diff 在工具侧算好，模型只需叙述。
-        """
-        ordered = list(self.ordered)
-        if len(ordered) < 2:
-            return self._envelope(
-                "not_available",
-                {"count": len(ordered)},
-                warnings=["本会话不足两版方案，无法对比；先再生成一版方案。"],
-            )
-
-        def resolve(ref: Any, fallback: WindowVersion) -> WindowVersion:
-            if not ref:
-                return fallback
-            found = self.resolve_version(str(ref))
-            return found or fallback
-
-        left = resolve(arguments.get("left"), ordered[-2])
-        right = resolve(arguments.get("right"), ordered[-1])
-        if left.id == right.id:
-            return self._envelope(
-                "invalid",
-                {"versionId": left.id},
-                warnings=["左右两版相同，请指定不同的两个方案。"],
-            )
-
-        payload = self.compare_pair(left, right)
-        drivers = _dict(payload.get("layer2Drivers"))
-        left_fp = getattr(left, "modelFingerprint", None)
-        right_fp = getattr(right, "modelFingerprint", None)
-        model_diff = {
-            "left": {"id": left.id, "planNumber": self.plan_numbers.get(left.id, 1),
-                     "modelFingerprint": left_fp},
-            "right": {"id": right.id, "planNumber": self.plan_numbers.get(right.id, 1),
-                      "modelFingerprint": right_fp},
-            "fingerprintSame": bool(left_fp and right_fp and left_fp == right_fp),
-            "objectiveChanges": drivers.get("objectiveChanges"),
-            "constraintChanges": drivers.get("constraintChanges"),
-            "parameterChanges": drivers.get("parameterChanges"),
-        }
-
-        focus = str(arguments.get("focus") or "all")
-        blocks: list[str] = []
-        if focus in ("model", "all"):
-            blocks.append(_render_model_diff(model_diff))
-        if focus in ("results", "all"):
-            try:
-                blocks.append(render_compare_summary(payload))
-            except Exception:  # noqa: BLE001 - 渲染失败不阻断模型层结论
-                pass
-        return self._envelope(
-            "ok",
-            {
-                "markdown": "\n\n".join(block for block in blocks if block),
-                "model": model_diff,
-                "comparisonId": payload.get("comparisonId"),
-            },
-        )
 
     def _read_versions(self, arguments: dict[str, Any]) -> dict[str, Any]:
         raw_versions = arguments.get("versions")
@@ -1013,6 +930,99 @@ class AgentToolbox:
             data["unresolved"] = unresolved
         return result
 
+    def _model_projection(self, version: WindowVersion) -> dict[str, Any]:
+        """单版模型的结构化投影（目标层级 / 约束分组 / 变量规模），用于 N 版对照。"""
+        artifact = self.model_artifacts.get(version.id) if self.model_artifacts else None
+        if not artifact:
+            return {
+                "available": False,
+                "modelFingerprint": getattr(version, "modelFingerprint", None),
+            }
+        stages = _list(_dict(artifact.get("objectives")).get("stages"))
+        groups = _list(_dict(artifact.get("constraints")).get("groups"))
+        variables = _dict(artifact.get("variables"))
+        return {
+            "available": True,
+            "modelFingerprint": getattr(version, "modelFingerprint", None),
+            "objective": [
+                {
+                    "priority": item.get("priority"),
+                    "name": item.get("name"),
+                    "sense": item.get("sense"),
+                    "terms": item.get("expressionTermCount"),
+                }
+                for item in stages[:10]
+            ],
+            "constraints": [
+                {
+                    "kind": item.get("kind") or item.get("id"),
+                    "count": item.get("count"),
+                    "meaning": item.get("meaning"),
+                }
+                for item in groups[:12]
+            ],
+            "variables": {
+                "total": variables.get("total"),
+                "groupCount": len(_list(variables.get("groups"))),
+            },
+        }
+
+    @staticmethod
+    def _model_diffs(projections: list[dict[str, Any]], baseline_index: int) -> list[dict[str, Any]]:
+        """模型层差异：目标层级、约束分组、模型指纹。差异在工具侧算好，模型只解读。"""
+        if len(projections) < 2:
+            return []
+        diffs: list[dict[str, Any]] = []
+
+        fingerprints = [item.get("modelFingerprint") for item in projections]
+        if len({fp for fp in fingerprints if fp}) > 1:
+            diffs.append({
+                "dimension": "model.fingerprint",
+                "key": "modelFingerprint",
+                "baselineValue": fingerprints[baseline_index],
+                "values": fingerprints,
+                "changed": True,
+            })
+
+        max_stages = max((len(item.get("objective") or []) for item in projections), default=0)
+        for index in range(max_stages):
+            values = []
+            for item in projections:
+                stages = item.get("objective") or []
+                stage = stages[index] if index < len(stages) else None
+                values.append(
+                    None if stage is None else
+                    {"name": stage.get("name"), "sense": stage.get("sense"), "terms": stage.get("terms")}
+                )
+            signatures = {
+                ((value or {}).get("name"), (value or {}).get("sense"), (value or {}).get("terms"))
+                for value in values if value is not None
+            }
+            if len(signatures) > 1:
+                diffs.append({
+                    "dimension": "model.objective",
+                    "key": f"priority{index + 1}",
+                    "baselineValue": values[baseline_index],
+                    "values": values,
+                    "changed": True,
+                })
+
+        kinds = sorted({item.get("kind") for proj in projections for item in (proj.get("constraints") or []) if item.get("kind")})
+        for kind in kinds:
+            counts = []
+            for proj in projections:
+                found = next((c for c in (proj.get("constraints") or []) if c.get("kind") == kind), None)
+                counts.append(found.get("count") if found else 0)
+            if len(set(counts)) > 1:
+                diffs.append({
+                    "dimension": "model.constraints",
+                    "key": kind,
+                    "baselineValue": counts[baseline_index],
+                    "values": counts,
+                    "changed": True,
+                })
+        return diffs
+
     def _read_many(
         self,
         versions: list[WindowVersion],
@@ -1023,11 +1033,9 @@ class AgentToolbox:
     ) -> dict[str, Any]:
         facts = [self._facts(version) for version in versions]
         warnings: list[str] = []
-        if "model" in include:
-            warnings.append(
-                "多方案对比不返回完整模型；需要公式时请单独读取一个方案。"
-            )
         for fact, version in zip(facts, versions):
+            if "model" in include:
+                fact["model"] = self._model_projection(version)
             if "tasks" in include:
                 fact["tasks"] = [
                     {
@@ -1068,6 +1076,11 @@ class AgentToolbox:
         )
         deltas = self._deltas_vs_baseline(matrix, facts, baseline_index)
         presence = self._task_presence(versions, facts)
+        model_diffs = (
+            self._model_diffs([fact.get("model") or {} for fact in facts], baseline_index)
+            if "model" in include
+            else []
+        )
         if unresolved:
             warnings.append("以下引用没有找到，已忽略：" + "、".join(unresolved))
         return self._envelope(
@@ -1104,6 +1117,7 @@ class AgentToolbox:
                 },
                 "comparability": comparability,
                 "deltasVsBaseline": deltas,
+                "modelDiffs": model_diffs,
                 "taskPresence": presence,
                 "unresolved": unresolved,
             },
@@ -2015,56 +2029,3 @@ class AgentToolbox:
         ])
         return "\n".join(lines)
 
-
-def _render_model_diff(model_diff: dict[str, Any]) -> str:
-    """把工具算好的模型层差异渲染成 markdown（模型只需转述）。"""
-    left = _dict(model_diff.get("left"))
-    right = _dict(model_diff.get("right"))
-    left_no = left.get("planNumber")
-    right_no = right.get("planNumber")
-    left_label = f"方案{left_no:02d}" if isinstance(left_no, int) else str(left.get("id") or "左版")
-    right_label = f"方案{right_no:02d}" if isinstance(right_no, int) else str(right.get("id") or "右版")
-    lines = ["**模型层差异**", f"- 对比：{left_label} → {right_label}"]
-
-    left_fp = left.get("modelFingerprint")
-    right_fp = right.get("modelFingerprint")
-    if left_fp and right_fp:
-        lines.append(f"- 模型指纹：{'相同' if model_diff.get('fingerprintSame') else '不同'}")
-    else:
-        lines.append("- 模型指纹：至少一版缺少完整模型产物")
-
-    objectives = _list(model_diff.get("objectiveChanges"))
-    if objectives:
-        for item in objectives[:6]:
-            before = _dict(_dict(item).get("left"))
-            after = _dict(_dict(item).get("right"))
-            lines.append(
-                f"- 目标第{_dict(item).get('priority')}级："
-                f"{before.get('name') or '无'}（{before.get('sense') or '-'}） → "
-                f"{after.get('name') or '无'}（{after.get('sense') or '-'}）"
-            )
-    else:
-        lines.append("- 目标函数：各层级一致")
-
-    constraints = _list(model_diff.get("constraintChanges"))
-    if constraints:
-        parts = [
-            f"{_dict(item).get('meaning') or _dict(item).get('kind')} "
-            f"{_dict(item).get('left')}→{_dict(item).get('right')} 条"
-            for item in constraints[:8]
-        ]
-        lines.append("- 约束：" + "；".join(parts))
-    else:
-        lines.append("- 约束：分组计数一致")
-
-    parameters = _list(model_diff.get("parameterChanges"))
-    if parameters:
-        parts = []
-        for item in parameters[:10]:
-            entry = _dict(item)
-            unit = entry.get("unit") or ""
-            parts.append(f"{entry.get('label') or entry.get('id')}: {entry.get('left')} → {entry.get('right')}{unit}")
-        lines.append("- 参数：" + "；".join(parts))
-    else:
-        lines.append("- 参数：取值一致")
-    return "\n".join(lines)
