@@ -79,6 +79,19 @@ function getEmptyDashboard(
   };
 }
 
+function jobToEvidence(job: SolveJob): SolveEvidence {
+  return {
+    status: job.solverStatus,
+    hasIncumbent: job.hasIncumbent,
+    proof: job.solverStatus === "OPTIMAL" || job.solverStatus === "INFEASIBLE",
+    elapsedSeconds: job.elapsedSeconds,
+    phase: job.status.toLowerCase(),
+    reason: job.error,
+    running: job.status === "QUEUED" || job.status === "RUNNING",
+    modelFingerprint: job.modelFingerprint,
+  };
+}
+
 export function AgentStoreProvider({
   children,
 }: {
@@ -106,8 +119,23 @@ export function AgentStoreProvider({
   const [error, setError] = useState<string | null>(null);
   const [decisionArtifact, setDecisionArtifact] = useState<DecisionArtifact | null>(offline ? offlineDemo.decisionArtifact : null);
   const [solveEvidence, setSolveEvidence] = useState<SolveEvidence | null>(offline ? offlineDemo.solveEvidence : null);
-  const [activeJob, setActiveJob] = useState<SolveJob | null>(null);
+  const [activeJobs, setActiveJobs] = useState<SolveJob[]>([]);
+  // 界面上的「当前任务」：优先取最新一个仍在运行的，其次取最新一个
+  const activeJob = useMemo<SolveJob | null>(() => {
+    const running = activeJobs.filter((job) => ["QUEUED", "RUNNING"].includes(job.status));
+    return running[0] ?? activeJobs[0] ?? null;
+  }, [activeJobs]);
   const sendInFlight = useRef(false);
+  const hydratingRef = useRef(false);
+  // 所有仍在运行的 job id（以逗号串成稳定依赖，只在运行集合变化时触发轮询重建）
+  const runningJobIds = useMemo(
+    () =>
+      activeJobs
+        .filter((job) => ["QUEUED", "RUNNING"].includes(job.status))
+        .map((job) => job.id)
+        .join(","),
+    [activeJobs],
+  );
 
   const refreshConversationList = useCallback(async () => {
     const next = await apiClient.listConversations();
@@ -128,10 +156,10 @@ export function AgentStoreProvider({
 
   const hydrateConversation = useCallback(
     async (conversationId: string, nextSortMode: SortMode) => {
-      const [detail, nextDashboard, latestJob] = await Promise.all([
+      const [detail, nextDashboard, jobs] = await Promise.all([
         apiClient.getConversation(conversationId),
         apiClient.getDashboard(conversationId, nextSortMode),
-        apiClient.getLatestSolveJob(conversationId),
+        apiClient.getSolveJobs(conversationId),
       ]);
 
       setCurrentConversationId(conversationId);
@@ -139,22 +167,10 @@ export function AgentStoreProvider({
       setWorkingMemory(detail.workingMemory);
       setCurrentView(detail.activeView ?? detail.workingMemory.activeView);
       setDashboard(nextDashboard);
-      setActiveJob(latestJob);
+      setActiveJobs(jobs);
+      const latestJob = jobs[0] ?? null;
       setDecisionArtifact(latestJob?.result?.decisionArtifact ?? null);
-      if (latestJob) {
-        setSolveEvidence({
-          status: latestJob.solverStatus,
-          hasIncumbent: latestJob.hasIncumbent,
-          proof: latestJob.solverStatus === "OPTIMAL" || latestJob.solverStatus === "INFEASIBLE",
-          elapsedSeconds: latestJob.elapsedSeconds,
-          phase: latestJob.status.toLowerCase(),
-          reason: latestJob.error,
-          running: latestJob.status === "QUEUED" || latestJob.status === "RUNNING",
-          modelFingerprint: latestJob.modelFingerprint,
-        });
-      } else {
-        setSolveEvidence(null);
-      }
+      setSolveEvidence(latestJob ? jobToEvidence(latestJob) : null);
     },
     [],
   );
@@ -257,7 +273,12 @@ export function AgentStoreProvider({
       const applyResponse = async (response: AgentResponse) => {
         setDecisionArtifact(response.decisionArtifact ?? null);
         setSolveEvidence(response.solveEvidence ?? null);
-        setActiveJob(response.solveJob ?? null);
+        if (response.solveJob) {
+          setActiveJobs((previous) => {
+            const others = previous.filter((job) => job.id !== response.solveJob!.id);
+            return [response.solveJob!, ...others];
+          });
+        }
         setCurrentView(response.recommendedView);
         await refreshConversationList();
         await hydrateConversation(currentConversationId, dashboard.sortMode);
@@ -349,59 +370,49 @@ export function AgentStoreProvider({
   const controlActiveJob = useCallback(async (action: "wait" | "background" | "use_incumbent" | "stop") => {
     if (!activeJob) return;
     try {
-      setActiveJob(await apiClient.controlSolveJob(activeJob.id, action));
+      const updated = await apiClient.controlSolveJob(activeJob.id, action);
+      setActiveJobs((previous) => previous.map((job) => job.id === updated.id ? updated : job));
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "更新求解任务失败");
     }
   }, [activeJob]);
 
   useEffect(() => {
-    if (!activeJob) return;
-    // 多个场景时，即使当前任务已结束，只要批次还没跑完就要继续跟下去
-    const jobRunning = ["QUEUED", "RUNNING"].includes(activeJob.status);
-    if (!jobRunning && typeof activeJob.batchTotal !== "number") return;
+    const ids = runningJobIds.split(",").filter(Boolean);
+    if (ids.length === 0) return;
     let cancelled = false;
-    const poll = async () => {
+    const pollOne = async (jobId: string) => {
       try {
-        const next = await apiClient.getSolveJob(activeJob.id);
+        const next = await apiClient.getSolveJob(jobId);
         if (cancelled) return;
-        setActiveJob(next);
-        setSolveEvidence({
-          status: next.solverStatus,
-          hasIncumbent: next.hasIncumbent,
-          proof: next.solverStatus === "OPTIMAL" || next.solverStatus === "INFEASIBLE",
-          elapsedSeconds: next.elapsedSeconds,
-          phase: next.status.toLowerCase(),
-          reason: next.error,
-          running: next.status === "QUEUED" || next.status === "RUNNING",
-          modelFingerprint: next.modelFingerprint,
-        });
+        setActiveJobs((previous) => previous.map((job) => (job.id === jobId ? next : job)));
         if (["COMPLETED", "FAILED", "CANCELLED"].includes(next.status) && currentConversationId) {
           if (next.result?.decisionArtifact) setDecisionArtifact(next.result.decisionArtifact);
-          await refreshConversationList();
-          await hydrateConversation(currentConversationId, dashboard.sortMode);
-          // 这句话里还有别的场景没算，切到下一个场景的任务继续跟
-          const latest = await apiClient.getLatestSolveJob(currentConversationId);
-          if (
-            !cancelled
-            && latest
-            && latest.id !== next.id
-            && ["QUEUED", "RUNNING"].includes(latest.status)
-          ) {
-            setActiveJob(latest);
+          if (!hydratingRef.current) {
+            hydratingRef.current = true;
+            try {
+              await refreshConversationList();
+              await hydrateConversation(currentConversationId, dashboard.sortMode);
+            } finally {
+              hydratingRef.current = false;
+            }
           }
         }
       } catch (nextError) {
         if (!cancelled) setError(nextError instanceof Error ? nextError.message : "读取求解进度失败");
       }
     };
-    void poll();
-    const timer = window.setInterval(() => void poll(), 1000);
-    return () => { cancelled = true; window.clearInterval(timer); };
+    const pollAll = () => {
+      for (const id of ids) void pollOne(id);
+    };
+    void pollAll();
+    const timer = window.setInterval(pollAll, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [
-    activeJob?.id,
-    activeJob?.status,
-    activeJob?.batchTotal,
+    runningJobIds,
     currentConversationId,
     dashboard.sortMode,
     hydrateConversation,

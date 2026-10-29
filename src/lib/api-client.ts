@@ -149,6 +149,8 @@ export const apiClient = {
     request<SolveJob>(`/api/agent/jobs/${jobId}`),
   getLatestSolveJob: (conversationId: string) =>
     request<SolveJob | null>(`/api/agent/conversations/${conversationId}/jobs/latest`),
+  getSolveJobs: (conversationId: string) =>
+    request<SolveJob[]>(`/api/agent/conversations/${conversationId}/jobs`),
   controlSolveJob: (jobId: string, action: "wait" | "background" | "use_incumbent" | "stop") =>
     request<SolveJob>(`/api/agent/jobs/${jobId}/actions`, {
       method: "POST",
