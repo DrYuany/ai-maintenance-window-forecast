@@ -47,12 +47,43 @@ def strip_fence(text: str) -> str:
     return body.strip()
 
 
-def load(text: str) -> dict[str, Any]:
-    """从模型返回的字符串里拿产物；拿不到就抛 ValueError（由调用方转澄清）。"""
-    payload = json.loads(strip_fence(text))
+def _tail_is_prose(tail: str) -> bool:
+    """JSON 后面剩下的那段，是不是"人话"而不是第二份产物。
+
+    模型经常这么干：```json {...} ``` 之后接一段「说明：…」。这段说明对机器
+    没用，是它的解释，丢掉不影响任何语义。但**第二份 JSON 不能丢**——
+    那是数据，丢掉会让后面的判据在少了一半的产物上判"通过"。
+    所以只放行"去掉空白和围栏标记后不是 { 或 [ 开头"的尾巴。
+    """
+    probe = re.sub(r"^[\s`]*(?:json)?[\s`]*", "", tail or "")
+    return not probe.startswith(("{", "["))
+
+
+def parse_object(text: str) -> dict[str, Any]:
+    """把模型返回解析成一个 dict；做不到就抛 ValueError。
+
+    **只有这一份实现。** 曾经在 pipeline 里另写了一版"够用的判据"，
+    用 rsplit("```") 切尾部，结果它把「JSON + 说明」判成合法、这里却抛
+    Extra data——同一段文字两个模块两个结论，白白多烧几十次修复轮。
+    """
+    body = strip_fence(text)
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        if exc.msg != "Extra data":
+            raise
+        head = body[: exc.pos]
+        payload = json.loads(head)  # head 不合法就让原来的错抛出去
+        if not _tail_is_prose(body[exc.pos :]):
+            raise ValueError("产物后面还跟着第二段 JSON，不猜哪个算数") from exc
     if not isinstance(payload, dict):
         raise ValueError("产物顶层不是对象")
     return payload
+
+
+def load(text: str) -> dict[str, Any]:
+    """从模型返回的字符串里拿产物；拿不到就抛 ValueError（由调用方转澄清）。"""
+    return parse_object(text)
 
 
 def _pick(item: dict[str, Any], key: str) -> Any:
