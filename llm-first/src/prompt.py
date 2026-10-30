@@ -71,7 +71,7 @@ _DOMAIN_OVERRIDE: dict[str, str] = {
 
 # 表 C 的展示顺序与业务注解（只列表 C 允许出现的原语，self_check 会核）
 _TABLE_C_ORDER: tuple[tuple[str, str], ...] = (
-    ("must", "点名必须修。"),
+    ("must", "点名必须修；也可 filter 按 severity/turbine/part 批量（「高严重全都要修」）。"),
     ("exclude", "点名不许修。"),
     ("precedence", '"先修A再修B"，gap 是天数间隔。'),
     ("co_occur", 'mode 只有 same_day / diff_day 两种。'),
@@ -466,6 +466,13 @@ def syntax_block() -> str:
 
 `filter` 只能用这几个键：task / turbine / part / severity / window / day / line。
 `coeff` 只能是：finish / start / day / work_hours / labor / material / other_fee。
+
+**`linear` 里有三个量你不能用：`最后完工时间`、`总经济成本`、`现金支出`。**
+它们由求解内核直接给出，只有**目标**物化得出来，写成 `linear` 会编译失败。
+（限成本要用 `budget`，那个能跑；只有 `linear` 不行。）
+所以「完工时间不能晚于11月20日」这种**整体**期限，系统目前表达不了
+（`deadline` 只能指着一个具体任务）→ 写 `unassigned`，或 route 为 clarify 说明做不到。
+别拿 `minimize 最后完工时间` 冒充"必须在某天前"：目标会去优化，约束才是不许越线。
 
 **量名不许自己造。** 表 F 之外、又不能写成上面三种形式的，就是做不到——写进 `unassigned`。
 
