@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -25,7 +26,13 @@ import contract
 import guardrail
 import prompt
 import segment
+import tools
 import verify
+
+# 一次提问里最多允许模型查几轮工具。
+# 4 是实测下来的：多数句子 0~1 次就查完了；给到 4 是因为复合句可能
+# 分别查参数、约束、量，但再往上加只是给"反复查同一件事"留空间。
+_TOOL_ROUNDS = 4
 
 
 class _Cache:
@@ -64,6 +71,9 @@ class Outcome:
     cached: bool = False
     model_route: str | None = None
     today: str = ""
+    # 模型这一轮查了什么。摆出来是为了让"它是不是真查了"可核对——
+    # 不看这个，就只能靠"结果看起来对不对"猜，而那个猜不准。
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -88,7 +98,92 @@ class Outcome:
             "error": self.error,
             "cached": self.cached,
             "today": self.today,
+            "tool_calls": self.tool_calls,
         }
+
+
+def _ask_with_tools(system: str, message: str, *,
+                    enable_tools: bool = True) -> tuple[client.Reply, dict[str, Any]]:
+    """问一次，允许模型先查表再回答。返回 (最终回复, 统计)。
+
+    **工具循环和修复轮次是两件事，别混。**
+
+      工具循环（本函数）：同一句话里，"我不知道「船租」是哪个编号，查一下"
+        —— 这是把「背」换成「查」。查完再说，一次成型。
+      修复轮次（understand 里的 for attempt）：上一次写错了，拿判据退回来重写
+        —— 那是事后审判。
+
+    本函数只做前者。后者仍归 understand 管，因为判据必须看到完整产物才能判。
+
+    最后一轮强制 JSON 且不带工具：模型必须交卷。只靠"它自己会停"不可靠。
+    """
+    if not enable_tools:
+        reply = client.chat(system, message)
+        return reply, {"latency_ms": reply.latency_ms,
+                       "usage": dict(reply.usage or {}), "calls": []}
+
+    specs = tools.tool_specs()
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": message},
+    ]
+    stats: dict[str, Any] = {"latency_ms": 0, "usage": {}, "calls": []}
+    reply = None
+
+    for index in range(_TOOL_ROUNDS):
+        last = index == _TOOL_ROUNDS - 1
+        if last:
+            # 最后一轮撤掉工具定义，模型偶尔会"哑火"——返回空内容也不调工具，
+            # 客户端重试后仍空，最后报 LLMUnavailable，看着像模型挂了。
+            # 保留工具又不行：json_mode 与 tools 共存时 content 会被压成空。
+            # 所以撤工具，但把"该交卷了"明说出来，它就不至于无话可说。
+            messages.append({
+                "role": "user",
+                "content": "查完了。现在只输出最终 JSON，不要再调用工具，也不要解释。",
+            })
+        reply = client.chat_messages(
+            messages,
+            tools=None if last else specs,
+            tool_choice=None if last else "auto",
+            json_mode=last,
+        )
+        stats["latency_ms"] += reply.latency_ms
+        for key, value in (reply.usage or {}).items():
+            # usage 里混着嵌套结构（prompt_tokens_details 这种），只累加标量。
+            # 不加这层判断，第二次迭代就会 TypeError——而第一次是好的。
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                stats["usage"][key] = stats["usage"].get(key, 0) + value
+
+        if not reply.wants_tools:
+            return reply, stats
+
+        messages.append({
+            "role": "assistant",
+            "content": reply.text or "",
+            "tool_calls": reply.tool_calls,
+        })
+        for call in reply.tool_calls:
+            fn = call.get("function") or {}
+            name = fn.get("name") or ""
+            raw_args = fn.get("arguments")
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+            except (TypeError, ValueError):
+                args = {}
+            if not isinstance(args, dict):
+                args = {}
+            result = tools.execute(name, args)
+            stats["calls"].append({"tool": name, "arguments": args,
+                                   "status": result.get("status")})
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.get("id"),
+                "content": json.dumps(result, ensure_ascii=False),
+            })
+
+    # 轮次用完还在要工具：交回最后一轮的回复，让 contract.load 去判
+    # 「不是合法 JSON」，比在这里另造一个错误更容易追。
+    return reply, stats
 
 
 def _compile_check(dsl: dict[str, Any], data=None) -> list[str]:
@@ -164,7 +259,7 @@ def _finalize(outcome: Outcome, reason: str = "") -> Outcome:
 
 
 def understand(utterance: str, *, use_cache: bool = True,
-               allow_repair: bool = True,
+               allow_repair: bool = True, use_tools: bool = True,
                ctx: "session.Context | None" = None) -> Outcome:
     text = (utterance or "").strip()
     started = time.monotonic()
@@ -204,7 +299,7 @@ def understand(utterance: str, *, use_cache: bool = True,
     message = text
     for attempt in range(1, rounds + 1):
         try:
-            reply = client.chat(system, message)
+            reply, stats = _ask_with_tools(system, message, enable_tools=use_tools)
         except client.LLMUnavailable as exc:
             outcome.error = str(exc)
             outcome.latency_ms = int((time.monotonic() - started) * 1000)
@@ -212,10 +307,11 @@ def understand(utterance: str, *, use_cache: bool = True,
             return outcome
 
         outcome.model = reply.model
-        outcome.model_ms += reply.latency_ms
+        outcome.model_ms += stats["latency_ms"]
         outcome.attempts = attempt
-        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            outcome.usage[key] = outcome.usage.get(key, 0) + (reply.usage.get(key) or 0)
+        outcome.tool_calls.extend(stats["calls"])
+        for key, value in stats["usage"].items():
+            outcome.usage[key] = outcome.usage.get(key, 0) + (value or 0)
 
         try:
             raw = contract.load(reply.text)
