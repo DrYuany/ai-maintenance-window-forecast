@@ -34,6 +34,11 @@ import verify
 # 分别查参数、约束、量，但再往上加只是给"反复查同一件事"留空间。
 _TOOL_ROUNDS = 4
 
+# 收口提示。撤掉工具后模型偶尔会"哑火"——返回空内容也不调工具，客户端重试
+# 仍空，最后报 LLMUnavailable，看着像模型挂了。把"该交卷了"明说出来就不至于。
+# 同时点明"不要解释"：非 json_mode 轮里它爱在 JSON 后补一段话，那是 Extra data 的来源。
+_SUBMIT_HINT = "查完了。现在只输出最终 JSON，不要再调用工具，也不要加任何解释文字。"
+
 
 class _Cache:
     def __init__(self, size: int = 64) -> None:
@@ -102,6 +107,20 @@ class Outcome:
         }
 
 
+def _looks_like_json(text: str) -> bool:
+    """这轮到底交没交卷——判据与 contract.load 用同一个解析器。
+
+    不自己再写一版"够用的判断"：写过一次，用 rsplit("```") 切尾部，
+    于是「JSON + 说明」在这里判合法、到 contract 那里报 Extra data，
+    同一段文字两个结论。
+    """
+    try:
+        contract.parse_object(text)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def _ask_with_tools(system: str, message: str, *,
                     enable_tools: bool = True) -> tuple[client.Reply, dict[str, Any]]:
     """问一次，允许模型先查表再回答。返回 (最终回复, 统计)。
@@ -115,7 +134,14 @@ def _ask_with_tools(system: str, message: str, *,
 
     本函数只做前者。后者仍归 understand 管，因为判据必须看到完整产物才能判。
 
-    最后一轮强制 JSON 且不带工具：模型必须交卷。只靠"它自己会停"不可靠。
+    **"交卷"必须由结构保证，不能靠模型自己停。** 第一版把撤工具强制 JSON 只放在
+    第 4 轮，结果两头漏：
+      - 模型第 1 轮就说完了但没开 json_mode → 说完 JSON 又补一段话，
+        contract.load 报 "Extra data"（67 条里 20 多条踩这个）；
+      - 模型 4 轮都在调工具 → 最后一轮交回的是 tool_calls 回复，content 是空串，
+        报 "Expecting value: char 0"。
+    现在两条路都收口到同一个"强制交卷轮"：探索轮里只有**交出合法 JSON**
+    才算完；否则继续问，最后一定补一次不带工具、开 json_mode 的收口。
     """
     if not enable_tools:
         reply = client.chat(system, message)
@@ -130,32 +156,28 @@ def _ask_with_tools(system: str, message: str, *,
     stats: dict[str, Any] = {"latency_ms": 0, "usage": {}, "calls": []}
     reply = None
 
-    for index in range(_TOOL_ROUNDS):
-        last = index == _TOOL_ROUNDS - 1
-        if last:
-            # 最后一轮撤掉工具定义，模型偶尔会"哑火"——返回空内容也不调工具，
-            # 客户端重试后仍空，最后报 LLMUnavailable，看着像模型挂了。
-            # 保留工具又不行：json_mode 与 tools 共存时 content 会被压成空。
-            # 所以撤工具，但把"该交卷了"明说出来，它就不至于无话可说。
-            messages.append({
-                "role": "user",
-                "content": "查完了。现在只输出最终 JSON，不要再调用工具，也不要解释。",
-            })
-        reply = client.chat_messages(
-            messages,
-            tools=None if last else specs,
-            tool_choice=None if last else "auto",
-            json_mode=last,
-        )
-        stats["latency_ms"] += reply.latency_ms
-        for key, value in (reply.usage or {}).items():
+    def _absorb(item: client.Reply) -> None:
+        stats["latency_ms"] += item.latency_ms
+        for key, value in (item.usage or {}).items():
             # usage 里混着嵌套结构（prompt_tokens_details 这种），只累加标量。
             # 不加这层判断，第二次迭代就会 TypeError——而第一次是好的。
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 stats["usage"][key] = stats["usage"].get(key, 0) + value
 
+    for _ in range(_TOOL_ROUNDS):
+        reply = client.chat_messages(
+            messages, tools=specs, tool_choice="auto", json_mode=False
+        )
+        _absorb(reply)
+
         if not reply.wants_tools:
-            return reply, stats
+            if _looks_like_json(reply.text):
+                return reply, stats
+            # 说了话，但不是交卷（常见：先解释一段，或者干脆只有一句话）。
+            # 把它当上文接着问；下一轮还能查工具，最后有收口兜底。
+            messages.append({"role": "assistant", "content": reply.text or ""})
+            messages.append({"role": "user", "content": _SUBMIT_HINT})
+            continue
 
         messages.append({
             "role": "assistant",
@@ -181,8 +203,11 @@ def _ask_with_tools(system: str, message: str, *,
                 "content": json.dumps(result, ensure_ascii=False),
             })
 
-    # 轮次用完还在要工具：交回最后一轮的回复，让 contract.load 去判
-    # 「不是合法 JSON」，比在这里另造一个错误更容易追。
+    # 收口轮：撤掉工具、开 json_mode。模型这一轮**不可能**再调工具，
+    # 也没法用"我再查一下"躲过交卷，只能给 JSON。
+    messages.append({"role": "user", "content": _SUBMIT_HINT})
+    reply = client.chat_messages(messages, tools=None, json_mode=True)
+    _absorb(reply)
     return reply, stats
 
 
