@@ -3,9 +3,9 @@
 > 由 `python scripts/bench_suite.py --suite core --save` 生成，基准日期 2026-10-30。
 > 模型侧同一句重跑可能不同，这个表是**一次快照**。
 
-**67 条：通过 66，未通过 1（99%）。需重试 2 条，平均 1095 ms。**
+**68 条：通过 67，未通过 1（99%）。需重试 3 条，平均 3673 ms。**
 
-归因：通过 66；判断分歧（route 不同，其余都对） 1
+归因：通过 67；判据误伤（route 对、验收退） 1
 
 | # | 场景 | 原话 | route | 期望 | 结果 |
 |---|---|---|---|---|---|
@@ -48,17 +48,18 @@
 | F02 | 缺口·整句外 | 改一下叶片的颜色 | reject | reject | 过 |
 | F03 | 缺口·整句外 | 把风险降低50% | reject | reject | 过 |
 | F04 | 缺口·一半能做 | 成本压到最低，但高风险的必须全修 | dsl | dsl | 过 |
-| F05 | 缺口·范围 | 只排风机003的任务 | clarify | clarify/reject | 过 |
+| F05 | 缺口·范围 | 只排风机003的任务 | reject | clarify/reject | 过 |
 | F06 | 缺口·量目录 | 船租和人工加起来不超过300万 | reject | clarify/dsl/reject | 过 |
 | I01 | 危险·按天限制 | 明天只有3个人能出海 | reject | clarify/reject | 过 |
 | I02 | 危险·删除 | 删掉任务012 | reject | clarify/reject | 过 |
-| I03 | 危险·批量 | 算两个场景：船租涨20%和最多两条线，对比一下 | clarify | clarify | 过 |
+| I03 | 危险·批量 | 算两个场景：船租涨20%和最多两条线，对比一下 | clarify | clarify | 验收退回 A8 |
 | I04 | 危险·改输入 | 把天气改成晴天 | reject | clarify/reject | 过 |
-| I05 | 危险·加权 | 高严重完成数占六成，总经济成本占四成 | reject | clarify/dsl/reject | 过 |
+| I05 | 危险·加权 | 高严重完成数占六成，总经济成本占四成 | dsl | dsl | 过 |
 | G01 | 方向 | 预算至少要留300万 | dsl | dsl | 过 |
 | G02 | 方向 | 每天不能超过8小时 | dsl | dsl | 过 |
 | G03 | 方向 | 任务003不能早于11月9日 | dsl | dsl | 过 |
-| G04 | 方向 | 完工时间不能晚于11月20日 | dsl | clarify/reject | route=dsl（要 ['clarify', 'reject']） |
+| G04 | 方向 | 完工时间不能晚于11月20日 | dsl | dsl | 过 |
+| G05 | 方向 | 整个活11月15号前必须干完 | dsl | clarify/dsl | 过 |
 | H01 | 时间 | 明天的风浪太大，别出海 | dsl | dsl | 过 |
 | H02 | 时间 | 月底之前把任务018修完 | clarify | clarify/dsl | 过 |
 | H03 | 量级 | 船租涨到12万 | dsl | dsl | 过 |
@@ -73,6 +74,6 @@
 | J08 | 回归·目标 | 尽量让大家都早点干完 | dsl | dsl | 过 |
 | J09 | 回归·改参数 | 船坏了，只剩两条作业线 | dsl | dsl | 过 |
 | J10 | 回归·模糊诉求 | 尽量安排得合理一些 | clarify | clarify | 过 |
-| J11 | 回归·能力缺口 | 严重故障11月8日前必须修完 | clarify | clarify/reject | 过 |
+| J11 | 回归·能力缺口 | 严重故障11月8日前必须修完 | dsl | clarify/dsl/reject | 过 |
 | J12 | 回归·口语日期 | 3号那天不要动工 | dsl | dsl | 过 |
 | J13 | 回归·口语日期 | 把4号和5号空出来 | dsl | dsl | 过 |

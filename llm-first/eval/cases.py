@@ -140,8 +140,11 @@ SUITE: tuple[dict, ...] = (
      "route_in": {"clarify", "reject"},
      "note": "天气是输入数据，不是排程约束"},
     {"id": "I05", "tag": "危险·加权", "text": "高严重完成数占六成，总经济成本占四成",
-     "route_in": {"clarify", "reject", "dsl"}, "unassigned": True,
-     "note": "表 D 没有加权；要权重只能明说做不到"},
+     "route_in": {"dsl"},
+     "note": "表 D 现在有 weighted（2026-10 补的），且求解器按量级归一后再加权"
+             "（product_planner 的 ranges：成本按现金/船租上界、完成数按任务数），"
+             "0.6/0.4 能跑通、实测 FEASIBLE。原先要求 unassigned 是因为当时只能"
+             "'明说做不到'，现在没有做不到的东西，不该再有 unassigned。"},
 
     # ── G 方向：唯一一类"全过还更糟" ───────────────────────────────────────
     {"id": "G01", "tag": "方向", "text": "预算至少要留300万",
@@ -151,9 +154,17 @@ SUITE: tuple[dict, ...] = (
     {"id": "G03", "tag": "方向", "text": "任务003不能早于11月9日",
      "route": "dsl", "constraints": ["earliest"]},
     {"id": "G04", "tag": "方向", "text": "完工时间不能晚于11月20日",
-     "route_in": {"clarify", "reject"},
-     "note": "整体完工期限没有对应的积木：deadline 只能指着某个任务，量目录里也没有能做日期上界的量。"
-             "（原先标成 dsl+deadline 是错的——那等于要求模型捏造一个 task）"},
+     "route": "dsl", "data": ["task_deadline"],
+     "note": "能表达：task_deadline **不指定 task 也不指定 severity** 就是全部任务，"
+             "等价于整体完工期限。实测过它真绑住——全部任务<=11-15 直接 INFEASIBLE，"
+             "而基线最晚完工是 11-18；<=11-20 可行。原先写'量目录里没有能做日期上界的量'"
+             "是只看了 constraint 表、没看 data 补丁表。"
+             "（linear 引『最后完工时间』那条路是死的：validator 现在会直接拦。）"},
+
+    {"id": "G05", "tag": "方向", "text": "整个活11月15号前必须干完",
+     "route_in": {"dsl", "clarify"},
+     "note": "同一件事换个说法，用来盯 G04 不是背答案：能落 deadline 就行，"
+             "落完执行侧排不进来会明确报错，不许静默丢任务。"},
 
     # ── H 时间与量级：说错的代价最直接 ─────────────────────────────────────
     {"id": "H01", "tag": "时间", "text": "明天的风浪太大，别出海",
@@ -199,8 +210,14 @@ SUITE: tuple[dict, ...] = (
      "route_in": {"clarify"},
      "note": "修前：not_change。说不出要改什么不等于「现状就合理」"},
     {"id": "J11", "tag": "回归·能力缺口", "text": "严重故障11月8日前必须修完",
-     "route_in": {"clarify", "reject"}, "forbid_constraints": ["deadline"],
-     "note": "按严重级别批量截止要「全部」，没有这块积木；单独给一个任务写 deadline 是错的"},
+     "route_in": {"dsl", "clarify", "reject"},
+     "note": "按严重级别批量设期限**是支持的**（task_deadline 带 severity，"
+             "product_data._apply_task_patches 会按严重等级收紧截止）。"
+             "原先判'没有这块积木'是错的。真正的坑在下一层：这些任务在 11-08 前"
+             "干不完时会一个候选都生不出来，于是悄悄进『未安排』、求解还报 FEASIBLE。"
+             "现在 runner 直接拒：『这些任务在期限之前排不进来』。"
+             "route 三种都放行是因为 DSL 本身合法，能不能落地由执行侧说了算——"
+             "这条用例盯的是「不许静默丢任务」，那件事有后端测试兜着。"},
     {"id": "J12", "tag": "回归·口语日期", "text": "3号那天不要动工",
      "route": "dsl", "constraints": ["forbidden_dates"],
      "note": "修前：反问「是11月还是12月」。只说几号就取基准之后最近的那一个"},
