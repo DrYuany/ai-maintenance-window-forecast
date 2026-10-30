@@ -75,14 +75,20 @@ def run(
     if dsl.get("data"):
         data_patches, timeline_patches = compile_data(dsl["data"], base_data)
 
-    data = load_project(
-        PROJECT_ROOT,
-        base_id=base_id,
-        as_of=as_of,
-        overrides=overrides,
-        data_patches=data_patches,
-        timeline_patches=timeline_patches,
-    )
+    try:
+        data = load_project(
+            PROJECT_ROOT,
+            base_id=base_id,
+            as_of=as_of,
+            overrides=overrides,
+            data_patches=data_patches,
+            timeline_patches=timeline_patches,
+        )
+    except ValueError as exc:
+        # 补丁落地时的拒绝理由本来就是说给用户听的（"这次改不会影响结果"、
+        # "期限没让任何任务提前"），但它抛的是裸 ValueError，走出去会被当成
+        # 系统内部错误。转成 DslError，让调用方按"需求表达有误"处理。
+        raise DslError([str(exc)]) from exc
     if max_tasks:
         data.tasks = data.tasks[:max_tasks]
 
@@ -91,6 +97,26 @@ def run(
         raise DslError(errors)
 
     options = {t["任务编号"]: candidates(data, t) for t in data.tasks}
+    # 期限补丁会让候选按截止时间截断（product_data.candidates 里 hi=min(窗口, 截止)）。
+    # 一个任务若干不完，候选数直接变成 0 —— 它于是从"必须排进去"的名单里消失，
+    # 求解照常返回 FEASIBLE，那几条躺在"未安排"里。用户说的是"必须修完"。
+    # 这里提前认出来：基座里排得进、加完期限却排不进，就是期限挤掉的，不是本来就没窗口。
+    if data_patches and not partial:
+        starved = []
+        for task in data.tasks:
+            tid = task["任务编号"]
+            if options.get(tid) or task.get("截止分钟") is None:
+                continue
+            base_task = next(
+                (t for t in base_data.tasks if t["任务编号"] == tid), None
+            )
+            if base_task is not None and candidates(base_data, base_task):
+                starved.append(tid)
+        if starved:
+            raise DslError([
+                "这些任务在期限之前排不进来，改期限等于把它们挪出计划："
+                + "、".join(starved)
+            ])
     # 与生产 recommend() 一致：启发式基座当热启动提示（不牺牲最优性证明）。
     baselines = {name: heuristic(data, options, name) for name in ("严重性优先", "低风速优先")}
     hint = max(baselines.values(), key=len)
@@ -130,6 +156,21 @@ def run(
         extra_constraints=extra,
         custom_stages=stages,
     )
+    # 兜底方案必须点破，不能当成解交出去。
+    #
+    # product_planner.solve 会先把启发式基座当 fallback（partial 模式下也用它），
+    # 那个基座是在**没有** DSL 约束的模型上排出来的。一旦约束把模型逼到不可行
+    # 或时限内没解，它就把这份旧方案原样返回，解状态还写 FEASIBLE，
+    # 来源字段里才藏着 "HEURISTIC_FALLBACK"。实测：同时要求"禁止任务001"
+    # 和"必须任务001"，返回的方案里任务001 排得好好的。
+    # 这不是"暂时没证明"，是"根本没照约束做"——必须报错。
+    source = str((info or {}).get("方案来源") or "")
+    if constraints and source == "HEURISTIC_FALLBACK":
+        raise DslError([
+            "求解器没有在满足这些约束的前提下找到解，返回的是未考虑约束的基座方案；"
+            "不把它当作结果。请放宽约束，或确认这几条约束是否互相冲突："
+            + str([spec.get("type") for spec in constraints])
+        ])
     return {
         "数据": data.meta,
         "求解": info,

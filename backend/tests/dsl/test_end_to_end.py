@@ -81,3 +81,35 @@ def test_invalid_dsl_raises_clear_error() -> None:
             ],
         }, seconds=30, max_tasks=10)
     assert any("不在当前告警快照" in e for e in exc.value.errors)
+
+
+def test_deadline_that_starves_tasks_is_refused_not_silently_dropped() -> None:
+    """「严重故障11月8日前必须修完」不能变成"那四个任务不见了"。
+
+    期限补丁把候选按截止时间截断：任务在期限前干不完，就一个候选都生不出来，
+    于是它从"必须排进去"的名单里消失，求解照常返回 FEASIBLE，四条躺在"未安排"。
+    用户说的是"必须修完"，拿到的是一份漏了四个高危任务的计划。
+    """
+    with pytest.raises(DslError) as exc:
+        run({
+            "data": [{"kind": "task_deadline", "severity": "高",
+                      "at": "2026-11-08T08:00:00+08:00"}],
+        }, seconds=30, max_tasks=6, as_of="2026-10-30T00:00:00+08:00")
+    assert any("排不进来" in e for e in exc.value.errors), exc.value.errors
+
+
+def test_heuristic_fallback_is_never_returned_as_a_solution() -> None:
+    """约束把模型逼到不可行时，不许把"没考虑约束的基座方案"当结果交回去。
+
+    product_planner.solve 会把启发式基座当 fallback，那份方案是在**没有** DSL
+    约束的模型上排的。实测：同时要求"禁止任务001"和"必须任务001"，返回的方案里
+    任务001 排得好好的，解状态还写 FEASIBLE，只有来源字段藏着 HEURISTIC_FALLBACK。
+    """
+    with pytest.raises(DslError) as exc:
+        run({
+            "constraints": [
+                {"type": "exclude", "task": "任务001"},
+                {"type": "must", "task": "任务001"},
+            ],
+        }, seconds=30, max_tasks=6)
+    assert any("未考虑约束的基座方案" in e for e in exc.value.errors), exc.value.errors
