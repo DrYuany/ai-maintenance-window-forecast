@@ -269,11 +269,25 @@ def test_every_objective_is_handled_somewhere():
     assert not unhandled, f"这些目标原语两边都不管：{unhandled}"
 
 
-def test_table_d_only_lists_executable():
-    """表 D 只列能执行的。列出来又写"别用"是嘱咐，不在表里才是定义。"""
-    import prompt
+def test_table_d_lists_exactly_the_executable_ones():
+    """表 D 必须与"真正能跑的目标原语"一字不差，两个方向都要防。
 
-    assert "weighted" not in prompt._TABLE_D_ORDER
+    少列 = **藏能力**：用户说"严重故障占六成、成本占四成"，系统回"不支持加权"，
+    而它其实支持。比报错更隐蔽，因为用户会以为是自己要求过分。
+
+    多列 = **递假情报**：写了一个必炸的原语，校验放行、求解阶段才抛。
+
+    所以不能只断言"weighted 不在里面"（那是上一个 bug 的形状），
+    要断言集合相等。
+    """
+    import prompt
+    import tools
+    from app.core.dsl.registry import primitives as prims
+
+    real = tools.executable_objectives(prims)
+    listed = set(prompt._TABLE_D_ORDER)
+    assert listed == real, f"表 D 少列了：{real - listed}；多列了：{listed - real}"
+    assert len(listed) == len(prompt._TABLE_D_ORDER), "表 D 有重复项，行号会错位"
 
 
 def test_weighted_is_no_longer_rejected():
