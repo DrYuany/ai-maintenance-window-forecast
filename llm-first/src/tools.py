@@ -112,7 +112,9 @@ def tool_specs() -> list[dict[str, Any]]:
                 "「船舶日租金」，所以你拿到的是**按相关度排好的候选清单**，"
                 "要自己从上往下看，判断哪一个才是用户说的东西。\n"
                 "清单里没有对应项，就说明系统确实不支持——该 reject 或 clarify，"
-                "不要硬凑一个近似的原语。"
+                "不要硬凑一个近似的原语。\n"
+                "参数项里 `pid`（P01~P15）是**写 DSL 时用的编号**，"
+                "`code`（费用01）是台账业务编号，别拿 code 去写 field。"
             ),
             "parameters": {
                 "type": "object",
@@ -163,6 +165,18 @@ def _score(query: str, *texts: str) -> int:
 # ── 各类清单 ──────────────────────────────────────────────────────────────────
 
 def _param_items(params) -> list[dict[str, Any]]:
+    """参数清单。
+
+    同时给出两套编号，因为系统里真的有两条：
+
+      pid    P01~P15，提示词自己的分组序号，**模型写 DSL 时用的是这个**
+      code   「费用01」「作业03」，注册表/台账里的业务编号
+
+    只给 `code` 会出事：提示词里所有例子都写 P14，工具却回「费用01」，
+    模型拿到两个名字就得猜该用哪个——它可能猜成 `{"field": "费用01"}`，
+    而编译期待的是参数名。两套都给、并写明 `pid` 是写入用的，它就不用猜了。
+    """
+    pids = {name: rid for rid, name, _unit, _domain in prompt._table_a_rows()}
     out: list[dict[str, Any]] = []
     for row in params._rows():
         name = row.get("参数名称") or ""
@@ -171,6 +185,7 @@ def _param_items(params) -> list[dict[str, Any]]:
         item = {
             "kind": "parameter",
             "name": name,
+            "pid": pids.get(name),
             "code": row.get("参数编号"),
             "unit": row.get("单位"),
             "default": row.get("默认值"),
