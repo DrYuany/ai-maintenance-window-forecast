@@ -89,6 +89,68 @@ def test_linear_with_non_constant_coef_rejected() -> None:
     assert any("系数必须有限常数" in e for e in errors)
 
 
+def test_linear_cannot_reference_kernel_metrics() -> None:
+    """「完工时间不能晚于11月20日」这类句子过去会被判成"能跑"，其实跑不了。
+
+    最后完工时间/总经济成本/现金支出由求解内核的 metrics 直接提供，只有**目标**
+    物化得出来；生成器算不了它。校验器原来只说"形式已实现"就放行，
+    于是 validator 说没事、verify 判通过，到执行侧才抛
+    `原型不支持的形式 'metrics'`——用户看到的是失败，前面三道判据全说好。
+    """
+    errors = validate_dsl({"constraints": [{
+        "type": "linear", "op": "<=", "value": 1795161600,
+        "terms": [[1, "最后完工时间"]],
+    }]})
+    assert any("只能在目标里引用" in e for e in errors)
+
+
+def test_linear_cannot_reference_kernel_metrics_via_triple() -> None:
+    errors = validate_dsl({"constraints": [{
+        "type": "linear", "op": "<=", "value": 1,
+        "terms": [[1, {"form": "metrics"}]],
+    }]})
+    assert errors
+
+
+def test_linear_over_count_quantity_still_passes() -> None:
+    """收紧归收紧，能用 linear 的那些不能跟着被误伤。"""
+    assert validate_dsl({"constraints": [{
+        "type": "linear", "op": ">=", "value": 4,
+        "terms": [[1, "高严重完成数"]],
+    }]}) == []
+
+
+def test_must_can_target_a_whole_severity_by_filter() -> None:
+    """「严重故障11月8日前必须修完」需要 must 按维度批量。
+
+    只写 deadline 的话，排不下的任务会有零个候选、从"必须排进去"的名单里消失，
+    求解报 FEASIBLE，未安排里躺着四个高危任务——用户说的是"必须修完"。
+    """
+    assert validate_dsl({"constraints": [
+        {"type": "must", "filter": {"severity": "高"}},
+    ]}) == []
+
+
+def test_must_without_task_or_filter_rejected() -> None:
+    errors = validate_dsl({"constraints": [{"type": "must"}]})
+    assert any("需要 task 或 filter" in e for e in errors)
+
+
+def test_must_with_both_task_and_filter_rejected() -> None:
+    errors = validate_dsl({"constraints": [
+        {"type": "must", "task": "任务001", "filter": {"severity": "高"}},
+    ]})
+    assert any("只能给一个" in e for e in errors)
+
+
+def test_must_filter_rejects_candidate_level_dims() -> None:
+    """day/window/line 是候选的属性，不是任务的属性，筛不了。"""
+    errors = validate_dsl({"constraints": [
+        {"type": "must", "filter": {"day": "2026-11-03"}},
+    ]})
+    assert any("只支持 task/severity/turbine/part" in e for e in errors)
+
+
 def test_negative_weight_rejected() -> None:
     errors = validate_dsl({"objectives": [{"type": "weighted", "weights": {"完成任务数": -1.0}}]})
     assert any("权重" in e for e in errors)

@@ -24,6 +24,30 @@ from .registry.entities import resolve_minute, resolve_task
 
 MONEY = 1_000_000  # 微元，与 product_planner.MONEY 一致
 
+# must 按维度批量时允许的过滤键：只留任务行本身就有的字段。
+# day/window/line 是**候选**的属性（同一个任务可以排在不同天/窗/线），
+# 拿来筛任务没有意义，给了就明确报错，不要猜。
+_MUST_FILTERS = frozenset({"task", "severity", "turbine", "part"})
+
+
+def _task_matches(task: dict, filter_spec: dict, data) -> bool:
+    for dim, value in filter_spec.items():
+        if dim == "task":
+            ok = task["任务编号"] == value
+        elif dim == "severity":
+            ok = task["严重等级"] == value
+        elif dim == "turbine":
+            ok = task["风机编号"] == value
+        elif dim == "part":
+            part = data.parts.get(task["部件编号"])
+            ok = value in (task["部件编号"], task.get("部件名称"),
+                           part["部件名称"] if part else None)
+        else:  # pragma: no cover - 调用方已拦
+            return False
+        if not ok:
+            return False
+    return True
+
 
 def _scale_of_coeff(coeff: str) -> int:
     if coeff in ("finish", "start", "day"):
@@ -117,10 +141,26 @@ def compile_constraint(
     ctype = spec["type"]
     errors: list[str] = []
     if ctype == "must":
-        task = resolve_task(data, spec["task"])
-        terms = generator.per_task_terms(cands, task, "day", data)  # 系数无关，只取变量
-        variables = [choices[i][1] for _c, i in terms]
-        model.Add(sum(variables) == 1)
+        if "task" in spec:
+            targets = [resolve_task(data, spec["task"])]
+        else:
+            # 按维度批量："高严重故障全都要修"。
+            #
+            # 目标**从任务表枚举，不从候选枚举**——这是关键。候选是按截止日期
+            # 生成的（product_planner.candidates 里 hi = min(窗口结束, 截止分钟)），
+            # 一个任务若在截止前干不完，就一个候选都生不出来，于是它从"必须排进去"
+            # 的名单里悄悄消失，求解还报 FEASIBLE，未安排列表里躺着四个高危任务。
+            # 从任务表枚举，这种任务会得到空变量表 → Add(0 == 1) → 明确的 INFEASIBLE。
+            filter_spec = spec.get("filter") or {}
+            unsupported = set(filter_spec) - _MUST_FILTERS
+            if unsupported:
+                return [f"must 的 filter 只支持 {sorted(_MUST_FILTERS)}，收到 {sorted(unsupported)}"]
+            targets = [t["任务编号"] for t in data.tasks if _task_matches(t, filter_spec, data)]
+            if not targets:
+                return [f"must 的 filter {filter_spec!r} 没有匹配到任何任务"]
+        for task in targets:
+            variables = [choices[i][1] for _c, i in generator.per_task_terms(cands, task, "day", data)]
+            model.Add(sum(variables) == 1)
     elif ctype == "exclude":
         task = resolve_task(data, spec["task"])
         terms = generator.per_task_terms(cands, task, "day", data)

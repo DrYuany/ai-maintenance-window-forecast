@@ -11,7 +11,10 @@ OPS: tuple[str, ...] = ("<=", ">=", "==")
 
 CONSTRAINT_PRIMITIVES: dict[str, dict] = {
     # 选择维度
-    "must":            {"required": ["task"]},
+    # must 两种写法：点名一个任务（task），或按过滤维度批量（filter）。
+    # 批量那条是补一个真实的坑：「严重故障11月8日前必须修完」——只写 deadline
+    # 会让排不下的任务静默进"未安排"，加上 must 才是"要么修完、要么明确不可行"。
+    "must":            {"required": [], "optional": ["task", "filter"]},
     "exclude":         {"required": ["task"]},
     "at_most_one":     {"required": ["tasks"]},
     "at_least_one":    {"required": ["tasks"]},

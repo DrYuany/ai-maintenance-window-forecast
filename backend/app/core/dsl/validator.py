@@ -187,7 +187,27 @@ def _validate_constraint(spec: Any, data, where: str) -> list[str]:
         elif mode not in prim_reg.COMPILED_CO_OCCUR_MODES:
             errors.append(f"{where}: co_occur 模式 {mode!r} 已登记但原型未实现")
         errors.extend(_check_task_list(spec.get("tasks"), data, where))
-    if ctype in ("must", "exclude", "deadline", "earliest", "fix"):
+    if ctype == "must":
+        # 二选一：点名任务，或按维度批量。两个都给会让人分不清"到底必须哪些"，
+        # 两个都不给等于"全部必须"——那更像 card.>=N 或别的原语，不该从这里混进来。
+        has_task, has_filter = "task" in spec, "filter" in spec
+        if has_task and has_filter:
+            errors.append(f"{where}: must 的 task 与 filter 只能给一个")
+        if not has_task and not has_filter:
+            errors.append(f"{where}: must 需要 task 或 filter 之一")
+        if has_task:
+            errors.extend(_check_task_ref(spec.get("task"), data, where))
+        if has_filter:
+            errors.extend(_check_filter(spec.get("filter"), where))
+            # must 是"哪些任务必须做"，只能按任务行自己的属性筛；
+            # day/window/line 是候选的属性，一个任务可以有多个候选，筛它没有意义。
+            unsupported = set(spec.get("filter") or {}) - {"task", "severity", "turbine", "part"}
+            if unsupported:
+                errors.append(
+                    f"{where}: must 的 filter 只支持 task/severity/turbine/part，"
+                    f"不支持 {sorted(unsupported)}"
+                )
+    if ctype in ("exclude", "deadline", "earliest", "fix"):
         errors.extend(_check_task_ref(spec.get("task"), data, where))
     if ctype == "precedence":
         errors.extend(_check_task_ref(spec.get("before"), data, where))
@@ -315,7 +335,32 @@ def _check_quantity(ref: Any, where: str) -> list[str]:
             errors.append(f"{where}: 未知系数 {coeff!r}，允许 {qty_reg.COEFFS}")
         errors.extend(_check_filter(resolved.get("filter", {}), where))
         return errors
+    if isinstance(resolved, tuple):
+        # 具名量展开成 (form, coeff, filter)：同样要过形式与过滤维度这两道。
+        # 不查的话，将来往 NAMED_QUANTITIES 里加一个 max 形式的糖，
+        # 校验器会一路放行，到生成器才报"原型未实现"。
+        form, coeff, flt = (list(resolved) + ["one", {}])[:3]
+        errors = []
+        if form not in qty_reg.FORMS:
+            errors.append(f"{where}: 未知数学形式 {form!r}，允许 {qty_reg.FORMS}")
+        elif form not in qty_reg.IMPLEMENTED_FORMS:
+            errors.append(f"{where}: 形式 {form!r} 已登记但原型未实现")
+        if coeff != "one" and coeff not in qty_reg.COEFFS:
+            errors.append(f"{where}: 未知系数 {coeff!r}，允许 {qty_reg.COEFFS}")
+        errors.extend(_check_filter(flt, where))
+        return errors
     return []
+
+
+def _quantity_form(ref: Any) -> str | None:
+    """量引用解析出来的数学形式；具名量回元组、三元组回 dict，这里统一成字符串。"""
+    resolved = qty_reg.resolve_quantity(ref)
+    if isinstance(resolved, tuple) and resolved:
+        return str(resolved[0])
+    if isinstance(resolved, dict):
+        form = resolved.get("form")
+        return str(form) if form is not None else None
+    return None
 
 
 def _check_linear_terms(terms: Any, where: str) -> list[str]:
@@ -331,4 +376,14 @@ def _check_linear_terms(terms: Any, where: str) -> list[str]:
         if isinstance(coef, bool) or not isinstance(coef, (int, float)) or not math.isfinite(float(coef)):
             errors.append(f"{where}.terms[{i}]: 系数必须有限常数，收到 {coef!r}")
         errors.extend(_check_quantity(ref, f"{where}.terms[{i}]"))
+        # metrics 形式的量（最后完工时间、总经济成本、现金支出）由求解内核的
+        # metrics dict 直接提供，只有**目标**物化得出来；生成器算不了它。
+        # 放行会让"完工时间不能晚于11月20日"这种句子：validator 说能跑、
+        # 验收判过，到执行侧才炸「原型不支持的形式 'metrics'」——
+        # 三处判据三套答案，最后是用户在界面上看到失败。
+        if _quantity_form(ref) == "metrics":
+            errors.append(
+                f"{where}.terms[{i}]: {ref!r} 由求解内核直接提供，只能在目标里引用；"
+                "linear 约束编译不了它（想表达整体完工期限，目前没有对应原语）"
+            )
     return errors
