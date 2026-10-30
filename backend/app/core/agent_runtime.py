@@ -64,7 +64,7 @@ from app.db.models import (
     ModelArtifactRepository,
     VersionRepository,
 )
-from app.schemas.agent import AgentResponse, AssistantMessagePayload, DecisionArtifactPayload, Message, SolveEvidencePayload, SolveJobPayload
+from app.schemas.agent import AgentResponse, AssistantMessagePayload, DecisionArtifactPayload, DegradedPayload, Message, SolveEvidencePayload, SolveJobPayload
 from app.schemas.dashboard import DashboardResponse
 
 
@@ -205,6 +205,24 @@ class AgentRuntime:
             route="unknown",
         )
         self._tls.trace_started = time.monotonic()
+        # 每个回合都从"没有降级"开始。少了这一行，上一轮的降级标记会跟着
+        # 线程活下来，下一轮明明走了模型，界面上仍然挂着"规则兜底"的横幅。
+        self._tls.degraded = None
+
+    def _note_degradation(self, kind: str, message: str, detail: str | None = None) -> None:
+        """记下"这一轮没走模型"。只记第一条——后面那些兜底是它的后果，
+        把五个后果都摆给用户看，反而看不出最开始坏在哪。"""
+        if getattr(self._tls, "degraded", None) is None:
+            self._tls.degraded = DegradedPayload(
+                kind=kind,
+                message=message,
+                detail=(detail or "")[:300] or None,
+            )
+
+    def _take_degradation(self) -> DegradedPayload | None:
+        payload = getattr(self._tls, "degraded", None)
+        self._tls.degraded = None
+        return payload
 
     def _current_trace(self) -> AgentTrace | None:
         return getattr(self._tls, "trace", None)
@@ -226,6 +244,9 @@ class AgentRuntime:
         trace.route = action_type
         trace.latencyMs = round((time.monotonic() - self._tls.trace_started) * 1000, 1)
         trace.model = self.conversation_agent.model
+        degraded = getattr(self._tls, "degraded", None)
+        if degraded is not None:
+            trace.degraded = degraded.kind
         if solve_evidence and solve_evidence.modelFingerprint:
             trace.modelFingerprint = solve_evidence.modelFingerprint
         trace_id = trace.requestId
@@ -428,8 +449,14 @@ class AgentRuntime:
                     latest.activeView,
                     [],
                 )
-            except ConversationAgentError:
-                pass  # 落到确定性兜底
+            except ConversationAgentError as exc:
+                # 以前这里是裸 pass：调用失败静默滑到下面的确定性兜底，
+                # 界面上一模一样，用户分不出"模型听懂了"和"正则猜的"。
+                self._note_degradation(
+                    "agent_unavailable",
+                    "模型这一轮没答上来，下面是规则兜底生成的答复，可能不如模型答得全。",
+                    str(exc),
+                )
 
         compare_reply = self._compare_versions_reply(conversation_id, content, selected_version)
         model_question = detect_model_question(content)
@@ -726,7 +753,12 @@ class AgentRuntime:
                     selected_version=selected_version,
                     sink=sink,
                 )
-            except ConversationAgentError:
+            except ConversationAgentError as exc:
+                self._note_degradation(
+                    "compare_fallback",
+                    "对比问题没能走模型，下面是按版本记录逐项比出来的结果。",
+                    str(exc),
+                )
                 reply = (
                     self._fallback_compare_reply(
                         conversation_id,
@@ -1678,7 +1710,12 @@ class AgentRuntime:
                 selected_version=version,
                 sink=sink,
             )
-        except ConversationAgentError:
+        except ConversationAgentError as exc:
+            self._note_degradation(
+                "model_question_fallback",
+                "模型没能解释这个问题，下面是按模型档案直接读出来的答案。",
+                str(exc),
+            )
             return self._answer_model_question(
                 conversation_id,
                 content,
@@ -2023,4 +2060,5 @@ class AgentRuntime:
             solveEvidence=solve_evidence,
             solveJob=solve_job,
             traceId=trace_id,
+            degraded=self._take_degradation(),
         )

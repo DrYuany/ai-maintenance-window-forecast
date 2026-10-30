@@ -40,6 +40,10 @@ class AgentTrace(BaseModel):
     tokens: dict[str, int] = Field(default_factory=dict)
     modelFingerprint: str | None = None
     latencyMs: float = 0.0
+    # 这一轮是不是走了兜底。空表示正常；有值说明模型的答复没拿到，
+    # 记录的是降级原因（agent_unavailable / model_question_fallback …）。
+    # 有它才能回答"同一个问题昨天好好的今天答得干巴巴"这种问题。
+    degraded: str | None = None
     createdAt: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def add_tool_call(self, record: ToolCallRecord) -> None:

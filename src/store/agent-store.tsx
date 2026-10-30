@@ -22,6 +22,7 @@ import type {
   SolveEvidence,
   SolveJob,
   StageEvent,
+  DegradedPayload,
 } from "@/store/types";
 import { createOfflineDemo, isStandaloneFileProtocol } from "@/store/offline-demo";
 
@@ -45,6 +46,11 @@ interface AgentStoreValue {
   activeJob: SolveJob | null;
   pendingChange: PendingModelChange | null;
   stages: StageEvent[];
+  /**
+   * 这一轮没走成模型时留下的说明，挂在具体那条助手消息上。
+   * 不写进消息正文：正文是产品产出，这条是系统状态，混在一起会被摘抄走。
+   */
+  degraded: (DegradedPayload & { messageId: string }) | null;
   createConversation: () => Promise<void>;
   selectConversation: (conversationId: string) => Promise<void>;
   sendMessage: (
@@ -117,6 +123,7 @@ export function AgentStoreProvider({
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
   const [stages, setStages] = useState<StageEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [degraded, setDegraded] = useState<(DegradedPayload & { messageId: string }) | null>(null);
   const [decisionArtifact, setDecisionArtifact] = useState<DecisionArtifact | null>(offline ? offlineDemo.decisionArtifact : null);
   const [solveEvidence, setSolveEvidence] = useState<SolveEvidence | null>(offline ? offlineDemo.solveEvidence : null);
   const [activeJobs, setActiveJobs] = useState<SolveJob[]>([]);
@@ -242,6 +249,7 @@ export function AgentStoreProvider({
       sendInFlight.current = true;
       setSending(true);
       setError(null);
+      setDegraded(null);
       const optimisticMessage: Message = {
         id: `temp_${Date.now()}`,
         conversationId: currentConversationId,
@@ -273,6 +281,11 @@ export function AgentStoreProvider({
       const applyResponse = async (response: AgentResponse) => {
         setDecisionArtifact(response.decisionArtifact ?? null);
         setSolveEvidence(response.solveEvidence ?? null);
+        setDegraded(
+          response.degraded
+            ? { ...response.degraded, messageId: response.assistantMessage.id }
+            : null,
+        );
         if (response.solveJob) {
           setActiveJobs((previous) => {
             const others = previous.filter((job) => job.id !== response.solveJob!.id);
@@ -597,6 +610,7 @@ export function AgentStoreProvider({
       activeJob,
       pendingChange,
       stages,
+      degraded,
       createConversation,
       selectConversation,
       sendMessage,
@@ -626,6 +640,7 @@ export function AgentStoreProvider({
       activeJob,
       pendingChange,
       stages,
+      degraded,
       loading,
       messages,
       refreshCurrentConversation,

@@ -149,6 +149,23 @@ class SolveJobPayload(BaseModel):
     batchTotal: int | None = None
 
 
+class DegradedPayload(BaseModel):
+    """这一轮没能走模型，答复是确定性兜底。
+
+    为什么要有这个字段：兜底产出的句子看上去和正常答复一模一样（都是完整的
+    中文、都带数字），用户没法分辨"模型读过你的话"和"正则猜的"。以前这里
+    是 `except ConversationAgentError: pass`——调用失败静默滑到兜底，
+    界面上什么痕迹都没有，于是同一个问题时好时坏，还查不出原因。
+
+    kind 是给机器看的（agent_unavailable / model_question_fallback …），
+    message 是给人看的一句话，detail 只放异常摘要，别塞 prompt 或密钥。
+    """
+
+    kind: str
+    message: str
+    detail: str | None = None
+
+
 class AgentResponse(BaseModel):
     assistantMessage: AssistantMessagePayload
     actionType: str
@@ -162,3 +179,4 @@ class AgentResponse(BaseModel):
     solveEvidence: SolveEvidencePayload | None = None
     solveJob: SolveJobPayload | None = None
     traceId: str | None = None
+    degraded: DegradedPayload | None = None

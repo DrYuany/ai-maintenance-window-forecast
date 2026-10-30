@@ -217,6 +217,14 @@ export interface DashboardResponse {
   topRecommendations: CandidateWindow[];
 }
 
+export interface DegradedPayload {
+  /** 机器可读的降级类别，如 agent_unavailable */
+  kind: string;
+  /** 给人看的一句话 */
+  message: string;
+  detail?: string | null;
+}
+
 export interface AgentResponse {
   assistantMessage: {
     id: string;
@@ -226,6 +234,11 @@ export interface AgentResponse {
   };
   actionType: string;
   recommendedView: PageId;
+  /**
+   * 有值说明这一轮没有走成模型，答复是确定性兜底。
+   * 兜底答复和正常答复长得一模一样，不单独标出来用户无从分辨。
+   */
+  degraded?: DegradedPayload | null;
   memoryPatch: Record<string, unknown>;
   newVersions: WindowVersion[];
   candidateWindowPool: CandidateWindow[];

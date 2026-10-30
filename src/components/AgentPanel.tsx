@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Bot,
   ChevronRight,
   History,
@@ -39,6 +40,7 @@ export function AgentPanel() {
     messages,
     loading,
     sending,
+    degraded,
     createConversation,
     selectConversation,
     sendMessage,
@@ -165,6 +167,15 @@ export function AgentPanel() {
                     >
                       {formatTime(message.createdAt)}
                     </div>
+                    {!isUser && degraded?.messageId === message.id ? (
+                      <div
+                        data-testid="degraded-note"
+                        className="mt-2 flex items-start gap-2 rounded-[6px] border border-[#fde68a] bg-[#fffbeb] px-2 py-1.5 text-[12px] leading-4 text-[#92400e]"
+                      >
+                        <AlertTriangle className="mt-[1px] h-3.5 w-3.5 flex-shrink-0" />
+                        <span>{degraded.message}</span>
+                      </div>
+                    ) : null}
                   </div>
 
                   {isUser ? (
