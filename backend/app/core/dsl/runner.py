@@ -43,6 +43,7 @@ def run(
     output: Path | None = None,
     strategy: str = "成本最低优先",
     mode: str = "分层",
+    weights: dict[str, float] | None = None,
     max_tasks: int | None = None,
     partial: bool = False,
 ) -> dict[str, Any]:
@@ -98,6 +99,21 @@ def run(
 
     constraints = dsl.get("constraints") or []
     objectives = dsl.get("objectives") or []
+
+    # 策略 / 权重是**求解器模式**，不是分层目标。先挑出来，否则
+    # stages_builder 会拿 strategy / weighted 去建分层阶段，直接抛
+    # 「已登记但原型未实现编译」——而同一份 DSL 走变更流程
+    # （planning_bridge.dsl_to_request）明明是能跑的。同一个输入两个答案，
+    # 是最难查的一类缺陷：你会以为是模型写错了。
+    # 拆分逻辑只有一份，在 bridge 里；这里只是共用它。
+    from .planning_bridge import split_objectives
+
+    dsl_strategy, dsl_mode, dsl_weights, objectives = split_objectives(objectives)
+    strategy = dsl_strategy or strategy
+    mode = dsl_mode or mode
+    if dsl_weights is not None:
+        weights = dsl_weights
+
     extra = constraints_builder(constraints, data) if constraints else None
     stages = stages_builder(objectives, data) if objectives else None
 
@@ -108,6 +124,7 @@ def run(
         seconds=seconds,
         strategy=strategy,
         mode=mode,
+        weights=weights,
         hint=hint,
         partial=partial,
         extra_constraints=extra,

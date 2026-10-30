@@ -208,28 +208,65 @@ def test_known_gap_value_domain_is_not_caught():
 
 # ── A14：登记了但执行不了的，要能被证伪 ────────────────────────────────────
 
-def test_uncompiled_list_matches_compiler_reality():
-    """A14 里列的"执行时必抛错"必须**真的**抛错。
+def test_uncompiled_list_is_empty_because_everything_runs():
+    """清单必须为空：五个目标原语现在都能执行。
 
-    这条测试是给未来的自己留的：编译器哪天实现了 weighted，
-    它会失败，提醒把 `_UNCOMPILED_OBJECTIVES` 清空、并把表 D 里的项加回去。
-    不这么写，那张表就会变成一份靠记性维护的清单——而记性从来不可靠。
+    这条测试的来历值得记：`weighted` 曾经在这里，因为 `stages_builder` 抛
+    「已登记但原型未实现编译」。后来查清，那不是"编译器没实现"，而是
+    `strategy` / `weighted` **本来就不该走分层那条路**——它们是求解器模式，
+    该落到 mode / weights / strategy 三个字段。`planning_bridge` 一直这么做，
+    `runner.run` 漏了，于是同一份 DSL 走变更流程能跑、走 runner 抛错。
+    补齐 runner 之后清单就空了。
+
+    要是哪天它又非空，说明有人真的加了实现不了的原语，那就得回到
+    「A14 拦一道」的状态，表 D 也要把它排除。这条测试会立刻告诉你。
+    """
+    if verify._UNCOMPILED_OBJECTIVES:
+        builders = {}
+        from app.core.dsl.compiler import stages_builder
+        for name in verify._UNCOMPILED_OBJECTIVES:
+            builder = stages_builder([{"type": name, "weights": {}}], None)
+            try:
+                builder(None, [], None)
+            except ValueError as exc:
+                assert "未实现" in str(exc), f"{name} 抛的是 {exc}"
+                builders[name] = True
+            else:
+                raise AssertionError(
+                    f"编译器已经能执行 {name} 了——请清空 verify._UNCOMPILED_OBJECTIVES")
+        assert builders
+
+
+def test_every_objective_is_handled_somewhere():
+    """每个目标原语都必须**有人管**。
+
+    两条路，必须占一条：
+      - `split_objectives` 把它提成求解器模式（strategy / weighted 这类）
+      - `stages_builder` 能把它建成分层阶段（minimize / maximize / lexmin）
+
+    两边都不管的，就是当年 `weighted` 那个 bug 的形状——校验放行、
+    编译时没人接、求解前炸。这条测试专门盯这个洞。
     """
     from app.core.dsl.compiler import stages_builder
+    from app.core.dsl.planning_bridge import split_objectives
+    from app.core.dsl.registry import primitives as prims
 
-    assert verify._UNCOMPILED_OBJECTIVES, "清单空了就把这条测试删掉"
-    for name in verify._UNCOMPILED_OBJECTIVES:
-        builder = stages_builder([{"type": name, "weights": {}}], None)
+    unhandled = []
+    for name in prims.OBJECTIVE_PRIMITIVES:
+        spec = {"type": name, "name": "成本最低优先",
+                "weights": {"总经济成本": 1.0}, "q": {}, "stages": []}
+        _strategy, _mode, _weights, rest = split_objectives([spec])
+        if not rest:
+            continue                      # 被提成求解器模式，这条路走通了
         try:
-            # 传空 choices：内层先展开候选，再逐条建表达式；weighted 在展开之后、
-            # 建表达式之前就抛，所以空列表足够走到那个分支。
-            builder(None, [], None)
+            stages_builder(rest, None)(None, [], None)
+        except AttributeError:
+            continue                      # 分派对了，是空 model 导致的崩
         except ValueError as exc:
-            assert "未实现" in str(exc), f"{name} 抛的是 {exc}"
-        else:                                    # 没抛 = 编译器实现了
-            raise AssertionError(
-                f"编译器已经能执行 {name} 了——请清空 verify._UNCOMPILED_OBJECTIVES，"
-                f"并把它加回 prompt._TABLE_D_ORDER")
+            unhandled.append(f"{name}: {exc}")
+        else:
+            continue
+    assert not unhandled, f"这些目标原语两边都不管：{unhandled}"
 
 
 def test_table_d_only_lists_executable():
@@ -239,7 +276,17 @@ def test_table_d_only_lists_executable():
     assert "weighted" not in prompt._TABLE_D_ORDER
 
 
-def test_weighted_is_rejected_before_it_reaches_the_solver():
+def test_weighted_is_no_longer_rejected():
+    """`weighted` 曾经被 A14 拦在这里，因为 `stages_builder` 不认它。
+
+    查清之后发现那不是"编译器没实现"——`strategy` / `weighted` 是**求解器模式**，
+    该落到 mode / weights / strategy 三个字段，压根不该进分层阶段。
+    `planning_bridge` 一直这么处理，`runner.run` 漏了这一步。补齐后它真能跑，
+    A14 就不该再拦。
+
+    **继续拦的代价是把一个可用的能力挡在门外**：用户说"严重故障占六成、
+    成本占四成"，系统会回一句"不支持加权"，而它其实支持。
+    """
     product = {
         "route": "dsl",
         "claims": [{"id": 1, "text": "高严重完成数占六成，成本占四成", "kind": "action"}],
@@ -250,4 +297,26 @@ def test_weighted_is_rejected_before_it_reaches_the_solver():
                                 "weights": {"高严重完成数": 0.6, "总经济成本": 0.4}}]},
     }
     codes = _codes(product, "高严重完成数占六成，成本占四成")
-    assert "A14" in codes
+    assert "A14" not in codes
+
+
+def test_a14_gate_still_fires_for_a_genuinely_uncompiled_objective(monkeypatch):
+    """闸门本身必须还能用：往名单里塞一个，A14 立刻要点亮。
+
+    这条防的是"A14 变成永远 pass 的空转判据"。名单清空之后，
+    `check_executable` 在任何输入下都返回 pass —— 看着一直绿，其实什么
+    都没检查。判据这样退化比没有更糟：它让人以为这里有人看着。
+
+    所以必须有一条测试，证明"名单非空时它真的会拦"。
+    """
+    monkeypatch.setitem(verify._UNCOMPILED_OBJECTIVES, "weighted", "测试用：假装不能编译")
+    product = {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "高严重完成数占六成", "kind": "action"}],
+        "fills": [],
+        "unassigned": [],
+        "dsl": {"objectives": [{"type": "weighted",
+                                "weights": {"高严重完成数": 0.6}}]},
+    }
+    codes = _codes(product, "高严重完成数占六成")
+    assert "A14" in codes, "名单非空时 A14 还不亮，这道闸门已经失效了"

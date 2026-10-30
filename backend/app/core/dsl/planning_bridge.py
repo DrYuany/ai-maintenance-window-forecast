@@ -77,6 +77,41 @@ def request_to_dsl(request: PlanningRequest) -> dict[str, Any]:
     return dsl
 
 
+def split_objectives(
+    objectives: list[dict[str, Any]],
+) -> tuple[str | None, str | None, dict[str, float] | None, list[dict[str, Any]]]:
+    """把 objectives 拆成（策略, 模式, 权重, 真正的分层目标）。
+
+    `strategy` 和 `weighted` 不是"分层目标"——它们是求解器模式，
+    该落到 PlanningRequest 的 strategy / mode / weights 三个字段；
+    剩下的 minimize / maximize / lexmin 才是 stages_builder 的活。
+
+    **这个拆分只能有一份实现。** 此前 bridge 自己写了一版、runner 完全没做，
+    于是同一份 DSL 在变更流程里能跑、在 runner（评测和执行侧）里直接
+    抛「目标 weighted 已登记但原型未实现编译」。同一个输入两个答案，
+    是最难查的一类 bug——你会以为是模型写错了。
+
+    返回 None 表示这条 DSL 没提这件事，调用方应保留自己的默认值。
+    """
+    strategy: str | None = None
+    mode: str | None = None
+    weights: dict[str, float] | None = None
+    rest: list[dict[str, Any]] = []
+    for spec in objectives:
+        otype = spec.get("type")
+        if otype == "strategy":
+            if spec.get("name"):
+                strategy = str(spec["name"])
+            if spec.get("mode"):
+                mode = str(spec["mode"])
+        elif otype == "weighted":
+            mode = "加权"
+            weights = {str(k): float(v) for k, v in (spec.get("weights") or {}).items()}
+        else:
+            rest.append(spec)
+    return strategy, mode, weights, rest
+
+
 def dsl_to_request(
     dsl: dict[str, Any],
     base: PlanningRequest | None = None,
@@ -92,23 +127,16 @@ def dsl_to_request(
     timeline: list[dict[str, Any]] = []
 
     objectives = dsl.get("objectives") or []
-    custom_objectives: list[dict[str, Any]] = []
-    for spec in objectives:
-        otype = spec.get("type")
-        if otype == "strategy":
-            request = replace(
-                request,
-                strategy=str(spec.get("name") or request.strategy),
-                mode=str(spec.get("mode") or request.mode),
-            )
-        elif otype == "weighted":
-            request = replace(
-                request,
-                mode="加权",
-                weights={str(k): float(v) for k, v in (spec.get("weights") or {}).items()},
-            )
-        else:
-            custom_objectives.append(spec)
+    # 策略/权重是求解器模式，不是分层目标——拆分逻辑与 runner 共用这一份
+    dsl_strategy, dsl_mode, dsl_weights, custom_objectives = split_objectives(objectives)
+    if dsl_strategy or dsl_mode:
+        request = replace(
+            request,
+            strategy=dsl_strategy or request.strategy,
+            mode=dsl_mode or request.mode,
+        )
+    if dsl_weights is not None:
+        request = replace(request, mode="加权", weights=dsl_weights)
 
     overrides = dict(request.overrides)
     relative = dict(request.relative_overrides)

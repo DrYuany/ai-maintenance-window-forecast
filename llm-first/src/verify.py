@@ -1123,16 +1123,19 @@ def check_reject_scope(utterance: str, product: dict[str, Any]) -> Check:
 
 # ── A14 可执行性 ────────────────────────────────────────────────────────────
 # 登记了、能过校验、但执行时抛错的原语。这是"51 项宣称 / 16 项生效"的另一种形态：
-# 校验器认识 `weighted`，编译器却不认，于是它一路绿灯走到求解，然后在
-# `stages_builder` 里抛 "目标 weighted 已登记但原型未实现编译"。
+# 校验器认识它，编译器却不认，于是它一路绿灯走到求解，然后在 `stages_builder`
+# 里抛「已登记但原型未实现编译」。
 #
-# **这张表要能被证伪。** `tests/test_taxonomy.py` 里有一条测试会真去调编译器，
-# 编译器哪天实现了 weighted，那条测试就会失败，提醒把这里清空——
-# 而不是靠谁记得回来改。
-_UNCOMPILED_OBJECTIVES: dict[str, str] = {
-    "weighted": "原型未实现编译（compiler.stages_builder 会直接抛错）；"
-                "要权重改用 lexmin 或多个 minimize",
-}
+# **现在是空的，而且应该保持空。** `weighted` 原本在这里：`stages_builder` 不认它，
+# 但真正的原因不是"编译器没实现"，而是**它根本不该走分层那条路**——
+# `strategy` 和 `weighted` 是求解器模式（落到 mode/weights/strategy 三个字段），
+# 只有 minimize/maximize/lexmin 才是分层目标。`planning_bridge.dsl_to_request`
+# 一直是这么处理的，`runner.run` 漏了这一步，于是同一份 DSL 走变更流程能跑、
+# 走 runner 抛错。补齐 runner 之后，五个目标原语全部可执行。
+#
+# **这张表要能被证伪。** `tests/test_taxonomy.py` 里那条测试会真去调编译器：
+# 名单里的必须真抛，名单外的必须真能跑。编译器哪天真的退化或新增，它会红。
+_UNCOMPILED_OBJECTIVES: dict[str, str] = {}
 
 
 def check_executable(product: dict[str, Any]) -> Check:
