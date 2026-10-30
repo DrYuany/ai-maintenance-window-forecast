@@ -10,8 +10,10 @@
 """
 from __future__ import annotations
 
+import datetime as dt
 import re
 
+import context as session
 import prompt
 from app.core.dsl.registry import parameters as param_reg
 
@@ -174,3 +176,93 @@ def test_every_action_claim_needs_a_home():
     assert len(a2) == 1
     assert "`action` claim 都有归宿" in a2[0]
     assert "claim 数 = fills" not in text
+
+
+# ── 提示词缓存：静态前缀 ──────────────────────────────────────────────────
+# LLM 的提示词缓存只认前缀，开头一动后面全部重新读。
+# 这组测试守的是"会变的内容必须排在最后"——它不像缺点 committees 那样会报错，
+# 只会让人在几百块钱的账单上发现（或者压根发现不了），所以只能靠测试盯着。
+
+_STATIC = [name for name, varies, _fn in prompt.SECTIONS if not varies]
+_VARYING = [name for name, varies, _fn in prompt.SECTIONS if varies]
+
+
+def test_varying_sections_are_all_at_the_tail():
+    """标了"会变"的段必须连在最后，中间不许夹静态段。"""
+    assert _VARYING, "一段都没标 True，多半是新加的变量段忘了标注"
+    flags = [varies for _n, varies, _fn in prompt.SECTIONS]
+    first_true = flags.index(True)
+    assert all(flags[first_true:]), f"静态段夹在变量段后面了：{flags}"
+
+
+def test_static_sections_are_byte_identical_across_days():
+    """换三个相差很远的基准日，静态段必须逐字相同。
+
+    这条是整个缓存优化的核心判据：它不检查"有没有硬编码日期"
+    （格式样例里合法地写着 2026-11-09），它只检查唯一有意义的那件事——
+    **这段会不会跟着基准日变**。会变就说明里面混入了当天的值。
+    """
+    days = (dt.date(2026, 10, 30), dt.date(2026, 11, 15), dt.date(2027, 3, 1))
+    contexts = [session.Context(today=d) for d in days]
+    for name, varies, fn in prompt.SECTIONS:
+        if varies:
+            continue
+        texts = {fn(c) for c in contexts}
+        assert len(texts) == 1, f"「{name}」标着静态却跟着基准日变：{texts}"
+
+
+def test_no_today_leaked_into_static_prefix():
+    """拿一个荒谬的未来年份当基准，静态段里不该出现它。
+
+    这是上一条的补刀：上面那条抓不到"硬编码了某个具体日期"，
+    这条按 '今天' 的实际取值抓——今天要是被拼进了静态段，年份必然露出来。
+    """
+    ctx = session.Context(today=dt.date(2030, 1, 1))
+    prefix = "\n\n".join(fn(ctx) for name, varies, fn in prompt.SECTIONS if not varies)
+    leaked = re.findall(r"202\d|203\d", prefix)
+    # 参考表与格式样例里有 2026-11-09 这种写法是合法的（它不跟着今天变），
+    # 所以只盯着 2030——基准日自己的年份。
+    assert "2030" not in prefix, f"静态段里漏出了基准年份 2030：{leaked}"
+
+
+def test_static_prefix_carries_most_of_the_prompt():
+    """前缀占比要够高，否则这次挪动白干了。
+
+    改之前 "今天" 排第 2 位，静态前缀只有 356 字符（约 2%）。
+    这里卡 80%，是给后来者留的一把尺子：往静态区里塞变量，这个数就会掉下来。
+    """
+    cache = prompt.cache_stats()
+    assert cache["前缀占比"] >= 80, f"静态前缀只占 {cache['前缀占比']}%，太低了：{cache}"
+
+
+def test_baseline_and_params_still_reach_the_model():
+    """顺序挪了，东西不能少。这条防的是"优化缓存时整段忘了挪回来"。
+
+    具体日期、换算结果、现值表这三样缺一样，模型就只能靠猜——
+    而它猜出来的日期我们还正好依赖 baseline 才能核对，等于把 A4 判据废掉。
+    """
+    ctx = session.with_params_for(session.Context(today=dt.date(2026, 10, 30)))
+    text = prompt.build(ctx)
+    assert "今天是 2026-10-30" in text
+    assert "明天=2026-10-31" in text
+    # 认现值表**自己的表头**，不能认栏目名——"船舶日租金"在表 A 里本来就有，
+    # 整段现值表被删掉之后它照样搜得到。
+    assert "| 参数 | 现值 | 单位 |" in text
+    # 认**标题**，不能只认字面——正文里别处也会引用"本轮的基准"这五个字，
+    # 整段被删掉的那次实测里它还照样能搜到，测试会假通过。
+    assert "\n# 本轮的基准\n" in text
+    assert text.index("\n# 日期怎么定") < text.index("\n# 本轮的基准")
+
+
+def test_rule_block_points_at_the_tail_section():
+    """静态段挪到前面之后，原来的"上一节"指代就不成立了。
+
+    静态段在正文第 2 位，而基准值在文末——如果口径段还说"见上一节"，
+    模型往回找不到，就只能自己填一个日期。这条守的就是这个指代。
+    """
+    rule = session.Context(today=dt.date(2026, 10, 30)).rule_block()
+    assert "上一节" not in rule
+    assert "文末" in rule
+    steps = prompt.step_block()
+    assert "按上一节的基准" not in steps
+    assert "文末" in steps

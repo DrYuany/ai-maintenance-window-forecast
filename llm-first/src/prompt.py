@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import datetime as _dt
 import sys
 from pathlib import Path
 
@@ -314,17 +315,14 @@ def job_block() -> str:
 所以宁可少填一条并说明原因，也不要填一条自己都对不上的。"""
 
 
-def today_block(ctx: "session.Context") -> str:
-    """基准日期 + 现值。放在岗位之后、步骤之前——它影响"值填多少"，必须在动手前就知道。
+def _date_rule_block(ctx: "session.Context") -> str:
+    """日期口径的**静态**半截。留在前面，因为它逐字不变。"""
+    return ctx.rule_block()
 
-    两段合在一起，因为它们回答的是同一个问题：**这个值该填多少**。
-    分开写的话，模型会把"现值"当成参考资料，而不是"相对改动的起点"。
-    """
-    blocks = ["# 今天几号", "", ctx.explain()]
-    param = ctx.param_block()
-    if param:
-        blocks += ["", param]
-    return "\n".join(blocks)
+
+def _today_values_block(ctx: "session.Context") -> str:
+    """本轮基准 + 现值 + 窗口起止。**排在最后**，因为它每轮都可能变。"""
+    return ctx.values_block()
 
 
 def step_block() -> str:
@@ -387,7 +385,7 @@ def step_block() -> str:
 **日期字段只收日期。** `day` / `dates` / `start` / `finish` / `deadline` / `at` 这些键，
 要么写 `2026-11-09`、`2026-11-09T08:00:00+08:00`，要么写 `11月9日`；
 把"明天""下周一""月底"原样写进去等于没落地——那不是"没编造"，那是把没定的事说成定了。
-"明天"这类说法按上一节的基准换算成具体日期再写，`calc` 里说明怎么算的。
+能算的按文末「本轮的基准」那段换算成具体日期再写，`calc` 里说明怎么算的；算不出来的按"日期怎么定"那节处理。
 
 `unassigned` 每条交三样：claim 编号、`reason`、`note`。`reason` 只有三种：
 
@@ -471,10 +469,7 @@ def syntax_block() -> str:
 `F03`、`风机3` 都是 **风机003**；`W02`、`窗口2` 都是 **窗口02**。
 **但 `claim.text` 仍然照抄原文**（原文写 T01 就抄 T01）——归一只发生在 `value` 里。
 
-**只说"几号"没给月份**：取基准日之后**最近的那个**该日，"最近"是唯一答案。
-基准 10-30 时说"六号"，就是 11月6日；说"30号"就是 10月30日当天。
-**不许把更远的同号日子当成"另一种可能"**——11月6日和12月6日里只有前者是"最近"，
-再问一句"您说的是11月还是12月"是把确定的事说成不确定的。
+**只说"几号"没给月份**：按「日期怎么定」那节取基准日之后**最近**的那个，别反问是几月。
 
 **时刻可能是 12 小时制**：「下午6点」→ `18:00`；「晚上8点」→ `20:00`；
 「中午12点」→ `12:00`；「早上7点」→ `07:00`。直接写 6:00 会把收工时间提前 12 小时。
@@ -596,28 +591,99 @@ def reference_block() -> str:
     return "\n\n".join(blocks)
 
 
-SECTIONS: tuple[tuple[str, callable], ...] = (
-    ("岗位", lambda _ctx: job_block()),
-    ("今天", today_block),
-    ("工具性质（积木段）", lambda _ctx: capability_block()),
-    ("干活步骤", lambda _ctx: step_block()),
-    ("验收单", lambda _ctx: audit_block()),
-    ("交卷格式", lambda _ctx: output_block()),
-    ("写法", lambda _ctx: syntax_block()),
-    ("参考表 A~F", lambda _ctx: reference_block()),
+# ── 段落顺序 ────────────────────────────────────────────────────────────────
+# 这条顺序有一条硬规矩（跟 Codex 那边的做法一样）：
+#
+#     **逐字不变的内容排前面，会变的排最后。**
+#
+# LLM 的提示词缓存**只认前缀**：开头第 N 个字一变，后面全部重新读一遍、重新计费。
+# "今天几号""现在是多少"每轮都不一样，原先它排第 2 位，
+# 后面一万两千多字全被它拖着变——多轮追问时缓存命中率几乎是零。
+# 挪到最后，静态前缀就能跨轮复用。
+#
+# 第二列就是这条规矩：`False` 表示这段必须逐字不变，`True` 表示它每轮可能变。
+# 做成数据而不是靠人记，是为了让 `prefix_check()` 能一直盯着——
+# 谁往静态段里塞一个今天，测试立刻红。
+SECTIONS: tuple[tuple[str, bool, callable], ...] = (
+    # ── 静态前缀段（可缓存区）──────────────────────────────────────────
+    ("岗位", False, lambda _ctx: job_block()),
+    ("日期怎么定", False, _date_rule_block),
+    ("工具性质（积木段）", False, lambda _ctx: capability_block()),
+    ("干活步骤", False, lambda _ctx: step_block()),
+    ("验收单", False, lambda _ctx: audit_block()),
+    ("交卷格式", False, lambda _ctx: output_block()),
+    ("写法", False, lambda _ctx: syntax_block()),
+    ("参考表 A~F", False, lambda _ctx: reference_block()),
+    # ── 变量后缀段（每轮都会变，必须在最后）───────────────────────────
+    ("本轮基准与现值", True, _today_values_block),
 )
 
 
 def build(ctx: "session.Context | None" = None) -> str:
     """`ctx` 是会话基准（今天几号）。不给就用系统日期——**但调用方应当显式给**：
     同一句"明天"在不同日期该落成不同日期，提示词里不写清楚，模型的换算就是瞎猜。"""
-    ctx = ctx or session.default()
-    return "\n\n".join(fn(ctx) for _name, fn in SECTIONS)
+    ctx = ctx or session.with_params_for(session.default())
+    return "\n\n".join(fn(ctx) for _name, _varies, fn in SECTIONS)
 
 
 def stats(ctx: "session.Context | None" = None) -> list[tuple[str, int]]:
-    ctx = ctx or session.default()
-    return [(name, len(fn(ctx))) for name, fn in SECTIONS]
+    ctx = ctx or session.with_params_for(session.default())
+    return [(name, len(fn(ctx))) for name, _varies, fn in SECTIONS]
+
+
+def cache_stats(ctx: "session.Context | None" = None) -> dict[str, int]:
+    """静态前缀占整份提示词的比例。这是唯一能证明"缓存有没有用"的数字。
+
+    光说一句"缓存命中了"容易糊弄——改个顺序就说优化了，谁也没量过。
+    前缀占比是能称的：改前改后各取一次，涨没涨一目了然。
+    """
+    ctx = ctx or session.with_params_for(session.default())
+    prefix = 0
+    for _name, varies, fn in SECTIONS:
+        if varies:
+            break
+        prefix += len(fn(ctx)) + len("\n\n")
+    total = len(build(ctx))
+    return {"静态前缀": prefix, "合计": total,
+            "前缀占比": round(prefix * 100 / total) if total else 0}
+
+
+def prefix_check() -> list[str]:
+    """守住"静态段不许变"这条规矩。两件事都不靠自觉：
+
+      1. 标了 False 的段，换成别的基准日生成必须逐字相同
+      2. 变量段必须是最后一段——后面再插静态段，前缀就断在那儿了
+
+    历史上这类规矩全是靠注释提醒的，没人看得住；这里让它进 `self_check()`，
+    跟"51 项宣称 / 16 项生效"用的是同一道闸门。
+    """
+    problems: list[str] = []
+    days = (_dt.date(2026, 10, 30), _dt.date(2026, 11, 15), _dt.date(2027, 3, 1))
+    contexts = [session.Context(today=d) for d in days]
+
+    for name, varies, fn in SECTIONS:
+        if varies:
+            continue
+        texts = {fn(c) for c in contexts}
+        if len(texts) > 1:
+            problems.append(f"「{name}」段标的是静态，但换基准日就变了——"
+                            "里面混进了跟着日期走的内容")
+
+    varying = [i for i, (_n, v, _f) in enumerate(SECTIONS) if v]
+    static_tail = [i for i in range((varying[-1] if varying else -1) + 1, len(SECTIONS))]
+    if static_tail:
+        names = "、".join(SECTIONS[i][0] for i in static_tail)
+        problems.append(f"静态段「{names}」排在变量段后面，前缀缓存会在那里断掉")
+
+    # 反过来也不能漏：变量段绝不能在静态段之前就该报错（上面已查），
+    # 这里再核一次"前缀是不是真的能用"——纯静态（无参数）时也不能出岔子。
+    try:
+        ratio = cache_stats(contexts[0])["前缀占比"]
+        if ratio >= 100:
+            problems.append("整份提示词都标成了静态——多半是哪段忘了标 True")
+    except Exception as exc:
+        problems.append(f"算前缀占比失败：{exc}")
+    return problems
 
 
 # ── 自检：防"手抄清单漂移" ──────────────────────────────────────────────────
@@ -626,6 +692,7 @@ def stats(ctx: "session.Context | None" = None) -> list[tuple[str, int]]:
 # 这里的断言就是那道比对。
 def self_check() -> list[str]:
     problems: list[str] = []
+    problems += prefix_check()
 
     listed = {name for _g, names in _TABLE_A_GROUPS for name in names}
     actual = {row["参数名称"] for row in param_reg._rows()
@@ -673,12 +740,17 @@ def main(argv: list[str]) -> int:
             print("  -", p, file=sys.stderr)
         return 1
     if "--stats" in argv:
-        for name, size in stats():
+        ctx = session.with_params_for(session.default())
+        for name, size in stats(ctx):
             print(f"{size:>6}  {name}")
-        print(f"{len(build()):>6}  合计")
+        print(f"{len(build(ctx)):>6}  合计")
+        cache = cache_stats(ctx)
+        print(f"\n静态前缀 {cache['静态前缀']}/{cache['合计']} 字符"
+              f"（{cache['前缀占比']}%）——这一段跨轮可被缓存复用")
         return 0
-    print(build())
-    print(f"\n=== 合计 {len(build())} 字符 / 自检通过 ===", file=sys.stderr)
+    text = build()
+    print(text)
+    print(f"\n=== 合计 {len(text)} 字符 / 自检通过 ===", file=sys.stderr)
     return 0
 
 

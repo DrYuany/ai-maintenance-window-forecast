@@ -132,28 +132,54 @@ class Context:
                 return hit.isoformat()
         return f"{day}号不存在"
 
-    def explain(self) -> str:
-        """给提示词的一段：基准 + 换算表 + 换算不出怎么办。"""
+    def rule_block(self) -> str:
+        """日期口径里**逐字不变**的那部分（"怎么算"的规矩）。
+
+        拆出来只有一个理由：LLM 的提示词缓存**只认前缀**，开头第 N 个字一变，
+        后面全部重新读一遍。"今天是 2026-10-31" 这种话每轮都不一样，
+        混在这一段里会污染后面上万字；具体的值放在 `values_block()`。
+
+        写这段的铁律：**不许出现任何具体日期**。
+        `tests/test_prompt.py` 有一条测试拿两个不同的基准日各生成一遍，
+        这段必须逐字相同——谁往里塞一个今天就会红。
+        """
+        return (
+            "# 日期怎么定\n\n"
+            "日期字段**只收具体日子**。`day` / `dates` / `start` / `finish` / `deadline` / `at` "
+            "这些键不接受「明天」「月底」「下周」这种说法——把没定的事写成定了，比说不懂更糟。\n\n"
+            "| 原文的说法 | 怎么办 |\n|---|---|\n"
+            "| 今天／明天／后天／大后天、下周X、本周X | 本轮基准和换算结果在文末"
+            "「本轮的基准」那一段，照抄，并在 `calc` 里写清算式 |\n"
+            "| 只说「几号」没给月份 | 取基准日之后**最近**的那个该日；"
+            "更远的同号日子不算「另一种可能」 |\n"
+            "| 「下周」「月底」「下个月」「下旬」 | 本身有歧义，算不出来。**不要猜**——"
+            "写进 `unassigned`，`reason=need_info`，让用户补一句具体日子 |\n\n"
+            "一次说几个号的，每个都各自按「最近」那一格取。\n\n"
+            "「最近」是唯一答案，别反问。说\"六号\"就是指基准之后最近的那个 6 号，"
+            "再下一个月的 6 号不是\"另一种可能\"——回一句\"您说的是这个月还是下个月\"，"
+            "是把已经确定的事说成不确定的。"
+        )
+
+    def values_block(self) -> str:
+        """本轮的实际基准 + 现值 + 窗口起止。**每轮都可能变**，所以排在提示词最后。"""
         samples = []
         for token in ("今天", "明天", "后天", "大后天"):
-            day = self.resolve(token)
-            samples.append(f"{token}={day.isoformat()}")
+            samples.append(f"{token}={self.resolve(token).isoformat()}")
         monday = self.today - _dt.timedelta(days=self.today.weekday())
-        next_mon = monday + _dt.timedelta(days=7)
-        tail = (f"下周一={next_mon.isoformat()}，"
+        tail = (f"下周一={(monday + _dt.timedelta(days=7)).isoformat()}，"
                 f"本周五={(monday + _dt.timedelta(days=4)).isoformat()}")
-        return (
+        tomorrow = self.resolve("明天").isoformat()
+        blocks = [
+            "# 本轮的基准\n\n"
             f"{self.line()}所有日期都按这个基准换算。\n\n"
-            f"能唯一算出来的：{'、'.join(samples)}；{tail}。\n\n"
-            "**算出来的日期直接写进日期字段**，并在 `calc` 里写清怎么算的，"
-            "例如 `calc=\"明天=2026-10-31\"`。\n\n"
-            "**只说「几号」没给月份的，取基准日之后最近的那个该日**："
-            f"基准 {self.iso} 时说\"六号\"就是 {self.next_day(6)}，"
-            "再往后的同号日子不算\"另一种可能\"。一次说几个号的，每个都按这一条取。\n\n"
-            "**算不出来的不要猜。** \"下周\"\"月底\"\"下个月\"这类说法本身有歧义，"
-            "落成任何具体日期都是编的——写进 `unassigned`，`reason=need_info`，"
-            "让用户补一句具体日子。"
-        )
+            f"这次能直接抄的结果：{'、'.join(samples)}；{tail}。\n\n"
+            f"只说「几号」时：基准 {self.iso}，说\"六号\"就是 {self.next_day(6)}。\n\n"
+            f"抄的时候在 `calc` 里写清怎么算的，例如 `calc=\"明天={tomorrow}\"`。",
+        ]
+        param = self.param_block()
+        if param:
+            blocks.append(param)
+        return "\n\n".join(blocks)
 
 
 def from_iso(text: str | None, *, tz: str = "+08:00") -> Context:
