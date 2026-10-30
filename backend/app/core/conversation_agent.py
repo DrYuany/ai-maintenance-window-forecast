@@ -106,7 +106,16 @@ class ConversationAgent:
         system = self._system_prompt(memory, toolbox, selected_version, snapshot)
         tools = toolbox.tool_specs()
         collected: list[str] = []
+        # 必须原样输出的内容（公式、参数表）。攒着，等模型把这一轮说完再拼上去——
+        # 拿到就 return 会把同一句话里还没做完的事一起丢掉。
+        pending_verbatim: list[str] = []
         tool_used = False
+
+        def _finish() -> str:
+            text = "".join(collected).strip()
+            for block in pending_verbatim:
+                text = f"{text}\n\n{block}" if text else block
+            return text
 
         for round_index in range(self.max_rounds):
             force_tool = (
@@ -138,7 +147,7 @@ class ConversationAgent:
                 block for block in final.content if getattr(block, "type", "") == "tool_use"
             ]
             if not tool_calls:
-                text = "".join(collected).strip()
+                text = _finish()
                 if not text:
                     raise ConversationAgentError("模型没有返回文本")
                 return text
@@ -174,21 +183,27 @@ class ConversationAgent:
                         "content": json.dumps(result, ensure_ascii=False, default=str),
                     }
                 )
-            if verbatim_markdown:
+            if verbatim_markdown and all(b.name in PASSTHROUGH_TOOLS for b in tool_calls):
+                # 这一轮**只**在取原样内容（公式、参数表、环境表）。
+                # 用户问的就是这个，再让模型转一轮只会拖慢并增加改写公式的风险，
+                # 所以直接交卷——这是快路径，也是绝大多数情况。
                 prefix = "".join(collected).strip()
                 return (
                     f"{prefix}\n\n{verbatim_markdown}" if prefix else verbatim_markdown
                 )
+            if verbatim_markdown:
+                # 这一轮除了取原样内容，**还夹着别的诉求**（比如"贴出这版公式，
+                # 再把船租压到8万"）。原来这里也是直接 return，于是后半句当场
+                # 消失，而且没有任何提示——用户以为系统听懂了，只是没做。
+                # 现在存起来，把 tool_result 回喂，等模型把这一轮说完再拼上去。
+                pending_verbatim.append(verbatim_markdown)
             if collected and not collected[-1].endswith("\n\n"):
                 collected.append("\n\n")
                 if on_token:
                     on_token("\n\n")
             messages.append({"role": "user", "content": results})
 
-        text = "".join(collected).strip()
-        if text:
-            return text
-        raise ConversationAgentError("工具调用轮次已用完，仍未得到回答")
+        return _finish()
 
     def summarize(self, messages: list[Message]) -> str | None:
         """用 LLM 把旧消息压缩成自由文本摘要；未启用/失败返回 None，绝不抛。"""
