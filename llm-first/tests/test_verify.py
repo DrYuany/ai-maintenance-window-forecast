@@ -658,3 +658,56 @@ def test_audit_ignores_words_that_only_look_like_numbers():
                            "tasks": ["任务003", "任务005"]}]}),
     ):
         assert verify.audit_numbers(text, dsl)["missing"] == []
+
+
+# ── 13b. A6 多槽位：precedence 的三个槽位不是三个矛盾的值 ──────────────────
+
+def _precedence_product():
+    return {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "先修任务001", "kind": "action"},
+                   {"id": 2, "text": "隔两天再修任务002", "kind": "action"}],
+        "fills": [
+            {"claim": 1, "row": "C03", "span": "先修任务001", "from": "literal",
+             "value": "任务001"},
+            {"claim": 2, "row": "C03", "span": "隔两天再修任务002", "from": "literal",
+             "value": "任务002"},
+            {"claim": 2, "row": "C03", "span": "隔两天", "from": "literal",
+             "value": 2},
+        ],
+        "unassigned": [],
+        "dsl": {"constraints": [{"type": "precedence", "before": "任务001",
+                                 "after": "任务002", "gap": 2}]},
+    }
+
+
+def test_multi_slot_constraint_is_not_a_clash():
+    """`precedence` 有 before/after/gap 三个槽位，一段话填三个值是忠实的。
+
+    修之前 A6 判死：DSL 三个槽位齐备、完全正确，却因为 fills 有三条被判
+    "同一行互相矛盾"，整句降级成 clarify。用户收到的是一句"请说清楚"——
+    而它其实已经说清楚了。实测 C02 稳定 3/3 挂在这上面。
+    """
+    check = verify.verify("先修任务001，隔两天再修任务002", _precedence_product()).get("A6")
+    assert check.verdict == "pass", check.detail
+
+
+def test_parameter_row_still_rejects_two_values():
+    """放宽的只是多槽位积木。参数行仍然严格——那是拧一个旋钮。
+
+    "船租今天说 5 万、明天说 8 万"必须拦得住，否则这次放宽就是把 A6 关掉了。
+    """
+    product = {
+        "route": "dsl",
+        "claims": [{"id": 1, "text": "船租8万", "kind": "action"}],
+        "fills": [
+            {"claim": 1, "row": "P01", "span": "船租8万", "from": "literal",
+             "op": "=", "value": 80000},
+            {"claim": 1, "row": "P01", "span": "船租8万", "from": "literal",
+             "op": "=", "value": 50000},
+        ],
+        "unassigned": [],
+        "dsl": {"parameters": [{"field": "船舶日租金", "op": "=", "value": 80000}]},
+    }
+    check = verify.verify("船租8万", product).get("A6")
+    assert check.verdict == "fail", check.detail

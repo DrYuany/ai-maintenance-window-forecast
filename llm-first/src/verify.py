@@ -778,6 +778,19 @@ def check_single_value(product: dict[str, Any]) -> Check:
         if row is not None and row.kind in _MULTI_VALUE:
             skipped.append(row_id)      # 这一行本来就是一串（lexmin 的阶段）
             continue
+        if row is not None and not row.is_param:
+            # 约束/数据行是**多槽位积木**：`precedence{before,after,gap}` 天然要三个值
+            # 落在同一行，"先修任务001，隔两天再修任务002" 会被切成三条 claim。
+            # 那是三个槽位，不是三个互相矛盾的值。
+            #
+            # 但只放过**标量**——fills 里没记槽位名，"任务001" 和 "任务002" 哪个是
+            # before、哪个是 after，从记录上分不出来，也就证明不了冲突。
+            # dict 照旧合并检查：`{quantity:2}` 和 `{quantity:5}` 是同一个键两个数，
+            # 那是真矛盾，必须拦（见 test_same_key_different_value_is_still_a_clash）。
+            items = [item for item in items if isinstance(item.get("value"), dict)]
+            if not items:
+                skipped.append(row_id)
+                continue
         distinct: list[Any] = []
         merged_keys = False
         for item in items:
