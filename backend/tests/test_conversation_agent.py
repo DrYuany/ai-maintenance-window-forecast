@@ -36,6 +36,7 @@ def test_tool_surface_is_the_whole_product_surface() -> None:
         "read_site",
         "read_jobs",
         "solve",
+        "submit_change",
         "ledger",
     ]
     # 读类工具必须自报"只读"，写类工具（solve 预览、ledger 台账）不能这么标。

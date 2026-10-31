@@ -154,6 +154,7 @@ class AgentToolbox:
         on_pending_change: Callable[[dict[str, Any]], None] | None = None,
         on_tool_trace: Callable[[dict[str, Any]], None] | None = None,
         jobs: SolveJobRepository | None = None,
+        on_submit_change: Callable[[str, dict[str, Any], str], dict[str, Any]] | None = None,
         planner: PlanningIntentCompiler | None = None,
     ) -> None:
         self.conversation_id = conversation_id
@@ -166,6 +167,9 @@ class AgentToolbox:
         # 求解任务仓库：read_jobs 靠它看活，submit_change 靠它派活。
         # 不传就是「这套工具箱没有求解能力」，两个工具会明确说做不到，而不是假装有。
         self.jobs = jobs
+        # 派活的出口交给 runtime——它才拿得到 memory、job_pool 和求解执行体。
+        # 在 toolbox 里另写一套派活逻辑，等于复制出一条迟早会分叉的路。
+        self.on_submit_change = on_submit_change
         self.planner = planner or PlanningIntentCompiler()
         self.pending_change: dict[str, Any] | None = None
         self.ordered = chronological_versions(
@@ -450,6 +454,32 @@ class AgentToolbox:
                 },
             },
             {
+                "name": "submit_change",
+                "description": (
+                    "把上一步 solve 生成的变更预览真正派出去求解。\n"
+                    "**必须先调过 solve**：没有待确认的变更就调它，会被直接拒绝——"
+                    "这是硬规矩，不许凭空发起一次求解。\n"
+                    "只在两种情况下调：\n"
+                    "  ① 用户在同一句话里既说了改什么、又说了直接算"
+                    "（「船租改8万，直接算，不用问我」）；\n"
+                    "  ② 用户回复确认（「算吧」「可以」「开始」）。\n"
+                    "用户只是在问、在犹豫、在比较、在讨价还价时，不许调。\n"
+                    "调完要告诉用户任务号和大概等多久。"
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {
+                            "type": "string",
+                            "description": (
+                                "用户原话里授权这次提交的那一句，原样引用，例如「直接算吧」。"
+                                "写不出这一句，就说明没被授权——那就不要调。"
+                            ),
+                        },
+                    },
+                },
+            },
+            {
                 "name": "ledger",
                 "description": (
                     "业务台账，唯一会写盘的动作。四条路："
@@ -513,6 +543,7 @@ class AgentToolbox:
             "read_site": self._read_site,
             "read_jobs": self._read_jobs,
             "solve": self._solve,
+            "submit_change": self._submit_change,
             "ledger": self._ledger,
         }
         handler = handlers.get(name)
@@ -1606,6 +1637,56 @@ class AgentToolbox:
             },
             version=base,
             next_actions=["等待用户确认；确认前不得声称已求解或已生成方案。"],
+        )
+
+    def _submit_change(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """把待确认的变更真正派出去。
+
+        门槛不是参数，是**状态**：必须先有 pending_change，也就是这一轮
+        已经调过 solve、生成过预览。没有就拒绝。
+
+        为什么卡这条：允许模型凭一句「直接算」凭空发起求解，等于绕开
+        「先看预览再确认」这条线。真排程算一次三分钟、占算力、还会生成
+        新方案并覆盖当前选中版本——这种动作不能是模型自己想起来就做的。
+        """
+        if not self.jobs or not self.on_submit_change:
+            return self._envelope(
+                "unavailable",
+                {"message": "这套工具箱没有接入求解服务，派不出去；变更预览仍然有效。"},
+                warnings=["submit_change 不可用。"],
+                next_actions=["请用户在界面上确认这份变更，由系统发起求解。"],
+            )
+        pending = self.pending_change
+        if not isinstance(pending, dict) or not pending:
+            return self._envelope(
+                "clarify",
+                {"message": "还没有待确认的变更。先调 solve 生成预览，再调这个。"},
+                warnings=["凭空发起求解被拒绝：必须先有变更预览。"],
+                next_actions=["先用 solve 把用户要的改动编译成预览。"],
+            )
+
+        reason = str(arguments.get("reason") or "").strip()
+        try:
+            outcome = self.on_submit_change(self.conversation_id, pending, reason)
+        except Exception as exc:  # noqa: BLE001 - 派活失败不能让整轮对话崩
+            return self._envelope(
+                "error",
+                {"message": f"派活失败：{type(exc).__name__}: {exc}"},
+                warnings=["求解没有启动，当前方案没有变化。"],
+            )
+        if not outcome.get("ok"):
+            return self._envelope(
+                "error",
+                {"message": outcome.get("message") or "派活失败"},
+                warnings=["求解没有启动，当前方案没有变化。"],
+            )
+        return self._envelope(
+            "submitted",
+            {
+                "jobId": outcome.get("jobId"),
+                "message": outcome.get("message") or "已派出，正在后台求解。",
+            },
+            next_actions=["告诉用户任务号和大概要等多久；不要再让用户确认一次。"],
         )
 
     @staticmethod

@@ -208,6 +208,9 @@ class AgentRuntime:
         # 每个回合都从"没有降级"开始。少了这一行，上一轮的降级标记会跟着
         # 线程活下来，下一轮明明走了模型，界面上仍然挂着"规则兜底"的横幅。
         self._tls.degraded = None
+        # 同理：上一轮派出去的求解响应不能留到这一轮。留着的话，下一轮
+        # 模型只是闲聊，也会被那个旧响应顶掉，用户看到的是"求解已启动"。
+        self._tls.submitted_response = None
 
     def _note_degradation(self, kind: str, message: str, detail: str | None = None) -> None:
         """记下"这一轮没走模型"。只记第一条——后面那些兜底是它的后果，
@@ -436,6 +439,13 @@ class AgentRuntime:
                     selected_version=selected_version,
                     sink=sink,
                 )
+                # 这一轮模型真的把活派出去了。那份响应带着 jobId、求解时限，
+                # 还有"超时不会说成无解"那句话——比让模型再转述一遍准，
+                # 所以直接用它，模型的话不再贴一遍（否则用户会看到两段"已启动"）。
+                submitted = getattr(self._tls, "submitted_response", None)
+                if submitted is not None:
+                    return submitted
+
                 latest = self.memories.get_or_create(conversation_id)
                 pending_now = (latest.activeFilters or {}).get("pendingChange")
                 created_now = (
@@ -1250,6 +1260,56 @@ class AgentRuntime:
         )
         return response
 
+    def _submit_pending_change(
+        self,
+        conversation_id: str,
+        pending: dict[str, Any],
+        reason: str,
+    ) -> dict[str, Any]:
+        """模型在循环里请求"把这份变更派出去"。
+
+        走的是和用户点确认**同一套分派**（_start_dsl_solve / _start_planning_solve）。
+        不另写一条：上一轮 DSL 双路径已经证明，同一件事两份实现迟早给出两个答案。
+
+        派成功的那份 AgentResponse 存在 thread-local 上。外层拿到它就直接用——
+        它带着 jobId、求解时限和"超时不会说成无解"那句话，比让模型转述一遍准。
+        """
+        memory = self.memories.get_or_create(conversation_id)
+        content = str(pending.get("sourcePrompt") or "")
+        if reason:
+            # 授权来源进 trace，事后能回答"这次是谁让派的"。
+            trace = getattr(self._tls, "trace", None)
+            if trace is not None:
+                trace.message = f"{trace.message}｜提交依据：{reason}"
+        try:
+            if pending.get("kind") == "dsl":
+                response = self._start_dsl_solve(
+                    conversation_id=conversation_id,
+                    dsl=pending.get("dsl") or {},
+                    content=content,
+                    memory=memory,
+                    base_version_id=pending.get("baseVersionId"),
+                )
+            else:
+                request = PlanningRequest(**pending["request"])
+                response = self._start_planning_solve(
+                    conversation_id=conversation_id,
+                    content=content,
+                    request=request,
+                    memory=memory,
+                )
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"ok": False, "message": f"待确认的变更已经失效：{exc}"}
+
+        self._tls.submitted_response = response
+        job = getattr(response, "solveJob", None)
+        return {
+            "ok": True,
+            "jobId": getattr(job, "id", None),
+            "message": "真实求解已启动，正在后台跑。",
+            "authorizedBy": reason,
+        }
+
     def _resolve_version(
         self,
         conversation_id: str,
@@ -1537,6 +1597,7 @@ class AgentRuntime:
             on_tool=on_tool,
             on_tool_trace=self._record_tool_call,
             jobs=self.jobs,
+            on_submit_change=self._submit_pending_change,
         )
 
     def _answer_with_conversation_agent(
