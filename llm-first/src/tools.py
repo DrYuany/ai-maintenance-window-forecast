@@ -135,6 +135,31 @@ def tool_specs() -> list[dict[str, Any]]:
                 "required": ["query"],
             },
         },
+    }, {
+        "type": "function",
+        "function": {
+            "name": "prepare_change",
+            "description": (
+                "交卷前先自己试一遍：把已经写好的 DSL 交进来，系统拿去校验，"
+                "告诉你哪一条不合法、错在哪个字段。\n"
+                "**这不是提交**——不改数据、不排队、不写库，什么都不会发生，"
+                "想试几次试几次。\n"
+                "拿不准就先试，比交上去被退回来再改一遍便宜。但要清楚："
+                "它检查的是格式（字段名、编号、引用能不能对上），"
+                "不检查「这个值是不是真从用户原话来的」——那部分交卷后才判。\n"
+                "它返回 ok 不等于可以交卷，只等于「这段东西编译得动」。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dsl": {
+                        "type": "object",
+                        "description": "完整的 DSL 对象，和你最终要交的那份一模一样。",
+                    },
+                },
+                "required": ["dsl"],
+            },
+        },
     }]
 
 
@@ -347,7 +372,60 @@ def read_capabilities(arguments: dict[str, Any]) -> dict[str, Any]:
     return {"status": "ok", "data": data}
 
 
-_HANDLERS = {"read_capabilities": read_capabilities}
+def prepare_change(arguments: dict[str, Any]) -> dict[str, Any]:
+    """交卷前自己试一遍：这段 DSL 能不能过校验。
+
+    **和交卷后被检查时用的是同一个函数**（validate_dsl）。这一点比"多查几项"
+    重要得多——上一轮刚吃过「同一段 JSON 两个解析器两个结论」的亏：
+    循环里说"交卷了"，验收里说"不是合法 JSON"，白烧一整轮修复。
+    这里要是自己再写一套判据，同样的坑会重演。
+
+    刻意不起子进程真求解：那要 6 秒起步，工具循环里按两次就是 12 秒，
+    而它想知道的只是"字段和引用对不对"。
+    """
+    dsl = arguments.get("dsl")
+    if not isinstance(dsl, dict) or not dsl:
+        return {
+            "status": "invalid_arguments",
+            "errors": ["dsl 必须是一个非空对象，把你最终要交的那份原样传进来。"],
+        }
+    try:
+        from app.core.dsl.validator import validate_dsl
+    except Exception as exc:  # 执行侧没装起来时，不假装通过
+        return {
+            "status": "unavailable",
+            "errors": [f"校验器加载失败：{type(exc).__name__}: {exc}"],
+        }
+    try:
+        errors = list(validate_dsl(dsl))
+    except Exception as exc:
+        return {
+            "status": "error",
+            "errors": [f"校验器自己抛异常了：{type(exc).__name__}: {exc}"],
+        }
+    if errors:
+        return {
+            "status": "invalid",
+            "errors": errors,
+            "hint": "改完可以再试一次；这些错误和交卷后被退回时看到的完全一样。",
+        }
+    return {
+        "status": "ok",
+        "errors": [],
+        # 必须说清"过了格式不等于交对了"。否则模型会把绿灯当成验收通过，
+        # 直接交卷，然后被 A1~A14 退回来——那比不试还冤。
+        "hint": (
+            "格式这一关过了：字段名、编号、引用都对得上。"
+            "但**这不等于可以交卷**——判据 A1~A14 检查的是"
+            "「每个值说不说得出来源、每段话有没有被 claim 覆盖」，那些在交卷后才跑。"
+        ),
+    }
+
+
+_HANDLERS = {
+    "read_capabilities": read_capabilities,
+    "prepare_change": prepare_change,
+}
 
 
 def execute(name: str, arguments: dict[str, Any]) -> dict[str, Any]:

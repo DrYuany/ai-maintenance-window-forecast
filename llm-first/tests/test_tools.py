@@ -224,3 +224,62 @@ def test_result_is_capped():
     """单次返回要有上限，防止把整张表倒给模型。"""
     result = tools.execute("read_capabilities", {"query": "a"})
     assert len(result["data"]["items"]) <= tools._MAX_ITEMS
+
+
+# ── prepare_change：交卷前自己试一遍 ───────────────────────────────────────────
+# 这个工具最危险的地方不是"报错"，是"报得和交卷时不一样"。
+# 上一轮刚吃过「同一段 JSON 两个解析器两个结论」的亏：循环里说交卷了，
+# 验收里说不是合法 JSON，白烧一整轮修复。所以这里第一条就守"同源"。
+
+def test_prepare_change_shares_one_verdict_with_compile_check():
+    """同一份 DSL，工具说的和交卷后判的必须是同一句话。
+
+    两边都调 validate_dsl，所以断言是「逐字相等」而不是「都是错的」。
+    一旦有人给其中一边加个"顺手也查一下"，这条会立刻红。
+    """
+    import pipeline
+
+    bad = {"constraints": [{"type": "linear", "op": "<=", "value": 1,
+                            "terms": [[1, "最后完工时间"]]}]}
+    result = tools.execute("prepare_change", {"dsl": bad})
+
+    assert result["status"] == "invalid"
+    assert result["errors"] == pipeline._compile_check(bad)
+
+
+def test_prepare_change_ok_does_not_mean_ready_to_submit():
+    """绿灯要配一句话说清它只过了格式关。
+
+    不说的话模型会把 ok 当成"验收通过"直接交卷，然后被 A1~A14 退回来——
+    比不试还冤，还多烧一轮。
+    """
+    result = tools.execute("prepare_change", {"dsl": {"constraints": [], "objectives": [], "data": []}})
+
+    assert result["status"] == "ok"
+    assert result["errors"] == []
+    assert "不等于" in result["hint"]
+
+
+def test_prepare_change_rejects_empty_payload_with_a_usable_reason():
+    """模型偶尔会把参数名写成 dsl_json / changes。回一句它能照着改的话。"""
+    assert tools.execute("prepare_change", {})["status"] == "invalid_arguments"
+    assert tools.execute("prepare_change", {"dsl": {}})["status"] == "invalid_arguments"
+    assert tools.execute("prepare_change", {"dsl": "不是对象"})["status"] == "invalid_arguments"
+
+
+def test_prepare_change_never_pretends_to_pass_when_validator_is_missing(monkeypatch):
+    """校验器加载不了时不能返回 ok。假装通过比报错危险得多。"""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "app.core.dsl.validator" or name.endswith("dsl.validator"):
+            raise ImportError("模拟校验器缺失")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    result = tools.execute("prepare_change", {"dsl": {"constraints": []}})
+
+    assert result["status"] == "unavailable"
+    assert any("校验器" in item for item in result["errors"])
