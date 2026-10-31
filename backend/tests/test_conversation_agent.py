@@ -18,7 +18,13 @@ def test_math_passthrough_ignores_cost_questions() -> None:
     assert not MATH_PASSTHROUGH.search("为什么这版成本更低")
 
 
-def test_tool_surface_is_five_readers_plus_solve_and_ledger() -> None:
+def test_tool_surface_is_the_whole_product_surface() -> None:
+    """工具清单是产品面，不是实现细节：多一个就多一条模型能做的事。
+
+    这条测试拦的是「不小心多出来一个工具」，所以改动它必须有理由：
+    read_jobs 是 2026-10-31 有意加的——以前模型看不见自己派出去的求解活，
+    用户问「算完了吗」它只能让人自己去方案页面看。
+    """
     toolbox = object.__new__(AgentToolbox)
     specs = toolbox.tool_specs()
 
@@ -28,6 +34,7 @@ def test_tool_surface_is_five_readers_plus_solve_and_ledger() -> None:
         "read_catalog",
         "read_alarms",
         "read_site",
+        "read_jobs",
         "solve",
         "ledger",
     ]

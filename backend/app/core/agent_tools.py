@@ -9,6 +9,7 @@ from typing import Any, Callable
 from app.core.version_compare import compare_versions
 from app.core.model_change import build_change_plan
 from app.core.planning_intent import PlanningIntentCompiler, PlanningRequest
+from app.core.solve_jobs import SolveJobRepository
 from app.core.tool_runtime import ToolRuntime, ToolRuntimeError
 from app.core.version_reference import chronological_versions
 from app.db.models import ModelArtifactRepository, VersionRepository
@@ -17,6 +18,47 @@ from app.schemas.agent import WindowVersion
 
 SHANGHAI_TZ = timezone(timedelta(hours=8))
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+# 任务状态翻成人话。机器码给程序看，这句话给模型看——
+# 模型照着 "RUNNING" 编不出一句自然的中文，照着"正在算"可以。
+_JOB_STATUS_ZH = {
+    "QUEUED": "排队中",
+    "RUNNING": "正在算",
+    "COMPLETED": "算完了",
+    "FAILED": "算失败了",
+    "CANCELLED": "已取消",
+}
+
+
+def _job_facts(job) -> dict[str, Any]:
+    """一个求解任务的事实摘要。
+
+    刻意不吐 result 全文——那是整份排程，几十 KB，塞进上下文会把用户
+    这句话本身挤掉。这里只回答「算出来是哪一版、结论是什么」，
+    要看细节让模型去调 read_versions。
+    """
+    result = job.result or {}
+    summary = result.get("summary")
+    if isinstance(summary, dict):
+        summary_text = json.dumps(summary, ensure_ascii=False)[:400]
+    else:
+        summary_text = str(summary or "")[:400]
+    return {
+        "jobId": job.id,
+        "status": job.status,
+        "statusZh": _JOB_STATUS_ZH.get(job.status, job.status),
+        "solverStatus": job.solverStatus,
+        "phase": job.phase,
+        "progressPercent": job.progressPercent,
+        "statusMessage": job.statusMessage,
+        "elapsedSeconds": job.elapsedSeconds,
+        "submittedAt": job.submittedAt,
+        "finishedAt": job.finishedAt,
+        "needsUserDecision": job.needsUserDecision,
+        "versionId": result.get("versionId"),
+        "summary": summary_text,
+        "error": job.error,
+    }
 
 
 def _cost_items_from_output(version: WindowVersion) -> dict[str, Any] | None:
@@ -111,6 +153,7 @@ class AgentToolbox:
         on_tool: Callable[[str, dict[str, Any]], None] | None = None,
         on_pending_change: Callable[[dict[str, Any]], None] | None = None,
         on_tool_trace: Callable[[dict[str, Any]], None] | None = None,
+        jobs: SolveJobRepository | None = None,
         planner: PlanningIntentCompiler | None = None,
     ) -> None:
         self.conversation_id = conversation_id
@@ -120,6 +163,9 @@ class AgentToolbox:
         self.on_tool = on_tool
         self.on_pending_change = on_pending_change
         self.on_tool_trace = on_tool_trace
+        # 求解任务仓库：read_jobs 靠它看活，submit_change 靠它派活。
+        # 不传就是「这套工具箱没有求解能力」，两个工具会明确说做不到，而不是假装有。
+        self.jobs = jobs
         self.planner = planner or PlanningIntentCompiler()
         self.pending_change: dict[str, Any] | None = None
         self.ordered = chronological_versions(
@@ -130,7 +176,7 @@ class AgentToolbox:
         }
         self._trace: list[dict[str, Any]] = []
         self._specs = {spec["name"]: spec for spec in self.tool_specs()}
-        self.runtime = ToolRuntime(read_only_tools={"read_versions", "read_environment", "read_catalog", "read_alarms", "read_site"})
+        self.runtime = ToolRuntime(read_only_tools={"read_versions", "read_environment", "read_catalog", "read_alarms", "read_site", "read_jobs"})
 
     # ------------------------------------------------------------------ tools
     def tool_specs(self) -> list[dict[str, Any]]:
@@ -360,6 +406,28 @@ class AgentToolbox:
                 },
             },
             {
+                "name": "read_jobs",
+                "description": (
+                    "查本对话派出去的求解任务，只读。传 jobId 查指定那一个；不传就列出最近的几个。"
+                    "返回状态（排队中/正在算/算完了/失败了/已取消）、进度、已用时、结果摘要。"
+                    "用户问「算完了吗」「刚才那个算得怎么样」「还要多久」时用它，"
+                    "不要凭印象回答，也不要说「请到方案页面查看」。"
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "jobId": {
+                            "type": "string",
+                            "description": "任务号（job_ 开头）。省略时列最近的几个。",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "列几个，默认 3，最多 20。",
+                        },
+                    },
+                },
+            },
+            {
                 "name": "solve",
                 "description": (
                     "把用户明确提出的排程变更（策略、目标模式、权重、参数、约束、重新排程）"
@@ -443,6 +511,7 @@ class AgentToolbox:
             "read_catalog": self._read_catalog,
             "read_alarms": self._read_alarms,
             "read_site": self._read_site,
+            "read_jobs": self._read_jobs,
             "solve": self._solve,
             "ledger": self._ledger,
         }
@@ -865,6 +934,55 @@ class AgentToolbox:
         result["provenance"]["dataAsOf"] = data.get("asOf")
         result["provenance"]["inputHash"] = data.get("inputHash")
         return result
+
+    # ------------------------------------------------------------- read_jobs
+    def _read_jobs(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """看本对话派出去的求解活。
+
+        以前模型手里只有 solve（生成预览），预览之后发生了什么它一概看不见。
+        用户问「算完了吗」，它只能让人自己去方案页面看——这不是它偷懒，
+        是这个能力从来没交给它。
+        """
+        if not self.jobs:
+            return self._envelope(
+                "unavailable",
+                {"message": "这套工具箱没有接入求解任务仓库，查不到求解进展。"},
+                warnings=["jobs 未注入，read_jobs 不可用。"],
+            )
+        job_id = str(arguments.get("jobId") or "").strip()
+        if job_id:
+            job = self.jobs.get(job_id)
+            if not job:
+                return self._envelope(
+                    "not_found",
+                    {"message": f"没有找到求解任务 {job_id}。", "jobId": job_id},
+                    warnings=["任务号可能记错了。"],
+                    next_actions=["不传 jobId 再查一次，看最近派出去的是哪几个。"],
+                )
+            if job.conversationId != self.conversation_id:
+                # 别的对话的活不在这儿露，免得串场答错。
+                return self._envelope(
+                    "not_found",
+                    {"message": f"任务 {job_id} 不属于当前对话。"},
+                )
+            return self._envelope("ok", {"mode": "one", "count": 1, "jobs": [_job_facts(job)]})
+
+        try:
+            limit = int(arguments.get("limit") or 3)
+        except (TypeError, ValueError):
+            limit = 3
+        limit = max(1, min(limit, 20))
+        jobs = self.jobs.list_by_conversation(self.conversation_id)[:limit]
+        if not jobs:
+            return self._envelope(
+                "ok",
+                {"mode": "index", "count": 0, "jobs": []},
+                next_actions=["本对话还没派出过求解；要改排程先调 solve 生成变更预览。"],
+            )
+        return self._envelope(
+            "ok",
+            {"mode": "index", "count": len(jobs), "jobs": [_job_facts(job) for job in jobs]},
+        )
 
     def _read_single(
         self,

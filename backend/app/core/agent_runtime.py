@@ -1522,6 +1522,7 @@ class AgentRuntime:
                     "read_catalog": "已读取目标目录",
                     "read_alarms": "已读取告警清单",
                     "read_site": "已读取现场数据",
+                    "read_jobs": "已查看求解进展",
                     "solve": "已准备变更预览",
                 }
                 label = labels.get(name, f"已执行 {name}")
@@ -1535,6 +1536,7 @@ class AgentRuntime:
             selected_version_id=selected_version.id if selected_version else None,
             on_tool=on_tool,
             on_tool_trace=self._record_tool_call,
+            jobs=self.jobs,
         )
 
     def _answer_with_conversation_agent(
