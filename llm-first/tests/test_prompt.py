@@ -88,7 +88,10 @@ def test_bricks_section_has_enough_worked_examples():
 def test_boundaries_are_stated():
     """边界必须写出来，否则模型会拿近似的东西顶。"""
     section = prompt.capability_block()
-    assert "「全部」这种量词" in section
+    # 「全部」那条现在指向 must 的 filter，不再说"做不到"——
+    # must 支持 filter 之后，"高风险的必须全修"是能做到的。
+    assert "「全部」不是 C06 的活" in section
+    assert 'must{filter:{severity:"高"}}' in section
     assert "量目录里没有的单项" in section
     assert "非线性的东西" in section
     assert "不要拿近似的东西顶" in section
