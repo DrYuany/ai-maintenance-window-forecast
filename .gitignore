@@ -4,6 +4,9 @@
 backend/.env
 backend/.env.local
 voice-bridge/server/.env
+# 但示例文件必须入库，否则别人拿到仓库不知道要配什么
+!.env.example
+!backend/.env.example
 
 # ── Python ───────────────────────────────────────────────────
 __pycache__/
@@ -49,3 +52,12 @@ backend/data/
 
 # 本地视觉自检产物（esbuild 打包 + headless 截图）
 .tmp-preview/
+
+# ── 演示用的二进制安装包（从官网下，不入库）────────────────────
+scripts/bin/
+*.msi
+
+# ── 不入库的旁支项目（本地保留，2026-11-01 移出版本库）──────────
+# 语音链路「随声译」：独立产品，与排程主链路代码零耦合、主产品测试不覆盖它。
+# 留着会让外部读者把两个产品看成一个。本地目录不动，只是不再跟踪。
+voice-bridge/
