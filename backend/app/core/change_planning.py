@@ -8,21 +8,126 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
-DSL_LABELS: dict[str, str] = {
-    "co_occur": "互斥（不同天/同时）：{tasks}",
-    "precedence": "先后顺序：{before} → {after}",
-    "earliest": "最早开工：{task} 不早于 {time}",
-    "deadline": "最晚完工：{task} 不晚于 {time}",
-    "fix": "固定作业线：{task} 只上 {line} 号线",
-    "forbidden_dates": "禁止开工日期：{dates}",
-    "must": "必修：{task}",
-    "exclude": "排除：{task}",
-    "cardinality": "完成数 {op} {value}",
-    "budget": "预算：{quantity} {op} {value}",
+# co_occur 的六种模式：以前预览一律写“互斥（不同天/同时）”，六种模式长得一模一样，
+# 连没实现的 diff_window 也显示成已实现的样子。模式本身是语义的一部分，必须说出来。
+CO_OCCUR_LABELS: dict[str, str] = {
+    "same_day": "安排在同一天",
+    "diff_day": "安排在不同天",
+    "same_window": "安排在同一窗口",
+    "diff_window": "安排在不同窗口",
+    "same_line": "安排在同一条作业线",
+    "diff_line": "安排在不同作业线",
 }
+
+
+def _fmt_filter(filter_spec: dict[str, Any] | None) -> str:
+    if not filter_spec:
+        return "全部任务"
+    return "、".join(f"{key}={value}" for key, value in filter_spec.items())
+
+
+def _fmt_tasks(tasks: Any) -> str:
+    if isinstance(tasks, (list, tuple)):
+        return "、".join(str(item) for item in tasks)
+    return str(tasks)
+
+
+def _render_constraint(spec: dict[str, Any]) -> str:
+    """把一条约束渲染成用户能核对的句子。
+
+    原则：**DSL 里每一个生效字段都要在句子里出现**。预览是用户批准的唯一依据
+    （原样输出、模型不得改写），少写一个字段，用户就批准了一个自己没看见的约束。
+    真出过的偏差：cardinality 漏掉 filter，预览写“完成数 >= 3”，实际是“严重任务
+    完成数 >= 3”；precedence 漏掉 gap，用户不知道还卡了间隔；co_occur 漏掉 mode，
+    六种模式在预览里完全同形。
+    """
+    ctype = spec.get("type")
+    op = spec.get("op", "=")
+
+    if ctype == "must":
+        if spec.get("task"):
+            text = f"必修：{spec['task']}"
+        else:
+            text = f"必修（{_fmt_filter(spec.get('filter'))}）"
+    elif ctype == "exclude":
+        text = f"排除：{spec.get('task')}"
+    elif ctype == "at_most_one":
+        text = f"{_fmt_tasks(spec.get('tasks'))} 中最多选 1 个"
+    elif ctype == "at_least_one":
+        text = f"{_fmt_tasks(spec.get('tasks'))} 中至少选 1 个"
+    elif ctype == "precedence":
+        text = f"先后顺序：{spec.get('before')} 完工后 {spec.get('after')} 才能开工"
+        if spec.get("gap"):
+            # 时间轴单位是分钟（编译器 finish + gap <= start）
+            text += f"，间隔至少 {spec['gap']} 分钟"
+    elif ctype == "co_occur":
+        mode = spec.get("mode")
+        # 保留原枚举值：预览要能被对照回 DSL，翻译丢了原值就没法核对。
+        text = f"{_fmt_tasks(spec.get('tasks'))} {CO_OCCUR_LABELS.get(mode, '模式未识别')}（{mode}）"
+    elif ctype == "no_overlap":
+        text = f"资源 {spec.get('resource')} 上 {_fmt_tasks(spec.get('tasks'))} 不得重叠"
+    elif ctype == "capacity":
+        text = f"资源 {spec.get('resource')} 在 {spec.get('time')} 最多 {spec.get('limit')}"
+    elif ctype == "fix":
+        text = f"固定作业线：{spec.get('task')} 只上 {spec.get('line')} 号线"
+    elif ctype == "cardinality":
+        text = f"{_fmt_filter(spec.get('filter'))} 的完成数 {op} {spec.get('value')}"
+    elif ctype == "deadline":
+        text = f"最晚完工：{spec.get('task')} 不晚于 {spec.get('time')}"
+    elif ctype == "earliest":
+        text = f"最早开工：{spec.get('task')} 不早于 {spec.get('time')}"
+    elif ctype == "forbidden_dates":
+        text = f"禁止开工日期：{_fmt_tasks(spec.get('dates'))}"
+    elif ctype == "budget":
+        text = f"预算：{spec.get('quantity')} {op} {spec.get('value')}"
+    elif ctype == "linear":
+        text = f"线性约束：{json.dumps(spec.get('terms'), ensure_ascii=False)} {op} {spec.get('value')}"
+    else:
+        return json.dumps(spec, ensure_ascii=False)
+
+    # 注册表里登记了、但原型没实现编译的原语：确认后会直接报错。预览必须当场说，
+    # 不能等用户点完“确认”才炸——那等于让用户批准一件做不到的事。
+    try:
+        from dsl_core.registry import primitives as prim_reg
+
+        if ctype in prim_reg.CONSTRAINT_PRIMITIVES and ctype not in prim_reg.COMPILED_CONSTRAINTS:
+            text += "　【原型未实现：确认后会报错，不会生效】"
+        if ctype == "co_occur" and spec.get("mode") not in prim_reg.COMPILED_CO_OCCUR_MODES:
+            text += f"　【模式 {spec.get('mode')} 未实现：确认后会报错，不会生效】"
+    except Exception:  # pragma: no cover - 注册表不可用时不影响预览
+        pass
+
+    missing = {
+        key: value
+        for key, value in spec.items()
+        if key != "type" and not _covers(text, value)
+    }
+    if missing:
+        # 兜底不变量：渲染器漏了字段（或以后新增原语忘了改这里）时，原样补出来，
+        # 宁可难看，也不能让用户批准一个自己没看见的约束。
+        text += f"（原始字段：{json.dumps(missing, ensure_ascii=False)}）"
+    return text
+
+
+def _covers(text: str, value: Any) -> bool:
+    """粗略判断 value 是否已经在渲染文本里露过面。"""
+    if isinstance(value, dict):
+        return all(_covers(text, item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_covers(text, item) for item in value)
+    if isinstance(value, bool):
+        return ("是" if value else "否") in text or str(value).lower() in text.lower()
+    if isinstance(value, (int, float)):
+        # 0.6 在预览里可能写成 0.60，两种都得认，否则整条约束被误判为漏字段
+        for candidate in {str(value), f"{value:g}", f"{value:.2f}"}:
+            if re.search(rf"(?<!\d){re.escape(candidate)}(?!\d)", text):
+                return True
+        return False
+    return str(value) in text
 
 
 def format_dsl_preview(dsl: dict[str, Any]) -> str:
@@ -30,32 +135,35 @@ def format_dsl_preview(dsl: dict[str, Any]) -> str:
     lines = ["已基于当前配置准备自定义约束/目标，尚未求解。", "变更预览："]
     index = 1
     for spec in dsl.get("constraints") or []:
-        label = DSL_LABELS.get(spec.get("type"), str(spec))
-        try:
-            text = label.format(**spec)
-        except (KeyError, IndexError):
-            text = json.dumps(spec, ensure_ascii=False)
-        lines.append(f"{index}. {text}")
+        lines.append(f"{index}. {_render_constraint(spec)}")
         index += 1
     for spec in dsl.get("objectives") or []:
         kind = spec.get("type")
         if kind == "strategy":
             mode = spec.get("mode")
             suffix = f"（{mode}）" if mode else ""
-            lines.append(f"{index}. 优化策略：{spec.get('name')}{suffix}")
+            text = f"优化策略：{spec.get('name')}{suffix}"
         elif kind == "weighted":
             weights = "、".join(
                 f"{name} {value:.2f}" for name, value in (spec.get("weights") or {}).items()
             )
-            lines.append(f"{index}. 加权目标：{weights}")
+            text = f"加权目标：{weights}"
         elif kind == "lexmin":
             stages = " → ".join(
-                f"{'最小化' if s.get('dir') == 'minimize' else '最大化'}{s.get('q')}"
+                f"{'最小化' if s.get('dir') == 'minimize' else '最大化'}{s.get('q')}（{s.get('dir')}）"
                 for s in spec.get("stages", [])
             )
-            lines.append(f"{index}. 自定义分层目标：{stages}")
+            text = f"自定义分层目标：{stages}"
         else:
-            lines.append(f"{index}. 自定义目标：{json.dumps(spec, ensure_ascii=False)}")
+            text = f"自定义目标：{json.dumps(spec, ensure_ascii=False)}"
+        missing = {
+            key: value
+            for key, value in spec.items()
+            if key != "type" and not _covers(text, value)
+        }
+        if missing:
+            text += f"（原始字段：{json.dumps(missing, ensure_ascii=False)}）"
+        lines.append(f"{index}. {text}")
         index += 1
     for spec in dsl.get("parameters") or []:
         lines.append(f"{index}. 参数：{spec.get('field')} {spec.get('op', '=')} {spec.get('value')}")

@@ -71,7 +71,9 @@ def test_dsl_constraint_message_goes_preview_confirm_solve(temp_db_path, monkeyp
     ).json()
     assert preview["actionType"] == "dsl_preview", preview
     content = preview["assistantMessage"]["content"]
-    assert "互斥" in content and "尚未求解" in content
+    # 预览必须写出 mode 本身（不同天），不能只说一句“互斥”：same_day 也是互斥，
+    # 那样两种相反的约束在预览里会一模一样。
+    assert "不同天" in content and "尚未求解" in content
 
     # 2. 确认 → solve_started，任务载荷携带 DSL（request 字段保持顶层兼容）
     confirmed = client.post(
