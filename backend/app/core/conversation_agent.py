@@ -10,6 +10,7 @@ from anthropic import Anthropic
 
 from dsl_core import objective_catalog
 from app.core.agent_tools import AgentToolbox
+from app.core.demo_access import resolve_api_key
 from app.core.conversation_memory import (
     RECENT_MESSAGES,
     SUMMARY_MAX_CHARS,
@@ -47,7 +48,13 @@ MATH_PASSTHROUGH = re.compile(
 # Tool markdown that must be copied verbatim: formulas, cost tables and the
 # environment table.  Alarm/site tables are exact too, but the agent may add
 # analysis around them, so they are not forced through this path.
-PASSTHROUGH_TOOLS = {"read_versions", "read_environment"}
+PASSTHROUGH_TOOLS = {"read_versions", "read_environment", "solve", "submit_change"}
+
+# 这几个工具的结果是"契约"：用户据此决定批不批、要不要等求解。
+# 让模型自由转述，就会出现"预览说排除了 5 个、模型里一条排除都没有"——
+# 用户批准的是模型的话，执行的是另一份 DSL，中间没有任何绑定。
+# 所以它们必须独占输出：连模型这一轮已经说出来的话也丢掉，只留系统那份。
+AUTHORITATIVE_TOOLS = {"solve", "submit_change"}
 
 
 class ConversationAgentError(RuntimeError):
@@ -75,7 +82,7 @@ class ConversationAgent:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key)
+        return bool(resolve_api_key(self.api_key))
 
     def answer(
         self,
@@ -96,7 +103,7 @@ class ConversationAgent:
         # auth_token=None 时读环境变量且优先发 Bearer 头）：构造传空串跳过
         # 环境读取，构造后置回 None 让 SDK 走 x-api-key 头。
         client = Anthropic(
-            api_key=self.api_key,
+            api_key=resolve_api_key(self.api_key),
             auth_token="",
             base_url=self.base_url,
             timeout=120.0,
@@ -106,14 +113,19 @@ class ConversationAgent:
         system = self._system_prompt(memory, toolbox, selected_version, snapshot)
         tools = toolbox.tool_specs()
         collected: list[str] = []
-        # 必须原样输出的内容（公式、参数表）。攒着，等模型把这一轮说完再拼上去——
-        # 拿到就 return 会把同一句话里还没做完的事一起丢掉。
-        pending_verbatim: list[str] = []
+        # 必须原样输出的内容（公式、参数表、变更契约）。攒着，等模型把这一轮
+        # 说完再拼上去——拿到就 return 会把同一句话里还没做完的事一起丢掉。
+        # 第二项标记它是不是"契约"（见 AUTHORITATIVE_TOOLS）。
+        pending_verbatim: list[tuple[str, bool]] = []
         tool_used = False
 
         def _finish() -> str:
+            if any(authoritative for _, authoritative in pending_verbatim):
+                # 有契约类结果时只交契约：模型的话是转述，可能已经失真，
+                # 两份摆在一起用户没法判断哪份算数。
+                return "\n\n".join(block for block, _ in pending_verbatim)
             text = "".join(collected).strip()
-            for block in pending_verbatim:
+            for block, _ in pending_verbatim:
                 text = f"{text}\n\n{block}" if text else block
             return text
 
@@ -160,7 +172,7 @@ class ConversationAgent:
             ]
             messages.append({"role": "assistant", "content": assistant_blocks})
             results = []
-            verbatim_markdown: str | None = None
+            verbatim_blocks: list[tuple[str, bool]] = []
             for block in tool_calls:
                 label = TOOL_LABELS.get(block.name, block.name)
                 if on_status:
@@ -169,13 +181,21 @@ class ConversationAgent:
                 data = result.get("data")
                 if (
                     block.name in PASSTHROUGH_TOOLS
-                    and result.get("status") == "ok"
+                    # 只读工具成功才透传；契约类工具本来就不是 "ok"
+                    # （solve 给 needs_confirmation，submit_change 给 submitted），
+                    # 它们只要带 markdown 就得原样送到用户面前。
+                    and (
+                        result.get("status") == "ok"
+                        or block.name in AUTHORITATIVE_TOOLS
+                    )
                     and isinstance(data, dict)
                     and isinstance(data.get("markdown"), str)
                     and data["markdown"].strip()
                     and (data.get("verbatim") is True or MATH_PASSTHROUGH.search(message))
                 ):
-                    verbatim_markdown = data["markdown"]
+                    verbatim_blocks.append(
+                        (data["markdown"], block.name in AUTHORITATIVE_TOOLS)
+                    )
                 results.append(
                     {
                         "type": "tool_result",
@@ -183,20 +203,25 @@ class ConversationAgent:
                         "content": json.dumps(result, ensure_ascii=False, default=str),
                     }
                 )
-            if verbatim_markdown and all(b.name in PASSTHROUGH_TOOLS for b in tool_calls):
-                # 这一轮**只**在取原样内容（公式、参数表、环境表）。
+            if verbatim_blocks and all(b.name in PASSTHROUGH_TOOLS for b in tool_calls):
+                # 这一轮**只**在取原样内容（公式、参数表、环境表、变更契约）。
                 # 用户问的就是这个，再让模型转一轮只会拖慢并增加改写公式的风险，
                 # 所以直接交卷——这是快路径，也是绝大多数情况。
-                prefix = "".join(collected).strip()
-                return (
-                    f"{prefix}\n\n{verbatim_markdown}" if prefix else verbatim_markdown
-                )
-            if verbatim_markdown:
+                # 一次调多个工具时逐块保留，不能只留最后一块（会把公式挤掉）。
+                body = "\n\n".join(text for text, _ in verbatim_blocks)
+                authoritative = any(auth for _, auth in verbatim_blocks)
+                # 契约类结果独占输出：模型这轮说的话是它的转述，不是系统契约。
+                prefix = "" if authoritative else "".join(collected).strip()
+                return f"{prefix}\n\n{body}" if prefix else body
+            if verbatim_blocks:
                 # 这一轮除了取原样内容，**还夹着别的诉求**（比如"贴出这版公式，
                 # 再把船租压到8万"）。原来这里也是直接 return，于是后半句当场
                 # 消失，而且没有任何提示——用户以为系统听懂了，只是没做。
                 # 现在存起来，把 tool_result 回喂，等模型把这一轮说完再拼上去。
-                pending_verbatim.append(verbatim_markdown)
+                pending_verbatim.append((
+                    "\n\n".join(text for text, _ in verbatim_blocks),
+                    any(auth for _, auth in verbatim_blocks),
+                ))
             if collected and not collected[-1].endswith("\n\n"):
                 collected.append("\n\n")
                 if on_token:
@@ -213,7 +238,7 @@ class ConversationAgent:
         text = "\n".join(f"{item.role}: {item.content[:200]}" for item in old)
         try:
             client = Anthropic(
-                api_key=self.api_key,
+                api_key=resolve_api_key(self.api_key),
                 auth_token="",
                 base_url=self.base_url,
                 timeout=30.0,

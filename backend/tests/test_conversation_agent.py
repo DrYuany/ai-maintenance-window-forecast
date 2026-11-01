@@ -155,18 +155,18 @@ def test_verbatim_only_turn_answers_in_one_roundtrip(monkeypatch) -> None:
 
 
 def test_verbatim_plus_other_request_does_not_drop_the_second_half(monkeypatch) -> None:
-    """同一轮里既取公式又要求改参数时，后半句不能被快路径吃掉。
+    """同一轮里既取公式又问别的事时，后半句不能被快路径吃掉。
 
     这是真出过的 bug：只要本轮读到 verbatim 就直接 return，于是"贴出这版公式，
-    再把船租压到8万"里的"压船租"当场消失，而界面没有任何提示。
+    今天有哪些告警"里的后半句当场消失，而界面没有任何提示。
     """
     first = SimpleNamespace(
         content=[
             _tool_use("read_versions", tid="t1"),
-            _tool_use("solve", {"change": "船租8万"}, tid="t2"),
+            _tool_use("read_alarms", {"scope": "today"}, tid="t2"),
         ]
     )
-    second = SimpleNamespace(content=[_text("船租已经压到8万，方案见上。")])
+    second = SimpleNamespace(content=[_text("今天有 13 项待安排告警。")])
     agent, fake = _agent(monkeypatch, [first, second])
     toolbox = _FakeToolbox(
         {
@@ -174,16 +174,46 @@ def test_verbatim_plus_other_request_does_not_drop_the_second_half(monkeypatch) 
                 "status": "ok",
                 "data": {"markdown": "目标函数……", "verbatim": True},
             },
-            "solve": {"status": "ok", "data": {"markdown": "已改"}},
+            "read_alarms": {"status": "ok", "data": {"count": 13}},
         }
     )
 
-    out = _ask(agent, "把数学模型贴出来，再把船租压到8万", toolbox)
+    out = _ask(agent, "把数学模型贴出来，今天有哪些告警", toolbox)
 
     assert len(fake.calls) == 2, "夹着别的诉求就必须继续回喂，不能提前交卷"
-    # 两个工具的结果都要回喂给模型，否则模型看不到"船租改了没有"
+    # 两个工具的结果都要回喂给模型，否则模型看不到告警数据
     fed = fake.calls[1]["messages"][-1]["content"]
     assert [item["tool_use_id"] for item in fed] == ["t1", "t2"]
-    assert "船租已经压到8万" in out
+    assert "今天有 13 项待安排告警。" in out
     assert "目标函数……" in out, "原样内容仍然要出现在最终答复里"
+
+
+def test_contract_preview_is_not_paraphrased(monkeypatch) -> None:
+    """变更预览是契约，模型这轮说的话不能和它一起摆出来。
+
+    真出过的事：模型在正文里写了一张"排除任务009-013"的表格，实际提交的
+    DSL 里一条排除都没有。用户批准的是模型的话，执行的是另一份契约。
+    """
+    reply = SimpleNamespace(
+        content=[
+            _text("已按你说的改好，排除了任务009-013。"),
+            _tool_use("solve", {"instruction": "只修前8个"}, tid="t1"),
+        ]
+    )
+    agent, fake = _agent(monkeypatch, [reply])
+    preview = "变更预览：\n1. 排除：任务009\n2. 排除：任务010"
+    toolbox = _FakeToolbox(
+        {
+            "solve": {
+                "status": "needs_confirmation",
+                "data": {"markdown": preview, "verbatim": True},
+            }
+        }
+    )
+
+    out = _ask(agent, "只修前8个，其余不安排", toolbox)
+
+    assert len(fake.calls) == 1, "契约类结果应当一轮交卷"
+    assert out == preview, "只留系统契约"
+    assert "排除了任务009-013" not in out, "模型转述必须丢掉"
 

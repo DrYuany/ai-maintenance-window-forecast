@@ -1587,6 +1587,11 @@ class AgentToolbox:
                 "needs_confirmation",
                 {
                     "preview": dsl_change.preview,
+                    # 预览就是契约，必须原样送到用户眼前。交给模型转述会出现
+                    # "预览说排除了 5 个、模型里一条排除都没有"——用户批准的
+                    # 是模型的话，执行的是另一份 DSL，中间没有任何绑定。
+                    "markdown": dsl_change.preview,
+                    "verbatim": True,
                     "basePlanNumber": self.plan_numbers.get(base.id) if base else None,
                     "requiresUserConfirmation": True,
                 },
@@ -1629,6 +1634,9 @@ class AgentToolbox:
             "needs_confirmation",
             {
                 "preview": preview,
+                # 同上：这份 operations 才是真正会提交的契约，不能由模型改写。
+                "markdown": preview,
+                "verbatim": True,
                 "operations": operations,
                 "basePlanNumber": (
                     self.plan_numbers.get(base.id) if base else None
@@ -1680,11 +1688,15 @@ class AgentToolbox:
                 {"message": outcome.get("message") or "派活失败"},
                 warnings=["求解没有启动，当前方案没有变化。"],
             )
+        message = outcome.get("message") or "已派出，正在后台求解。"
         return self._envelope(
             "submitted",
             {
                 "jobId": outcome.get("jobId"),
-                "message": outcome.get("message") or "已派出，正在后台求解。",
+                "message": message,
+                # "已派出/正在求解"是对用户的承诺，也不许模型改口径。
+                "markdown": message,
+                "verbatim": True,
             },
             next_actions=["告诉用户任务号和大概要等多久；不要再让用户确认一次。"],
         )
