@@ -97,15 +97,18 @@ export function getSolverPresentation(summary: Record<string, unknown>): SolverP
   }
 
   if (heuristicFallback) {
+    // 来源与解状态各司其职，不能用一个字段替另一个背书：
+    // 启发式基线不是 CP-SAT 解，不能挂 FEASIBLE 标签；除"已证明全量不可行"
+    // 之外，状态保持 UNKNOWN（有方案、但求解器没有给出任何结论）。
+    const infeasible = code === "INFEASIBLE";
     return {
-      code: code === "INFEASIBLE" ? "INFEASIBLE" : "FEASIBLE",
-      label: code === "INFEASIBLE" ? "全量不可行 · 启发式部分方案" : "启发式兜底方案 · 未证明最优",
-      shortLabel: code === "INFEASIBLE" ? "部分方案" : "启发式兜底",
-      tone: code === "INFEASIBLE" ? "danger" : "warning",
-      description:
-        code === "INFEASIBLE"
-          ? `求解器已证明全量排程不可行，当前方案是启发式基线给出的部分排程，${coverage}，不代表最优。`
-          : `求解器在时限内没有产出排程，当前方案由启发式基线生成，${coverage}；它不是求解器给出的可行解，也没有最优性证明。`,
+      code: infeasible ? "INFEASIBLE" : "UNKNOWN",
+      label: infeasible ? "全量不可行 · 启发式部分方案" : "启发式兜底方案 · 未证明最优",
+      shortLabel: infeasible ? "部分方案" : "启发式兜底",
+      tone: infeasible ? "danger" : "warning",
+      description: infeasible
+        ? `求解器已证明全量排程不可行，当前方案是启发式基线给出的部分排程，${coverage}，不代表最优。`
+        : `求解器在时限内没有产出排程，当前方案由启发式基线生成，${coverage}；它不是求解器给出的可行解，也没有最优性证明。`,
     };
   }
 
