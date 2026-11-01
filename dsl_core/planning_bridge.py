@@ -174,9 +174,12 @@ def dsl_to_request(
         elif (ctype == "cardinality" and spec.get("op") == ">="
               and not spec.get("filter")):
             limits["最低完成数"] = int(spec["value"])
-        elif ctype == "must":
+        elif ctype == "must" and spec.get("task"):
             limits["必修任务"] = sorted({*limits.get("必修任务", []), str(spec["task"])})
         else:
+            # 注意 must 的 filter 形式（"严重故障必须修完"）：它没有 task 字段，
+            # 不能走上面那条 set 合并，否则 str(spec["task"]) 直接 KeyError。
+            # 交给编译器按 filter 展开，语义更完整。
             residual.append(spec)
     for spec in dsl.get("data") or []:
         if spec.get("kind") in ("part_hours", "part_arrival", "task_deadline"):
