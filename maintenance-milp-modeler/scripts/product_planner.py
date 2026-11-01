@@ -430,9 +430,14 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
     artifact = write_model_artifact(artifact, output, model)
     solver=cp_model.CpSolver();solver.parameters.num_search_workers=WORKERS;solver.parameters.random_seed=17
     if on_solver: on_solver(solver)
-    fallback=list(hint) if hint and not limits else None
-    started=time.monotonic();logs=[];selected=fallback
-    last_cost=account(data,fallback)['总成本'] if fallback else None
+    # 上一版排程只做搜索起点（build_model 之后已用 AddHint 喂过），不做结果。
+    #
+    # 这里曾经写成 selected=fallback：约束把模型逼到不可行时，旧方案会被原样
+    # 当成"有解"返回，解状态 FEASIBLE、来源 HEURISTIC_FALLBACK。上层的降级
+    # 判断是 chosen is None，于是永远降不了级——"只修前 8 个"这类约束被吞掉，
+    # 用户看到 11/13 却以为约束生效了。兜底改到 recommend 末尾，且必须标注。
+    started=time.monotonic();logs=[];selected=None
+    last_cost=None
     termination_reason='COMPLETED';business_complete=False;tie_complete=False;last_status=None
 
     def _rehint():
@@ -532,14 +537,16 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
     return selected, {'求解器':'OR-Tools CP-SAT','模型形式':'有界整数线性目标及可线性化调度约束',
         '求解器参数':solver_parameters,
         '有解':selected is not None,'解状态':solve_status,'终止原因':termination_reason,
-        '方案来源':'CP_SAT' if logs and any(r['状态'] in ('OPTIMAL','FEASIBLE') for r in logs) else ('HEURISTIC_FALLBACK' if fallback else None),
+        # 来源只描述"这份排程是谁给的"。selected 为空就是没解出来，
+        # 不再用旧方案的来源字段去冒充。
+        '方案来源':'CP_SAT' if selected is not None else None,
         '分层全部最优':solve_status=='OPTIMAL','确定性决胜完成':tie_complete,
         '阶段计划':plan,'计划阶段数':len(stages),'跳过阶段数':skipped,
         '阶段':logs,'总耗时秒':time.monotonic()-started,'模型成本':last_cost,'诊断模型':partial,
         '模型产物文件':artifact['artifactFile'],'模型产物指纹':artifact_fingerprint}
 
 
-def recommend(data, output, seconds=60, strategy='成本最低优先', mode='分层', weights=None, limits=None, on_solver=None, cancelled=None, model_fingerprint=None, extra_constraints=None, custom_stages=None):
+def recommend(data, output, seconds=60, strategy='成本最低优先', mode='分层', weights=None, limits=None, on_solver=None, cancelled=None, model_fingerprint=None, extra_constraints=None, custom_stages=None, partial=False, dsl=None):
     if strategy not in STRATEGIES: raise ValueError('未知策略')
     output=Path(output);output.mkdir(parents=True,exist_ok=True)
     if (output/'结果.json').exists(): raise ValueError('输出目录已有结果，请使用新目录保留历史版本')
@@ -568,19 +575,41 @@ def recommend(data, output, seconds=60, strategy='成本最低优先', mode='分
                         '求解器参数':{'num_search_workers':WORKERS,'random_seed':17,'max_time_in_seconds':seconds}}
     else:
         best=max(baselines.values(),key=len)
-        chosen,info=solve(data,options,output,seconds,strategy,mode,weights,limits,hint=best,on_solver=on_solver,cancelled=cancelled,model_fingerprint=model_fingerprint,extra_constraints=extra_constraints,custom_stages=custom_stages)
-        # 完整排程做不出来时才放宽为部分排程。
-        # 除了”已证明不可行”，还要收”时限内既没找到可行解也没排除可行”的情况：
-        # 加了业务约束后，不可行性的证明本身会变慢，只等证明会把明明存在的部分方案也一起埋掉。
-        if chosen is None and info['阶段'] and info['阶段'][-1]['状态'] in ('INFEASIBLE','UNKNOWN'):
-            formal=info
-            chosen,info=solve(data,options,output,seconds,strategy,mode,weights,limits,partial=True,hint=best,on_solver=on_solver,cancelled=cancelled,model_fingerprint=model_fingerprint,extra_constraints=extra_constraints,custom_stages=custom_stages)
-            info['正式模型']=formal
-            if formal['阶段'] and formal['阶段'][-1]['状态']=='UNKNOWN':
-                info['部分排程原因']=(
-                    '完整排程在时限内既没有找到可行解、也没有证明不可行，'
-                    '已放宽为部分排程；这不代表无解。'
-                )
+        def _run(allow_partial):
+            return solve(data,options,output,seconds,strategy,mode,weights,limits,
+                         partial=allow_partial,hint=best,on_solver=on_solver,cancelled=cancelled,
+                         model_fingerprint=model_fingerprint,extra_constraints=extra_constraints,
+                         custom_stages=custom_stages)
+        if partial:
+            # 调用方已判定"允许少修"（DSL 里出现 exclude 这类选择类约束）。
+            # 完整模式把每个任务都强制排入，跟"排除某几个"直接矛盾，跑也白跑。
+            chosen,info=_run(True)
+        else:
+            chosen,info=_run(False)
+            # 完整排程做不出来时才放宽为部分排程。
+            # 除了”已证明不可行”，还要收”时限内既没找到可行解也没排除可行”的情况：
+            # 加了业务约束后，不可行性的证明本身会变慢，只等证明会把明明存在的部分方案也一起埋掉。
+            if chosen is None and info['阶段'] and info['阶段'][-1]['状态'] in ('INFEASIBLE','UNKNOWN'):
+                formal=info
+                chosen,info=_run(True)
+                info['正式模型']=formal
+                if formal['阶段'] and formal['阶段'][-1]['状态']=='UNKNOWN':
+                    info['部分排程原因']=(
+                        '完整排程在时限内既没有找到可行解、也没有证明不可行，'
+                        '已放宽为部分排程；这不代表无解。'
+                    )
+        if chosen is None:
+            # 完整与部分都没解出来，才回退启发式基线。必须留痕：来源标
+            # HEURISTIC_FALLBACK 并写明原因，不能让它看起来像求解结果。
+            # 解状态不得写 FEASIBLE——FEASIBLE 意味着"CP-SAT 找到了可行解"，
+            # 而这份基线不是 CP-SAT 解。写成 UNKNOWN，和来源字段各司其职。
+            chosen=list(best)
+            info['方案来源']='HEURISTIC_FALLBACK'
+            info['解状态']='UNKNOWN'
+            info['兜底原因']=(
+                '完整排程与部分排程都没有在时限内找到可行解，'
+                '下面是未考虑本次约束的启发式基线；不代表无解。'
+            )
     report={'版本':'3.0','数据':data.meta,'策略':strategy,'目标模式':mode,'自定义权重':weights,
             '约束覆盖':limits or {},'求解':info,'窗口':[{**w,'开始日期':data.stamp(w['开始']),
             '结束时间不含':data.stamp(w['结束'])} for w in data.windows], '人工基准':{}}
@@ -597,6 +626,18 @@ def recommend(data, output, seconds=60, strategy='成本最低优先', mode='分
             b.update({'同任务可比':comparable,'费用差额':delta,'节省金额':delta if comparable else None,
                       '节省比例':delta/b['总成本'] if comparable and b['总成本'] else None})
             report['人工基准'][name]=b
+    # 意图对账：甲方说的话，产物里必须找得到证据。
+    #
+    # 放在写盘之前，让它进 结果.json 和版本的 solver 摘要；否则"复核通过"
+    # 只是数学自洽，跟"是不是你要的那份"无关（2026-10-30 事故）。
+    # 没有方案时不谈"对账"：那是"没解出来"，不是"做错了"。
+    if dsl and chosen is not None:
+        from dsl_core.reconcile import reconcile
+        report['求解']['意图对账']=reconcile(
+            dsl,report,data=data,
+            overrides=(data.meta or {}).get('参数覆盖') or {},
+            context={'策略':strategy,'目标模式':mode,'自定义权重':weights},
+        )
     from product_report import write_report
     write_report(data,report,output)
     return report

@@ -30,7 +30,8 @@ MONEY = 1_000_000  # 微元，与 product_planner.MONEY 一致
 _MUST_FILTERS = frozenset({"task", "severity", "turbine", "part"})
 
 
-def _task_matches(task: dict, filter_spec: dict, data) -> bool:
+def task_matches(task: dict, filter_spec: dict, data) -> bool:
+    """任务是否命中过滤维度（must/cardinality 共用；对账也复用它）。"""
     for dim, value in filter_spec.items():
         if dim == "task":
             ok = task["任务编号"] == value
@@ -155,7 +156,7 @@ def compile_constraint(
             unsupported = set(filter_spec) - _MUST_FILTERS
             if unsupported:
                 return [f"must 的 filter 只支持 {sorted(_MUST_FILTERS)}，收到 {sorted(unsupported)}"]
-            targets = [t["任务编号"] for t in data.tasks if _task_matches(t, filter_spec, data)]
+            targets = [t["任务编号"] for t in data.tasks if task_matches(t, filter_spec, data)]
             if not targets:
                 return [f"must 的 filter {filter_spec!r} 没有匹配到任何任务"]
         for task in targets:

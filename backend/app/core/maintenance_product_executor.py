@@ -73,6 +73,7 @@ class MaintenanceProductExecutor:
             )
             extra_constraints = None
             custom_stages = None
+            allow_partial = False
             if dsl:
                 from dsl_core.validator import validate_dsl
 
@@ -98,6 +99,13 @@ class MaintenanceProductExecutor:
                 )
                 if residual:
                     extra_constraints = constraints_builder(residual, data)
+                # exclude 是"允许少修"的明确信号：完整模式给每个任务加
+                # sum(x)==1（必须排入），跟 exclude 的 sum(x)==0 直接矛盾，
+                # 必然判不可行。见到就切部分排程，别等失败再降级。
+                allow_partial = any(
+                    str(spec.get("type")) == "exclude"
+                    for spec in (dsl.get("constraints") or [])
+                )
                 customs = custom_objectives(dsl)
                 if customs:
                     custom_stages = stages_builder(customs, data)
@@ -113,6 +121,11 @@ class MaintenanceProductExecutor:
                     or (output / "diagnostic_model_artifact.json").exists()
                 )
                 if not has_cached_solution or not has_cached_artifact:
+                    output = base_output.with_name(f"{base_output.name}-{job_id[-8:]}")
+                    result_path = output / "结果.json"
+                # 意图对账没过的结果不能当缓存复用：代码改了、约束补了，
+                # 还拿旧结论顶上去，等于把上次的错再确认一遍。
+                elif ((cached_report.get("求解") or {}).get("意图对账") or {}).get("违例"):
                     output = base_output.with_name(f"{base_output.name}-{job_id[-8:]}")
                     result_path = output / "结果.json"
             # 并发求解：按输出目录加锁——指纹不同则目录不同、可并发互不覆盖；
@@ -139,10 +152,22 @@ class MaintenanceProductExecutor:
                         model_fingerprint=model_fingerprint,
                         extra_constraints=extra_constraints,
                         custom_stages=custom_stages,
+                        partial=allow_partial,
+                        dsl=dsl,
                     )
                     if cancel_event.is_set():
                         shutil.rmtree(output, ignore_errors=True)
                         raise MaintenanceProductExecutionError("求解已由用户停止")
+            # 意图对账有违例 = 这份排程跟用户的要求对不上，不能沉淀成方案。
+            # 启发式兜底另外处理：它本来就不是按约束求出来的，界面已有专门标注
+            # （"启发式兜底方案 · 未证明最优"），这里不重复拦截。
+            audit = (report.get("求解") or {}).get("意图对账") or {}
+            if audit.get("违例") and str((report.get("求解") or {}).get("方案来源")) != "HEURISTIC_FALLBACK":
+                from dsl_core.reconcile import describe
+
+                raise MaintenanceProductExecutionError(
+                    "意图对账未通过，这份排程与实际要求不符：" + describe(audit)
+                )
             report["Agent任务"] = {
                 "任务编号": job_id,
                 "输出目录": str(output),

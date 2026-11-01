@@ -63,6 +63,15 @@ def run(
     )
     from .validator import validate_dsl
 
+    # exclude 是"允许少修"的明确信号：完整模式把每个任务强制排入
+    # （product_planner 里 sum(x)==1），跟 exclude 的 sum(x)==0 直接矛盾，
+    # 必然判不可行。见到就切部分排程，不要等失败了再降级——那条降级路径
+    # 一旦被旧方案的兜底挡住就永远走不到。
+    if not partial and any(
+        str(spec.get("type")) == "exclude" for spec in (dsl.get("constraints") or [])
+    ):
+        partial = True
+
     load_project, candidates, heuristic, solve = _solver_modules()
 
     # 基座先读一次：相对参数倍率（op="*"）要按基座值换算
@@ -156,21 +165,46 @@ def run(
         extra_constraints=extra,
         custom_stages=stages,
     )
-    # 兜底方案必须点破，不能当成解交出去。
+    # 没解出来就是没解出来，不能把未考虑约束的基座方案当结果交出去。
     #
-    # product_planner.solve 会先把启发式基座当 fallback（partial 模式下也用它），
-    # 那个基座是在**没有** DSL 约束的模型上排出来的。一旦约束把模型逼到不可行
-    # 或时限内没解，它就把这份旧方案原样返回，解状态还写 FEASIBLE，
-    # 来源字段里才藏着 "HEURISTIC_FALLBACK"。实测：同时要求"禁止任务001"
-    # 和"必须任务001"，返回的方案里任务001 排得好好的。
-    # 这不是"暂时没证明"，是"根本没照约束做"——必须报错。
-    source = str((info or {}).get("方案来源") or "")
-    if constraints and source == "HEURISTIC_FALLBACK":
+    # 以前 solve 用 selected=fallback 起手，约束把模型逼到不可行时会把旧方案
+    # 原样返回、解状态还写 FEASIBLE，只能靠来源字段事后识别。现在 solve 只在
+    # 真解出来时返回 selected，这里直接按"有没有解"判定，不再看来源。
+    if selected is None and constraints:
         raise DslError([
-            "求解器没有在满足这些约束的前提下找到解，返回的是未考虑约束的基座方案；"
+            "求解器没有在满足这些约束的前提下找到解；"
             "不把它当作结果。请放宽约束，或确认这几条约束是否互相冲突："
             + str([spec.get("type") for spec in constraints])
         ])
+
+    # 意图对账：DSL 说了什么，产物里就必须有什么。
+    #
+    # 独立复核（verify_schedule）只证明这份排程"自己站得住"——窗口、工时、
+    # 转场、库存都合法。它不知道用户说过什么，所以"只修前 8 个"那种事它永远
+    # 查不出来。这里拿 DSL 原文逐条对产物，对不上就报错，不再产出一份
+    # "复核通过、但不是你要的方案"。
+    from .reconcile import describe, reconcile
+
+    recommended = None
+    if selected is not None:
+        from product_planner import account  # noqa: PLC0415
+
+        try:
+            recommended = account(data, selected)
+        except ValueError as exc:
+            # account 内部会跑 verify_schedule：窗口、工时、转场、库存。
+            # 它失败说明求解器给的这份排程不合法，不能带着"复核通过"交出去。
+            raise DslError([f"求解结果未通过独立复核：{exc}"]) from exc
+    audit = reconcile(
+        dsl,
+        {"求解": info, "排程": selected, "推荐": recommended, "数据": data.meta},
+        data=data,
+        overrides=overrides,
+        context={"策略": strategy, "目标模式": mode, "自定义权重": weights},
+    )
+    info["意图对账"] = audit
+    if audit["违例"]:
+        raise DslError(["意图对账未通过：" + describe(audit)])
     return {
         "数据": data.meta,
         "求解": info,

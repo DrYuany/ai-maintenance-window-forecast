@@ -101,9 +101,10 @@ def test_deadline_that_starves_tasks_is_refused_not_silently_dropped() -> None:
 def test_heuristic_fallback_is_never_returned_as_a_solution() -> None:
     """约束把模型逼到不可行时，不许把"没考虑约束的基座方案"当结果交回去。
 
-    product_planner.solve 会把启发式基座当 fallback，那份方案是在**没有** DSL
-    约束的模型上排的。实测：同时要求"禁止任务001"和"必须任务001"，返回的方案里
-    任务001 排得好好的，解状态还写 FEASIBLE，只有来源字段藏着 HEURISTIC_FALLBACK。
+    product_planner.solve 曾用 ``selected=fallback`` 起手，那份方案是在**没有**
+    DSL 约束的模型上排的。实测：同时要求"禁止任务001"和"必须任务001"，返回的
+    方案里任务001 排得好好的，解状态还写 FEASIBLE，只有来源字段藏着
+    HEURISTIC_FALLBACK。现在 solve 失败即返回 None，runner 直接报错。
     """
     with pytest.raises(DslError) as exc:
         run({
@@ -112,4 +113,4 @@ def test_heuristic_fallback_is_never_returned_as_a_solution() -> None:
                 {"type": "must", "task": "任务001"},
             ],
         }, seconds=30, max_tasks=6)
-    assert any("未考虑约束的基座方案" in e for e in exc.value.errors), exc.value.errors
+    assert any("没有在满足这些约束的前提下找到解" in e for e in exc.value.errors), exc.value.errors

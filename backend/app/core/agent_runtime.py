@@ -2025,13 +2025,23 @@ class AgentRuntime:
         solving = raw_result.get("求解", {})
         stages = solving.get("阶段", [])
         last = stages[-1] if stages else {}
+        # UNKNOWN 的原因不止"到时限"一种：兜底方案也是 UNKNOWN，但它不是
+        # "还在搜"，而是"两种模式都没解出来、这份是启发式基线"。原因字段
+        # 要分开写，否则审计里会把兜底误读成"只是还没算完"。
+        reason = None
+        if status == "UNKNOWN":
+            reason = (
+                "heuristic_fallback"
+                if str(solving.get("方案来源") or "") == "HEURISTIC_FALLBACK"
+                else "time_limit_or_search_incomplete"
+            )
         return SolveEvidencePayload(
             status=status,
             hasIncumbent=bool(solving.get("有解")),
             proof=status in {"OPTIMAL", "INFEASIBLE"},
             elapsedSeconds=float(solving.get("总耗时秒", 0)),
             phase="solve",
-            reason=None if status != "UNKNOWN" else "time_limit_or_search_incomplete",
+            reason=reason,
             running=False,
             objectiveValue=last.get("目标值") or solving.get("模型成本"),
             bestBound=last.get("界"),

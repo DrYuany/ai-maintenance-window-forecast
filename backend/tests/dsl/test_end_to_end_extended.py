@@ -240,24 +240,36 @@ def test_granularity_30_minutes_changes_candidate_starts() -> None:
 
 
 def test_no_multiday_splits() -> None:
-    """'不允许跨天暂停' → 每个任务的作业段都在同一天内。"""
+    """'不允许跨天暂停' → 每个作业段都在同一天内，装不下的任务只能不排。
+
+    这条此前是靠"求解失败也返回兜底方案"才过的：完整模式要求 8 个任务全部
+    排入，而 任务001(12h)/003(12h)/004(16h) 一天的 10 小时装不下，模型其实
+    是 INFEASIBLE。兜底一撤，测试立刻暴露——它从来没有真正验证过这个参数。
+    现在按部分排程跑，断言两件事：段不跨天，长任务确实被挤出。
+    """
     report = run({
         "parameters": [{"field": "允许跨天暂停", "op": "=", "value": "否"}],
-    }, seconds=60, max_tasks=8)
+    }, seconds=60, max_tasks=8, partial=True)
     selected = report["排程"]
     assert selected is not None
     for c in selected:
         days = {a // 1440 for a, b in c["作业段"]}
         assert len(days) == 1, f"{c['任务编号']} 跨了 {len(days)} 天"
+    ids = {c["任务编号"] for c in selected}
+    assert {"任务001", "任务003", "任务004"}.isdisjoint(ids), "一天装不下的长任务不该被排进去"
 
 
 def test_weather_threshold_override_reclassifies_day() -> None:
-    """'安全风速上限改成9' → 11月3日(基座01风速9.19)重算为不可作业，该日无开工。"""
+    """'安全风速上限改成9' → 11月3日(基座01风速9.19)重算为不可作业，该日无开工。
+
+    同样改成部分排程：收紧安全风速后 8 个任务排不进 5 天窗口，完整模式
+    INFEASIBLE。测试要验证的是"那一天不能开工"，不是"所有任务都得排上"。
+    """
     report = run({
         "parameters": [{"field": "安全风速上限", "op": "=", "value": 9}],
-    }, seconds=60, max_tasks=8)
+    }, seconds=60, max_tasks=8, partial=True)
     selected = report["排程"]
-    assert selected is not None
+    assert selected, "收紧阈值后仍应有任务能排"
     from pathlib import Path
     from product_data import load_project
 
