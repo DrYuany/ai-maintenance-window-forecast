@@ -1556,6 +1556,27 @@ class AgentToolbox:
 
     # ------------------------------------------------------------------ solve
     def _solve(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """solve 的所有出口都必须由系统给出用户可见文字。
+
+        只给成功路径配 markdown 是不够的：DSL 没解析出来时返回 ``clarify``，
+        data 里只有给模型看的 message。此时模型可以自由发挥成"已排除了 9-13"，
+        用户看到的就是一句谁也没打算说的话——真正的契约（这句没听懂）根本没
+        送到用户眼前。所以这里对**每一个**出口补 markdown，并且它属于
+        AUTHORITATIVE_TOOLS，独占本轮输出。
+        """
+        return self._as_contract(self._solve_inner(arguments))
+
+    @staticmethod
+    def _as_contract(result: dict[str, Any]) -> dict[str, Any]:
+        data = result.get("data")
+        if isinstance(data, dict) and not data.get("markdown"):
+            message = str(data.get("message") or "").strip()
+            if message:
+                data["markdown"] = message
+                data["verbatim"] = True
+        return result
+
+    def _solve_inner(self, arguments: dict[str, Any]) -> dict[str, Any]:
         instruction = str(arguments.get("instruction") or "").strip()
         base = self.resolve_version(arguments.get("baseVersion"))
         if not instruction:
@@ -1658,36 +1679,36 @@ class AgentToolbox:
         新方案并覆盖当前选中版本——这种动作不能是模型自己想起来就做的。
         """
         if not self.jobs or not self.on_submit_change:
-            return self._envelope(
+            return self._as_contract(self._envelope(
                 "unavailable",
                 {"message": "这套工具箱没有接入求解服务，派不出去；变更预览仍然有效。"},
                 warnings=["submit_change 不可用。"],
                 next_actions=["请用户在界面上确认这份变更，由系统发起求解。"],
-            )
+            ))
         pending = self.pending_change
         if not isinstance(pending, dict) or not pending:
-            return self._envelope(
+            return self._as_contract(self._envelope(
                 "clarify",
                 {"message": "还没有待确认的变更。先调 solve 生成预览，再调这个。"},
                 warnings=["凭空发起求解被拒绝：必须先有变更预览。"],
                 next_actions=["先用 solve 把用户要的改动编译成预览。"],
-            )
+            ))
 
         reason = str(arguments.get("reason") or "").strip()
         try:
             outcome = self.on_submit_change(self.conversation_id, pending, reason)
         except Exception as exc:  # noqa: BLE001 - 派活失败不能让整轮对话崩
-            return self._envelope(
+            return self._as_contract(self._envelope(
                 "error",
                 {"message": f"派活失败：{type(exc).__name__}: {exc}"},
                 warnings=["求解没有启动，当前方案没有变化。"],
-            )
+            ))
         if not outcome.get("ok"):
-            return self._envelope(
+            return self._as_contract(self._envelope(
                 "error",
                 {"message": outcome.get("message") or "派活失败"},
                 warnings=["求解没有启动，当前方案没有变化。"],
-            )
+            ))
         message = outcome.get("message") or "已派出，正在后台求解。"
         return self._envelope(
             "submitted",

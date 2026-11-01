@@ -29,6 +29,7 @@ TOOL_LABELS = {
     "read_alarms": "读取告警清单",
     "read_site": "读取现场数据",
     "solve": "准备排程变更",
+    "submit_change": "提交排程变更",
 }
 
 DATA_QUESTION = re.compile(
@@ -45,9 +46,10 @@ MATH_PASSTHROUGH = re.compile(
     r"数学模型|模型公式|模型结构|数学表达|公式|LaTeX|写出来|贴出来|导出模型"
 )
 
-# Tool markdown that must be copied verbatim: formulas, cost tables and the
-# environment table.  Alarm/site tables are exact too, but the agent may add
-# analysis around them, so they are not forced through this path.
+# Tool markdown that must be copied verbatim: formulas, cost tables, the
+# environment table, and the change contract (solve/submit_change).  Alarm/site
+# tables are exact too, but the agent may add analysis around them, so they are
+# not forced through this path.
 PASSTHROUGH_TOOLS = {"read_versions", "read_environment", "solve", "submit_change"}
 
 # 这几个工具的结果是"契约"：用户据此决定批不批、要不要等求解。

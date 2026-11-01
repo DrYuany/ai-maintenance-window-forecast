@@ -398,6 +398,38 @@ def test_solve_without_recognized_change_asks_for_clarification(
     assert "还没有识别出需要修改的模型内容" in result["data"]["message"]
 
 
+def test_solve_clarify_still_carries_a_contract_for_the_user(
+    temp_db_path: Path,
+) -> None:
+    """没听懂时也必须给系统口径，不能让模型自己圆场。
+
+    这是"模型在正文里说排除了 9-13、实际一条排除都没有"的另一半：如果 solve
+    返回 clarify 却只有给模型看的 message，模型完全可以说一句"已按你说的改好"，
+    用户永远看不到"我没听懂"这句话。
+    """
+    result = _toolbox(temp_db_path).execute("solve", {"instruction": "今天天气怎么样"})
+
+    data = result["data"]
+    assert data["markdown"] == data["message"]
+    assert data["verbatim"] is True
+
+
+def test_submit_change_refusal_carries_a_contract(
+    temp_db_path: Path,
+) -> None:
+    """派不出去（或没预览就提交），拒绝理由同样要原样送到用户眼前。
+
+    这套工具箱没接求解服务，所以先命中 unavailable；无论落在哪个分支，
+    都必须带 markdown——否则模型会把"没派出去"说成"已派出"。
+    """
+    result = _toolbox(temp_db_path).execute("submit_change", {"reason": "直接算"})
+
+    assert result["status"] in {"unavailable", "clarify"}
+    data = result["data"]
+    assert data.get("markdown"), result
+    assert data["verbatim"] is True
+
+
 def test_compare_pair_still_returns_three_layers(temp_db_path: Path) -> None:
     toolbox = _toolbox(temp_db_path)
     payload = toolbox.compare_pair(
