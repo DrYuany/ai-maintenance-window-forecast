@@ -18,8 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import pipeline  # noqa: E402
-import rulebench  # noqa: E402
+from llmfirst import pipeline  # noqa: E402
+from llmfirst import rulebench  # noqa: E402
 
 CASES: list[tuple[str, str]] = [
     ("单句改参数", "把船租降到8万"),

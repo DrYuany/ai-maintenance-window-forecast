@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from app.core.dsl import llm_parser
-from app.core.dsl.llm_parser import (
+from app.core import llm_parser
+from app.core.llm_parser import (
     ParseUnavailable,
     load_library,
     parse,
@@ -208,7 +208,7 @@ def test_rule_no_night_transfer() -> None:
 
 
 def test_legacy_language_bridged_to_dsl() -> None:
-    from app.core.dsl.llm_parser import parse_by_legacy
+    from app.core.llm_parser import parse_by_legacy
 
     dsl = parse_by_legacy("船租上涨20%")
     assert dsl is not None

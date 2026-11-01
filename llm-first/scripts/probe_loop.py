@@ -24,8 +24,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-import client  # noqa: E402
-import tools  # noqa: E402
+from llmfirst import client  # noqa: E402
+from llmfirst import tools  # noqa: E402
 
 SYSTEM = """你是排程系统的意图解析器。把用户的话落成 DSL。
 

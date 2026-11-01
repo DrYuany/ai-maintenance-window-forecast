@@ -34,7 +34,7 @@ DEFAULT_MODEL = "deepseek-chat"
 def _load_dotenv() -> None:
     """读 llm-first/.env（若存在）。只为本地跑起来方便——
     key 不进仓库，.gitignore 已经挡了。"""
-    env_file = Path(__file__).resolve().parent.parent / ".env"
+    env_file = Path(__file__).resolve().parent.parent.parent / ".env"
     if not env_file.exists():
         return
     for line in env_file.read_text(encoding="utf-8").splitlines():
@@ -103,7 +103,14 @@ class Reply:
 
 
 def api_key() -> str:
-    return (os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
+    return (
+        os.environ.get("DEEPSEEK_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        # backend 用 MINIMAX_API_KEY（其实也是 DeepSeek 的 key），进程内共用一个进程时，
+        # 让 llm-first 也能读到它，避免要求用户配两遍。
+        or os.environ.get("MINIMAX_API_KEY")
+        or ""
+    ).strip()
 
 
 def configured() -> bool:

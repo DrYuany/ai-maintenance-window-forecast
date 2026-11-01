@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: dsl_core
 from eval_cases.probe_llm_first import build_system  # noqa: E402  复用同一份契约
 
 
@@ -102,7 +103,7 @@ def main() -> int:
         repeat = int(sys.argv[sys.argv.index("--repeat") + 1])
 
     client, model = _client()
-    from app.core.dsl.validator import validate_dsl
+    from dsl_core.validator import validate_dsl
 
     print("=" * 76)
     print(f"A. 可复现性：同一句话重复 {repeat} 次（temperature=0）")

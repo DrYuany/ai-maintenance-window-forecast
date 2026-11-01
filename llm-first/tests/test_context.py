@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import datetime
 
-import context
-import verify
+from llmfirst import context
+from llmfirst import verify
 
 
 def _codes(report: verify.Report) -> set[str]:

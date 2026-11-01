@@ -18,11 +18,10 @@ from pathlib import Path
 if __package__ in (None, ""):  # 允许 `python src/rows.py` 直接跑
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import paths  # noqa: E402,F401  （副作用：把 ../backend 挂进 sys.path）
 
-import prompt  # noqa: E402  （表序与注解的唯一来源，不重复抄一份）
-from app.core.dsl import validator as dsl_validator  # noqa: E402
-from app.core.dsl.registry import primitives as prim_reg  # noqa: E402
+from . import prompt  # noqa: E402  （表序与注解的唯一来源，不重复抄一份）
+from dsl_core import validator as dsl_validator  # noqa: E402
+from dsl_core.registry import primitives as prim_reg  # noqa: E402
 
 SECTIONS: tuple[str, ...] = ("parameters", "constraints", "objectives", "data")
 

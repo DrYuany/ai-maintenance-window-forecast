@@ -26,8 +26,8 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "eval"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import context as session  # noqa: E402
-import pipeline  # noqa: E402
+from llmfirst import context as session  # noqa: E402
+from llmfirst import pipeline  # noqa: E402
 import cases as casebook  # noqa: E402
 from bench_suite import grade  # noqa: E402
 

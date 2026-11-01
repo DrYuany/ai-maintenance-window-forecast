@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.core import objective_catalog
+from dsl_core import objective_catalog
 
 
 def test_registry_is_internally_consistent() -> None:

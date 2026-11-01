@@ -19,6 +19,9 @@ class AgentMessageRequest(BaseModel):
     message: str
     selectedVersionId: str | None = None
     selectedWindowId: str | None = None
+    # 理解引擎：llm = LLM 主导，rule = 规则主导。默认 rule 保持旧行为；
+    # 「默认 LLM 优先」由前端切换控件实现（前端默认发 llm）。
+    engine: Literal["llm", "rule"] = "rule"
 
 
 def get_runtime() -> AgentRuntime:
@@ -33,6 +36,7 @@ def post_message(payload: AgentMessageRequest, runtime: AgentRuntime = Depends(g
             payload.message,
             selected_version_id=payload.selectedVersionId,
             selected_window_id=payload.selectedWindowId,
+            engine=payload.engine,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -49,6 +53,7 @@ def post_message_stream(
             payload.message,
             selected_version_id=payload.selectedVersionId,
             selected_window_id=payload.selectedWindowId,
+            engine=payload.engine,
         ):
             data = json.dumps(item.get("data", {}), ensure_ascii=False, default=str)
             yield f"event: {item.get('event', 'message')}\ndata: {data}\n\n"

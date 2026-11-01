@@ -46,6 +46,8 @@ interface AgentStoreValue {
   activeJob: SolveJob | null;
   pendingChange: PendingModelChange | null;
   stages: StageEvent[];
+  /** 理解引擎：llm = LLM 主导（默认），rule = 规则主导。 */
+  engine: "llm" | "rule";
   /**
    * 这一轮没走成模型时留下的说明，挂在具体那条助手消息上。
    * 不写进消息正文：正文是产品产出，这条是系统状态，混在一起会被摘抄走。
@@ -59,6 +61,7 @@ interface AgentStoreValue {
     selectedWindowId?: string | null,
   ) => Promise<void>;
   setView: (view: PageId) => void;
+  setEngine: (engine: "llm" | "rule") => void;
   setSortMode: (sortMode: SortMode) => Promise<void>;
   deleteVersion: (versionId: string) => Promise<void>;
   deleteCandidate: (candidateId: string) => Promise<void>;
@@ -124,6 +127,7 @@ export function AgentStoreProvider({
   const [stages, setStages] = useState<StageEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [degraded, setDegraded] = useState<(DegradedPayload & { messageId: string }) | null>(null);
+  const [engine, setEngine] = useState<"llm" | "rule">("llm");
   const [decisionArtifact, setDecisionArtifact] = useState<DecisionArtifact | null>(offline ? offlineDemo.decisionArtifact : null);
   const [solveEvidence, setSolveEvidence] = useState<SolveEvidence | null>(offline ? offlineDemo.solveEvidence : null);
   const [activeJobs, setActiveJobs] = useState<SolveJob[]>([]);
@@ -336,6 +340,7 @@ export function AgentStoreProvider({
               ));
             },
           },
+          engine,
         );
         await applyResponse(response);
       } catch (nextError) {
@@ -346,6 +351,7 @@ export function AgentStoreProvider({
               message,
               selectedVersionId,
               selectedWindowId,
+              engine,
             );
             await applyResponse(response);
           } catch (fallbackError) {
@@ -377,7 +383,7 @@ export function AgentStoreProvider({
         setStreamStatus(null);
       }
     },
-    [currentConversationId, dashboard.sortMode, hydrateConversation, offline, refreshConversationList],
+    [currentConversationId, dashboard.sortMode, hydrateConversation, offline, refreshConversationList, engine],
   );
 
   const controlActiveJob = useCallback(async (action: "wait" | "background" | "use_incumbent" | "stop") => {
@@ -611,10 +617,12 @@ export function AgentStoreProvider({
       pendingChange,
       stages,
       degraded,
+      engine,
       createConversation,
       selectConversation,
       sendMessage,
       setView: setCurrentView,
+      setEngine,
       setSortMode,
       deleteVersion,
       deleteCandidate,
@@ -641,6 +649,7 @@ export function AgentStoreProvider({
       pendingChange,
       stages,
       degraded,
+      engine,
       loading,
       messages,
       refreshCurrentConversation,

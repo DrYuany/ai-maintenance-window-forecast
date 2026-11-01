@@ -21,10 +21,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-import execute
-import paths  # noqa: F401  （把 ../backend 与求解内核挂进 sys.path）
+from . import execute
 
-from app.core.dsl.registry import parameters as param_reg
+from dsl_core.registry import parameters as param_reg
 
 # 用户口语 → 注册表参数名。**只收能一一对应的**；
 # 「风速」这种要分常态/安全的，宁可反问也不猜——猜错的代价是用户按错误的值做决定。
@@ -156,7 +155,7 @@ def _current(name: str) -> tuple[Any, str]:
         from product_data import load_project
         from pathlib import Path
 
-        root = Path(__file__).resolve().parents[2]
+        root = Path(__file__).resolve().parents[3]
         data = load_project(root, base_id="基座01")
         key = param_reg.to_internal_key(name)
         value = data.params.get(key)

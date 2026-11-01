@@ -18,7 +18,7 @@
 """
 from __future__ import annotations
 
-import verify
+from llmfirst import verify
 
 CTX = None            # 这批案例不涉及相对时间，不传基准
 
@@ -223,7 +223,7 @@ def test_uncompiled_list_is_empty_because_everything_runs():
     """
     if verify._UNCOMPILED_OBJECTIVES:
         builders = {}
-        from app.core.dsl.compiler import stages_builder
+        from dsl_core.compiler import stages_builder
         for name in verify._UNCOMPILED_OBJECTIVES:
             builder = stages_builder([{"type": name, "weights": {}}], None)
             try:
@@ -247,9 +247,9 @@ def test_every_objective_is_handled_somewhere():
     两边都不管的，就是当年 `weighted` 那个 bug 的形状——校验放行、
     编译时没人接、求解前炸。这条测试专门盯这个洞。
     """
-    from app.core.dsl.compiler import stages_builder
-    from app.core.dsl.planning_bridge import split_objectives
-    from app.core.dsl.registry import primitives as prims
+    from dsl_core.compiler import stages_builder
+    from dsl_core.planning_bridge import split_objectives
+    from dsl_core.registry import primitives as prims
 
     unhandled = []
     for name in prims.OBJECTIVE_PRIMITIVES:
@@ -280,9 +280,9 @@ def test_table_d_lists_exactly_the_executable_ones():
     所以不能只断言"weighted 不在里面"（那是上一个 bug 的形状），
     要断言集合相等。
     """
-    import prompt
-    import tools
-    from app.core.dsl.registry import primitives as prims
+    from llmfirst import prompt
+    from llmfirst import tools
+    from dsl_core.registry import primitives as prims
 
     real = tools.executable_objectives(prims)
     listed = set(prompt._TABLE_D_ORDER)

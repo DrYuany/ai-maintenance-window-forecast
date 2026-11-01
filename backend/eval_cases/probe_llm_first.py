@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: dsl_core
 CONTRACT = """## 输出格式（统一 JSON，不要解释、不要代码围栏）
 
 {
@@ -80,7 +81,7 @@ CASES = [
 
 
 def build_system(message: str) -> str:
-    from app.core.dsl.registry import schema_prompt as sp
+    from dsl_core.registry import schema_prompt as sp
 
     base = sp.build_system_prompt(message)
     head, _, _ = base.partition("## 输出格式")
@@ -103,7 +104,7 @@ def main() -> int:
     client.auth_token = None
     model = os.environ.get("MINIMAX_MODEL", "deepseek-chat")
 
-    from app.core.dsl.validator import validate_dsl
+    from dsl_core.validator import validate_dsl
 
     out = []
     for text in CASES:

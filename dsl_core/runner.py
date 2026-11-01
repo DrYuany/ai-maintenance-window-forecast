@@ -4,7 +4,7 @@
 已下发检修单的锁定/部分排程兜底在原型里未处理（正式合并时走 recommend 路径）。
 
 用法：
-    from app.core.dsl.runner import run
+    from dsl_core.runner import run
     report = run(dsl, base_id="基座01", seconds=30)
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 _SCRIPTS = PROJECT_ROOT / "maintenance-milp-modeler" / "scripts"
 

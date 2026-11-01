@@ -21,7 +21,7 @@ import json
 
 import pytest
 
-from app.core.dsl.llm_parser import parse_by_legacy
+from app.core.llm_parser import parse_by_legacy
 from app.core.planning_intent import PlanningIntentCompiler
 
 

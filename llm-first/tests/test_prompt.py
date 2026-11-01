@@ -13,9 +13,9 @@ from __future__ import annotations
 import datetime as dt
 import re
 
-import context as session
-import prompt
-from app.core.dsl.registry import parameters as param_reg
+from llmfirst import context as session
+from llmfirst import prompt
+from dsl_core.registry import parameters as param_reg
 
 
 def test_self_check_clean():

@@ -26,9 +26,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .validator import validate_dsl
+from dsl_core.validator import validate_dsl
 
-LIBRARY_PATH = Path(__file__).resolve().parents[3] / "eval_cases" / "dsl_validated_library.jsonl"
+LIBRARY_PATH = Path(__file__).resolve().parents[2] / "eval_cases" / "dsl_validated_library.jsonl"
 
 _TASK = r"(任务\d{1,3}|T\d{1,3})"
 # 年作为可选捕获组，保证 groups 索引对齐 (year, month, day)
@@ -717,7 +717,7 @@ def parse_by_legacy(message: str) -> dict[str, Any] | None:
     完整策略/权重/参数/约束/数据补丁/时限由 planning_intent 的成熟正则
     解析，再经 planning_bridge 转成 DSL schema。
     """
-    from app.core.dsl.planning_bridge import request_to_dsl
+    from dsl_core.planning_bridge import request_to_dsl
 
     compiler = _legacy_compiler()
     if not compiler.is_planning_request(message):
@@ -744,7 +744,7 @@ def _request_consumed_anything(compiled) -> bool:
     request = compiled.request
     if getattr(compiled, "consumed", None):
         return True
-    from app.core.planning_intent import PlanningRequest
+    from dsl_core.planning_request import PlanningRequest
 
     blank = PlanningRequest()
     return any((
@@ -914,7 +914,7 @@ def _parse_core(
     stage("parse.llm", "调用大模型解析", "running")
     if system_prompt is None:
         # 注册表 → 槽位说明书（L0 目录 + L1 检索详解 + 原语/数据/实体 + 输出契约）
-        from .registry import schema_prompt as schema_sp
+        from dsl_core.registry import schema_prompt as schema_sp
 
         system_prompt = schema_sp.build_system_prompt(message)
     result = parse_with_llm(

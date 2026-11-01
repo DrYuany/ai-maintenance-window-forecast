@@ -11,6 +11,11 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+# dsl_core（中立共享执行侧）在仓库根，pytest 从 backend/ 起跑够不着，补挂。
+REPO_ROOT = BACKEND_ROOT.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 
 @pytest.fixture()
 def temp_db_path(tmp_path: Path) -> Path:

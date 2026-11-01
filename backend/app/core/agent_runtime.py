@@ -102,7 +102,7 @@ def _entity_snapshot() -> Any:
         return _ENTITY_SNAPSHOT_CACHE["value"]
     snapshot = None
     try:
-        from app.core.dsl.runner import PROJECT_ROOT, _solver_modules
+        from dsl_core.runner import PROJECT_ROOT, _solver_modules
 
         load_project = _solver_modules()[0]
         snapshot = load_project(PROJECT_ROOT, base_id="基座01", as_of=None)
@@ -278,6 +278,7 @@ class AgentRuntime:
         selected_version_id: str | None = None,
         selected_window_id: str | None = None,
         sink: StreamSink | None = None,
+        engine: str = "rule",
     ) -> AgentResponse:
         response = self._submit_message(
             conversation_id,
@@ -285,6 +286,7 @@ class AgentRuntime:
             selected_version_id=selected_version_id,
             selected_window_id=selected_window_id,
             sink=sink,
+            engine=engine,
         )
         if sink:
             sink.finish(response.assistantMessage.content)
@@ -296,6 +298,7 @@ class AgentRuntime:
         content: str,
         selected_version_id: str | None = None,
         selected_window_id: str | None = None,
+        engine: str = "rule",
     ):
         queue: Queue = Queue()
 
@@ -307,6 +310,7 @@ class AgentRuntime:
                     selected_version_id=selected_version_id,
                     selected_window_id=selected_window_id,
                     sink=StreamSink(queue.put),
+                    engine=engine,
                 )
                 queue.put({"event": "done", "data": response.model_dump()})
             except Exception as exc:  # pragma: no cover - transport boundary
@@ -326,12 +330,14 @@ class AgentRuntime:
         selected_version_id: str | None = None,
         selected_window_id: str | None = None,
         sink: StreamSink | None = None,
+        engine: str = "rule",
     ) -> AgentResponse:
         conversation = self.conversations.get(conversation_id)
         if not conversation:
             raise ValueError("Conversation not found")
 
         self._begin_trace(conversation_id, content)
+        self._tls.engine = engine
 
         now = datetime.now(SHANGHAI_TZ).isoformat()
         self.messages.add(Message(
@@ -669,7 +675,7 @@ class AgentRuntime:
                     except (KeyError, TypeError, ValueError):
                         pass
                 base_version_id = selected_version.id if selected_version else memory.latestResultId
-                from app.core.dsl.planning_bridge import (
+                from dsl_core.planning_bridge import (
                     custom_objectives,
                     dsl_to_request,
                     merge_dsl,
@@ -821,7 +827,7 @@ class AgentRuntime:
             )
         elif change_plan.operations:
             # DSL 里含 PlanningRequest 表达不了的约束/目标（co_occur 等）→ 走 DSL 待确认
-            from app.core.dsl.planning_bridge import (
+            from dsl_core.planning_bridge import (
                 custom_objectives,
                 dsl_to_request,
                 merge_dsl,
@@ -1021,6 +1027,37 @@ class AgentRuntime:
 
         return format_dsl_preview(dsl)
 
+    def _llm_first_parse(self, content: str, sink: StreamSink | None = None):
+        """LLM 主导引擎：一句话直接进 llmfirst.pipeline.understand，产出 (route, dsl)。
+
+        未配置 LLM key 或 llmfirst 包不可用时返回 None，回退规则主导路径（旧路径）。
+        """
+        try:
+            import llmfirst.client as llm_client
+            import llmfirst.pipeline as llm_pipeline
+            from app.core.llm_parser import ParseResult
+        except Exception:  # pragma: no cover - llmfirst 未接好时静默回退
+            return None
+
+        if not llm_client.configured():
+            return None
+
+        try:
+            if sink:
+                sink.stage("route", "判断意图路由", "done", "llm-first")
+            outcome = llm_pipeline.understand(content)
+            route = outcome.route if outcome.route in ("dsl", "not_change", "reject", "clarify") else "clarify"
+            dsl = (outcome.as_dict().get("dsl") or None) if route == "dsl" else None
+            return ParseResult(
+                dsl=dsl,
+                source="llm",
+                route=route,
+                confidence=0.0 if outcome.error else 1.0,
+                latency_ms=float(outcome.latency_ms or 0),
+            )
+        except Exception:  # noqa: BLE001 - LLM 引擎失败 → 回退规则主导，不二次 LLM
+            return None
+
     def _try_dsl_parse(self, content: str, sink: StreamSink | None = None, context_block: str | None = None):
         """DSL 三层解析（增量能力）。解析不了/LLM 不可用返回 None，回退现有路径。
 
@@ -1031,8 +1068,11 @@ class AgentRuntime:
         LLM 失败（超时/网络/坏响应）降级为 clarify，不再回退旧 conversation_agent
         二次调 LLM；只有「未配置 key」（ParseUnavailable）才返回 None 走旧路径。
         """
+        if getattr(self._tls, "engine", "rule") == "llm":
+            return self._llm_first_parse(content, sink=sink)
+
         try:
-            from app.core.dsl.llm_parser import ParseResult, ParseUnavailable, parse as dsl_parse
+            from app.core.llm_parser import ParseResult, ParseUnavailable, parse as dsl_parse
         except Exception:  # pragma: no cover - DSL 包缺失时静默回退
             return None
 
@@ -1055,7 +1095,7 @@ class AgentRuntime:
     def _dsl_context_block(self, conversation_id: str, memory, selected_version) -> str:
         """把「现在是什么状态」拼成上下文：快照清单 + 当前方案 + 待确认变更 + 最近对话。"""
         try:
-            from app.core.dsl.registry import schema_prompt as sp
+            from dsl_core.registry import schema_prompt as sp
         except Exception:  # pragma: no cover
             return ""
 
@@ -1103,7 +1143,7 @@ class AgentRuntime:
         if parsed is None or parsed.route != "dsl" or not parsed.dsl:
             return None
         try:
-            from app.core.dsl.planning_bridge import dsl_to_request
+            from dsl_core.planning_bridge import dsl_to_request
             from app.core.model_change import ModelChangePlan, _diff_requests, _format_preview
 
             updated, residual, timeline = dsl_to_request(parsed.dsl, current)

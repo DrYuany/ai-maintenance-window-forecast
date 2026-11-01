@@ -37,6 +37,8 @@ interface Props {
   onOpenVersion: (versionId: string) => void;
   onClearContext?: () => void;
   onControlJob?: (action: "wait" | "background" | "use_incumbent" | "stop") => Promise<void>;
+  engine?: "llm" | "rule";
+  onEngineChange?: (engine: "llm" | "rule") => void;
 }
 
 const suggestions = [
@@ -142,6 +144,8 @@ export function ConversationCanvas({
   onOpenVersion,
   onClearContext = () => undefined,
   onControlJob,
+  engine = "llm",
+  onEngineChange = () => undefined,
 }: Props) {
   const [value, setValue] = useState("");
   const [showProcess, setShowProcess] = useState(true);
@@ -192,6 +196,24 @@ export function ConversationCanvas({
         <div>
           <strong>一修</strong>
           <span>东海一号风场</span>
+        </div>
+        <div className="engine-toggle" role="group" aria-label="理解引擎">
+          <button
+            type="button"
+            className={`engine-option${engine === "llm" ? " is-active" : ""}`}
+            onClick={() => onEngineChange("llm")}
+            title="LLM 主导：模型先读全句，护栏只做否决"
+          >
+            LLM 优先
+          </button>
+          <button
+            type="button"
+            className={`engine-option${engine === "rule" ? " is-active" : ""}`}
+            onClick={() => onEngineChange("rule")}
+            title="规则主导：正则先拦，拦不住再问模型"
+          >
+            规则优先
+          </button>
         </div>
       </header>
 

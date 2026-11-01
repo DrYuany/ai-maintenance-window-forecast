@@ -25,8 +25,8 @@ if str(EVAL_DIR) not in sys.path:
 
 import probe_param_coverage as probe  # noqa: E402
 
-from app.core.dsl.registry import parameters as param_reg  # noqa: E402
-from app.core.dsl.registry import schema_prompt as sp  # noqa: E402
+from dsl_core.registry import parameters as param_reg  # noqa: E402
+from dsl_core.registry import schema_prompt as sp  # noqa: E402
 
 DESIGN_CHANGEABLE = param_reg.GENERATION_LAYER | param_reg.SELECTION_LAYER
 

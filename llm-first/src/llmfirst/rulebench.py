@@ -35,10 +35,9 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import paths  # noqa: E402,F401
 
-import contract  # noqa: E402
-import verify  # noqa: E402
+from . import contract  # noqa: E402
+from . import verify  # noqa: E402
 
 # 每一段/整句落在哪一层。"needs_llm" 不是失败，是出口——
 # 产品的出口就是大模型，这里只是走到门口为止。
@@ -105,7 +104,7 @@ class RuleOutcome:
         return self.stage == "needs_llm"
 
     def as_dict(self) -> dict[str, Any]:
-        from app.core.dsl import planning_bridge  # 只在需要缩略时导入
+        from dsl_core import planning_bridge  # 只在需要缩略时导入
 
         return {
             "side": "rule",
@@ -153,7 +152,7 @@ def _summarize(dsl: dict[str, Any], bridge) -> list[str]:
 
 def _rule_layer(text: str) -> tuple[str, str, dict[str, Any]]:
     """单段过一遍规则层，顺序与 `_parse_core` 完全一致，遇到大模型就返回空。"""
-    from app.core.dsl import llm_parser as lp
+    from app.core import llm_parser as lp
 
     if lp._BATCH_RE.search(text):
         return "batch", "batch", {}
@@ -177,7 +176,7 @@ def _planning_fallback(text: str) -> dict[str, Any] | None:
     它在真实链路里排在大模型**之后**：DSL 解析失败才退回来。
     这里提前算一份，只为回答"退到最后一层还剩什么"，不代表产品的主路径。
     """
-    from app.core.dsl.planning_bridge import request_to_dsl
+    from dsl_core.planning_bridge import request_to_dsl
     from app.core.planning_intent import PlanningIntentCompiler
 
     compiler = PlanningIntentCompiler()
@@ -185,7 +184,7 @@ def _planning_fallback(text: str) -> dict[str, Any] | None:
         return None
     intent = compiler.compile_detailed(text)
     dsl = contract.as_dsl(contract.normalize({"dsl": request_to_dsl(intent.request)}))
-    from app.core.dsl import planning_bridge
+    from dsl_core import planning_bridge
 
     return {
         "summary": _summarize(dsl, planning_bridge),
@@ -197,7 +196,7 @@ def _planning_fallback(text: str) -> dict[str, Any] | None:
 
 def understand_rule(utterance: str) -> RuleOutcome:
     """按 `agent_runtime` 真实入口走一遍，到调用大模型之前就停。"""
-    from app.core.dsl import llm_parser as lp
+    from app.core import llm_parser as lp
     from app.core.model_change import is_scenario_batch
 
     text = (utterance or "").strip()
@@ -249,7 +248,7 @@ def understand_rule(utterance: str) -> RuleOutcome:
 
     if outcome.dsl:
         try:
-            from app.core.dsl.validator import validate_dsl
+            from dsl_core.validator import validate_dsl
 
             outcome.compile_errors = list(validate_dsl(outcome.dsl))
         except Exception as exc:

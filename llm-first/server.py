@@ -12,13 +12,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import answer  # noqa: E402
-import client  # noqa: E402
-import context as session  # noqa: E402
-import execute  # noqa: E402
-import pipeline  # noqa: E402
-import prompt  # noqa: E402
-import rulebench  # noqa: E402
+from llmfirst import answer  # noqa: E402
+from llmfirst import client  # noqa: E402
+from llmfirst import context as session  # noqa: E402
+from llmfirst import execute  # noqa: E402
+from llmfirst import pipeline  # noqa: E402
+from llmfirst import prompt  # noqa: E402
+from llmfirst import rulebench  # noqa: E402
 
 from fastapi import FastAPI  # noqa: E402
 from fastapi.responses import FileResponse, JSONResponse  # noqa: E402

@@ -25,7 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.core.dsl.llm_parser import (  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: dsl_core
+from app.core.llm_parser import (  # noqa: E402
     ParseUnavailable,
     _PARSE_SYSTEM,
     load_library,
@@ -140,7 +141,7 @@ def _score(row: dict, result) -> tuple[bool, str]:
     dsl = result.dsl if result.route == "dsl" else None
     if dsl is None:
         # 运行时会回退旧规划器；旧桥接能产出等价 DSL 也算系统理解了槽位
-        from app.core.dsl.llm_parser import parse_by_legacy
+        from app.core.llm_parser import parse_by_legacy
 
         dsl = parse_by_legacy(row["utterance"])
     if not dsl:

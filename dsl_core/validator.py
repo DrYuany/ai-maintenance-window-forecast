@@ -244,7 +244,7 @@ def _validate_objective(spec: Any, data, where: str) -> list[str]:
     if otype not in prim_reg.COMPILED_OBJECTIVES:
         errors.append(f"{where}: 目标 {otype} 已登记但原型未实现")
     if otype == "strategy":
-        from app.core import objective_catalog
+        from . import objective_catalog
 
         name = spec.get("name")
         if not name or name not in objective_catalog.strategies():

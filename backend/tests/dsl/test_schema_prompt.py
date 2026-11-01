@@ -1,8 +1,8 @@
 """schema_prompt：注册表 → LLM 槽位说明书。"""
 from __future__ import annotations
 
-from app.core.dsl.registry import parameters as param_reg
-from app.core.dsl.registry import schema_prompt as sp
+from dsl_core.registry import parameters as param_reg
+from dsl_core.registry import schema_prompt as sp
 
 
 def test_catalog_lists_every_changeable_param() -> None:

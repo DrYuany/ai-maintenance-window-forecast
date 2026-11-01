@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.core.dsl.runner import DslError, run  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: dsl_core
+from dsl_core.runner import DslError, run  # noqa: E402
 
 
 def _check(case: dict, selected: list[dict], data) -> str | None:
@@ -39,7 +40,7 @@ def _check(case: dict, selected: list[dict], data) -> str | None:
 
 
 def main() -> int:
-    from app.core.dsl.runner import _solver_modules
+    from dsl_core.runner import _solver_modules
 
     load_project = _solver_modules()[0]
     project = ROOT.parent

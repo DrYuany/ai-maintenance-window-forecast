@@ -17,10 +17,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-import contract
-import context as session
-import rows as row_book
-import segment
+from . import contract
+from . import context as session
+from . import rows as row_book
+from . import segment
 
 Verdict = Literal["pass", "fail", "unclear", "na"]
 
@@ -358,13 +358,13 @@ _PLAIN_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 
 def _enum_domain(row: row_book.Row) -> set[str] | None:
     """这一行的 value 允许出现哪些固定词。取不到就返回 None（判"存疑"，不判错）。"""
-    from app.core.dsl.registry import parameters as param_reg
-    from app.core.dsl.registry import quantities as qty_reg
+    from dsl_core.registry import parameters as param_reg
+    from dsl_core.registry import quantities as qty_reg
 
     if row.kind in ("minimize", "maximize", "weighted", "budget"):
         return set(qty_reg.NAMED_QUANTITIES)
     if row.kind == "strategy":
-        from app.core.dsl import llm_parser as lp
+        from app.core import llm_parser as lp
 
         return set(lp._STRATEGY_CANONICAL.values())
     if row.section == "parameters":
@@ -734,7 +734,7 @@ def _multi_value_kinds() -> set[str]:
     不手抄名单：以后加了同样形状的原语（比如 `weights`），这里自动跟上。
     """
     try:
-        from app.core.dsl.registry import primitives as prim_reg
+        from dsl_core.registry import primitives as prim_reg
     except Exception:                                    # 没挂上后端就退回保守名单
         return {"lexmin"}
     out = set()

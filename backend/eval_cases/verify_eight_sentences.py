@@ -17,7 +17,8 @@ from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.stdout.reconfigure(encoding="utf-8")
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: dsl_coresys.stdout.reconfigure(encoding="utf-8")
 
 from app.core.maintenance_product_executor import MaintenanceProductExecutor  # noqa: E402
 from app.core.model_change import (  # noqa: E402

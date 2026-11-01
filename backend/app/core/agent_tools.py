@@ -813,7 +813,7 @@ class AgentToolbox:
         return result
 
     def _read_catalog(self, _arguments: dict[str, Any]) -> dict[str, Any]:
-        from app.core import objective_catalog
+        from dsl_core import objective_catalog
 
         strategies = [
             {

@@ -12,10 +12,10 @@ from __future__ import annotations
 import json
 import re
 
-import contract
-import segment
-import verify
-from app.core.dsl.validator import validate_dsl
+from llmfirst import contract
+from llmfirst import segment
+from llmfirst import verify
+from dsl_core.validator import validate_dsl
 
 
 def _product(**over):
@@ -201,7 +201,7 @@ def test_segments_handle_turning_words():
 def test_prompt_connective_list_matches_segmenter():
     """提示词里教模型的那串连接词，必须就是切段器认的那串。
     两边不同源的话，A1 就成了随机判据。"""
-    import prompt
+    from llmfirst import prompt
 
     text = prompt.build()
     listed = re.search(r"连接词含：(.+?)。", text)
@@ -234,7 +234,7 @@ def test_number_audit_ignores_iso_time_of_day():
 def test_linear_example_in_prompt_compiles():
     """提示词给了 `linear` 的写法示例。示例本身必须过编译器——
     否则就是在教模型踩坑（历史上 `op:"="` 与 terms 形状都这么错过）。"""
-    import prompt
+    from llmfirst import prompt
 
     section = prompt.syntax_block()
     blocks = re.findall(r"```json\n(.*?)\n```", section, re.S)
@@ -250,7 +250,7 @@ def test_output_example_in_prompt_passes_verifier():
     示例是模型最信的东西：示例错了，模型会照着错。这条测试
     就是让"示例"和"验收"永远对得上。
     """
-    import prompt
+    from llmfirst import prompt
 
     text = prompt.output_block()
     block = re.search(r"```json\n(.*?)\n```", text, re.S)

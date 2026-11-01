@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from app.core import objective_catalog
+from dsl_core import objective_catalog
 from app.schemas.agent import WindowVersion
 
 

@@ -16,8 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import paths  # noqa: E402,F401
-import tools  # noqa: E402
+from llmfirst import tools  # noqa: E402
 
 
 def _items(query: str, kind: str | None = None) -> list[dict]:
@@ -58,9 +57,9 @@ def test_all_objectives_claimed_executable_really_run():
     判据是"两条路占一条"：被 `split_objectives` 提成求解器模式，
     或者 `stages_builder` 能建出分层阶段。两边都不管的就是当年那个 bug。
     """
-    from app.core.dsl.compiler import stages_builder
-    from app.core.dsl.planning_bridge import split_objectives
-    from app.core.dsl.registry import primitives as prims
+    from dsl_core.compiler import stages_builder
+    from dsl_core.planning_bridge import split_objectives
+    from dsl_core.registry import primitives as prims
 
     claimable = tools.executable_objectives(prims)
     assert claimable == set(prims.OBJECTIVE_PRIMITIVES), (
@@ -91,7 +90,7 @@ def test_constraint_executability_is_honest():
     这条测试守两件事：已实现的 11 个不许被误报成不能编译（藏能力），
     未实现的 4 个不许被误报成能编译（递假情报）。
     """
-    from app.core.dsl.registry import primitives as prims
+    from dsl_core.registry import primitives as prims
 
     compiled = set(prims.COMPILED_CONSTRAINTS)
     for name in prims.CONSTRAINT_PRIMITIVES:
@@ -111,9 +110,10 @@ def test_all_constraint_branches_exist():
     这条防的是另一头：某个原语被加进 COMPILED_CONSTRAINTS、却没写编译分支。
     那时工具会如实报 True（因为它在 COMPILED 里），而求解阶段才炸。
     """
-    from app.core.dsl.registry import primitives as prims
+    import dsl_core
+    from dsl_core.registry import primitives as prims
 
-    source = Path(paths.KERNEL).parent.parent / "backend/app/core/dsl/compiler.py"
+    source = Path(dsl_core.__file__).parent / "compiler.py"
     if not source.exists():        # 路径变了就跳过，不让它误报
         pytest.skip("找不到 compiler.py")
     text = source.read_text(encoding="utf-8")
@@ -237,7 +237,7 @@ def test_prepare_change_shares_one_verdict_with_compile_check():
     两边都调 validate_dsl，所以断言是「逐字相等」而不是「都是错的」。
     一旦有人给其中一边加个"顺手也查一下"，这条会立刻红。
     """
-    import pipeline
+    from llmfirst import pipeline
 
     bad = {"constraints": [{"type": "linear", "op": "<=", "value": 1,
                             "terms": [[1, "最后完工时间"]]}]}
@@ -274,7 +274,7 @@ def test_prepare_change_never_pretends_to_pass_when_validator_is_missing(monkeyp
     real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
-        if name == "app.core.dsl.validator" or name.endswith("dsl.validator"):
+        if name == "dsl_core.validator":
             raise ImportError("模拟校验器缺失")
         return real_import(name, *args, **kwargs)
 

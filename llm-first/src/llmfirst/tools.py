@@ -40,10 +40,9 @@ from __future__ import annotations
 
 from typing import Any
 
-import paths  # noqa: F401  （副作用：把 ../backend 挂进 sys.path）
 
-import prompt
-import verify
+from . import prompt
+from . import verify
 
 _PARAM_ROUTE = "parameters"   # 参数表 122 行里，只有这个 route 才是真参数
 _MAX_ITEMS = 40
@@ -68,9 +67,9 @@ _OBJECTIVE_NOTE: dict[str, str] = {
 
 def _registries():
     """延迟导入注册表：只有真要查的时候才加载，import 本模块不拖慢启动。"""
-    from app.core.dsl.registry import parameters as params
-    from app.core.dsl.registry import primitives as prims
-    from app.core.dsl.registry import quantities as qtys
+    from dsl_core.registry import parameters as params
+    from dsl_core.registry import primitives as prims
+    from dsl_core.registry import quantities as qtys
     return params, prims, qtys
 
 
@@ -390,7 +389,7 @@ def prepare_change(arguments: dict[str, Any]) -> dict[str, Any]:
             "errors": ["dsl 必须是一个非空对象，把你最终要交的那份原样传进来。"],
         }
     try:
-        from app.core.dsl.validator import validate_dsl
+        from dsl_core.validator import validate_dsl
     except Exception as exc:  # 执行侧没装起来时，不假装通过
         return {
             "status": "unavailable",

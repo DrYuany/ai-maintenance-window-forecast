@@ -12,7 +12,7 @@ from typing import Any
 
 
 REGISTRY_PATH = (
-    Path(__file__).resolve().parents[3]
+    Path(__file__).resolve().parents[1]
     / "maintenance-milp-modeler"
     / "references"
     / "四种目标模板.json"
@@ -184,7 +184,7 @@ def capability_markdown() -> str:
 
     这份目录是能力问句的直答，不依赖任何已生成的方案。
     """
-    from app.core.planning_intent import part_catalog_text
+    from .part_catalog import part_catalog_text
 
     lines = [weight_table_markdown(), "", "**能改的数据**", "",
              "| 类别 | 说法示例 |", "| --- | --- |",

@@ -200,13 +200,12 @@ def default(with_params: bool = False) -> Context:
 def param_values() -> tuple[tuple[str, Any, str], ...]:
     """读一遍参数快照。**失败就返回空**，让提示词少一段——不许因为读不到数据就报错。"""
     try:
-        import paths  # noqa: F401  （挂 sys.path）
         from pathlib import Path
 
-        from app.core.dsl.registry import parameters as param_reg
+        from dsl_core.registry import parameters as param_reg
         from product_data import load_project
 
-        root = Path(__file__).resolve().parents[2]
+        root = Path(__file__).resolve().parents[3]
         data = load_project(root, base_id="基座01")
         out = []
         for row in param_reg._rows():
@@ -227,12 +226,11 @@ _CACHE: dict[str, Context] = {}
 def window_values() -> tuple[tuple[str, str, str], ...]:
     """读海事窗口的起止。**失败就返回空**，同 param_values。"""
     try:
-        import paths  # noqa: F401
         from pathlib import Path
 
         from product_data import load_project
 
-        root = Path(__file__).resolve().parents[2]
+        root = Path(__file__).resolve().parents[3]
         data = load_project(root, base_id="基座01")
         out = []
         for win in data.observation_windows:

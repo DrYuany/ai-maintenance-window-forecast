@@ -18,8 +18,8 @@ sys.path.insert(0, str(ROOT / "eval"))
 sys.path.insert(0, str(ROOT.parent / "backend"))
 
 import cases as casebook  # noqa: E402
-import context as session  # noqa: E402
-import pipeline  # noqa: E402
+from llmfirst import context as session  # noqa: E402
+from llmfirst import pipeline  # noqa: E402
 
 DEFAULT_IDS = ["A01", "A02", "A05", "A09", "B01", "B02", "C08", "G01", "G03", "J08"]
 

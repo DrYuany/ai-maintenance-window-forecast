@@ -20,14 +20,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-import client
-import context as session
-import contract
-import guardrail
-import prompt
-import segment
-import tools
-import verify
+from . import client
+from . import context as session
+from . import contract
+from . import guardrail
+from . import prompt
+from . import segment
+from . import tools
+from . import verify
 
 # 一次提问里最多允许模型查几轮工具。
 # 4 是实测下来的：多数句子 0~1 次就查完了；给到 4 是因为复合句可能
@@ -215,7 +215,7 @@ def _compile_check(dsl: dict[str, Any], data=None) -> list[str]:
     if not dsl:
         return []
     try:
-        from app.core.dsl.validator import validate_dsl
+        from dsl_core.validator import validate_dsl
     except Exception as exc:  # 执行侧没装起来时，不假装通过
         return [f"无法加载校验器：{type(exc).__name__}: {exc}"]
     try:

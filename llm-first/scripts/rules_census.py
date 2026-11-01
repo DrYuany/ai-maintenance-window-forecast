@@ -18,12 +18,12 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]  # 仓库根
 SRC = pathlib.Path(__file__).resolve().parents[1]  # llm-first
 sys.path.insert(0, str(SRC / "src"))
+sys.path.insert(0, str(ROOT))  # repo root: dsl_core
 
-import paths  # noqa: E402,F401  （副作用：把 ../backend 挂进 sys.path）
 
-from app.core.dsl.registry import parameters as param_reg  # noqa: E402
-from app.core.dsl.registry import primitives as prim_reg  # noqa: E402
-from app.core.dsl.registry import quantities as qty_reg  # noqa: E402
+from dsl_core.registry import parameters as param_reg  # noqa: E402
+from dsl_core.registry import primitives as prim_reg  # noqa: E402
+from dsl_core.registry import quantities as qty_reg  # noqa: E402
 
 
 def _text(rel: str) -> str:
@@ -32,7 +32,7 @@ def _text(rel: str) -> str:
 
 def layer_front() -> list[tuple[str, str]]:
     """L1：写在 Python 里的硬规则。模型看不见，先于模型执行。"""
-    import segment
+    from llmfirst import segment
     guard = _text("llm-first/src/guardrail.py")
     ctx = _text("llm-first/src/context.py")
     return [
@@ -45,7 +45,7 @@ def layer_front() -> list[tuple[str, str]]:
 
 def layer_registry() -> list[tuple[str, str]]:
     """L2：CSV / 注册表驱动。本来就是数据文件，不是规则代码。"""
-    import context as session  # noqa: F401  （保证 products 侧路径一致）
+    from llmfirst import context as session  # noqa: F401  （保证 products 侧路径一致）
     params = sum(1 for r in param_reg._rows()
                  if param_reg.route_of(r["参数名称"]) == "parameters")
     return [
@@ -61,8 +61,8 @@ def layer_registry() -> list[tuple[str, str]]:
 
 def layer_prompt() -> tuple[list[tuple[str, str]], int]:
     """L3：提示词里的自然语言规则。改文档注入只能动这一层。"""
-    import context as session
-    import prompt
+    from llmfirst import context as session
+    from llmfirst import prompt
     ctx = session.with_params_for(session.default())
     rows = [(name, f"{size} 字符") for name, size in prompt.stats(ctx)]
     return rows, len(prompt.build(ctx))
@@ -70,9 +70,9 @@ def layer_prompt() -> tuple[list[tuple[str, str]], int]:
 
 def layer_machine() -> tuple[list[tuple[str, str]], int]:
     """L4+L5：真正的裁判。是代码，搬不成文档。"""
-    verify_lines = _text("llm-first/src/verify.py").splitlines()
-    validator = _text("backend/app/core/dsl/validator.py")
-    compiler = _text("backend/app/core/dsl/compiler.py")
+    verify_lines = _text("llm-first/src/llmfirst/verify.py").splitlines()
+    validator = _text("dsl_core/validator.py")
+    compiler = _text("dsl_core/compiler.py")
     rows = [
         ("verify.py 判据", f"{len(verify_lines)} 行"),
         ("validator.py", f"{len(validator.splitlines())} 行 / "
@@ -103,7 +103,7 @@ def main() -> int:
     for name, value in rows:
         print(f"  {name:<16} {value}")
 
-    parser = _text("backend/app/core/dsl/llm_parser.py")
+    parser = _text("backend/app/core/llm_parser.py")
     print("\n=== 参照：规则主导版 llm_parser.py ===")
     print(f"  正则表           {len(parser.splitlines())} 行 / "
           f"{len(re.findall(r'^\s*\(rf?\"', parser, re.M))} 条")

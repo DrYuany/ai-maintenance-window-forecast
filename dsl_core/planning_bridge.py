@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from app.core.planning_intent import PlanningRequest
+from .planning_request import PlanningRequest
 
 from .registry.parameters import PARAM_NAME_TO_KEY
 

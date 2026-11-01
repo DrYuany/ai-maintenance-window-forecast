@@ -16,7 +16,7 @@
 """
 from __future__ import annotations
 
-import rulebench
+from llmfirst import rulebench
 
 
 def test_compound_all_claimed_by_rules():

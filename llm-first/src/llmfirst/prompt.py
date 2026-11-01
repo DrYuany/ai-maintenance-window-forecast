@@ -30,15 +30,14 @@ from pathlib import Path
 if __package__ in (None, ""):  # 允许 `python src/prompt.py` 直接跑
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import paths  # noqa: E402,F401  （副作用：把 ../backend 挂进 sys.path）
 
-import context as session  # noqa: E402  （会话基准日期；与 verify 共用同一份换算）
-import segment as seg  # noqa: E402  （连接词表与切段逻辑同源）
+from . import context as session  # noqa: E402  （会话基准日期；与 verify 共用同一份换算）
+from . import segment as seg  # noqa: E402  （连接词表与切段逻辑同源）
 
-from app.core.dsl import validator as dsl_validator  # noqa: E402
-from app.core.dsl.registry import parameters as param_reg  # noqa: E402
-from app.core.dsl.registry import primitives as prim_reg  # noqa: E402
-from app.core.dsl.registry import quantities as qty_reg  # noqa: E402
+from dsl_core import validator as dsl_validator  # noqa: E402
+from dsl_core.registry import parameters as param_reg  # noqa: E402
+from dsl_core.registry import primitives as prim_reg  # noqa: E402
+from dsl_core.registry import quantities as qty_reg  # noqa: E402
 
 # ── 表 A 的分组与顺序 ──────────────────────────────────────────────────────
 # 按业务语义分组，不按 CSV 行序：模型找"海况"时四个连着，比散在 15 行里好找。

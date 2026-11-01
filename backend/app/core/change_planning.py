@@ -98,8 +98,8 @@ def plan_dsl_change(
 ) -> DslChange | None:
     """解析 → 校验 → 映射。解析不到 DSL 或表达不了时返回 None。"""
     try:
-        from app.core.dsl.llm_parser import parse as dsl_parse
-        from app.core.dsl.planning_bridge import custom_objectives, dsl_to_request
+        from app.core.llm_parser import parse as dsl_parse
+        from dsl_core.planning_bridge import custom_objectives, dsl_to_request
         from app.core.model_change import _diff_requests
     except Exception:  # pragma: no cover - DSL 包缺失时静默回退
         return None

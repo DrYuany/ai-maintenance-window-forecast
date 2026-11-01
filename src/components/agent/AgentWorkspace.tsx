@@ -27,6 +27,8 @@ export function AgentWorkspace() {
     selectConversation,
     sendMessage,
     controlActiveJob,
+    engine,
+    setEngine,
   } = useAgentStore();
   const [contextVersionId, setContextVersionId] = useState<string | null>(null);
   const [detailVersionId, setDetailVersionId] = useState<string | null>(null);
@@ -92,6 +94,8 @@ export function AgentWorkspace() {
           }
           onOpenVersion={openVersion}
           onControlJob={(action) => controlActiveJob(action)}
+          engine={engine}
+          onEngineChange={setEngine}
         />
       )}
       {error ? <div className="agent-error">{error}</div> : null}

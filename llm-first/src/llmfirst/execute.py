@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 WORKER = ROOT / "scripts" / "worker.py"
 
 # 默认只跑前几个任务：完整 12 任务的模型在短时限内证不完，跑完也说明不了什么。

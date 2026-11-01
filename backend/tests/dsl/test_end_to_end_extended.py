@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from app.core.dsl.runner import run
+from dsl_core.runner import run
 import pytest
 
 pytestmark = pytest.mark.slow
@@ -168,7 +168,7 @@ def test_lexmin_minimizes_total_cost_via_metrics() -> None:
 
 def test_full_pipeline_nl_to_solve() -> None:
     """全链路：自然语言 → 规则层解析 → DSL → 真求解 → 约束生效。"""
-    from app.core.dsl.llm_parser import parse
+    from app.core.llm_parser import parse
 
     result = parse("任务001和任务002不能在同一天出海维修")
     assert result.source == "rule"

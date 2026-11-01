@@ -22,8 +22,8 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bench_compare  # noqa: E402
-import pipeline  # noqa: E402
-import rulebench  # noqa: E402
+from llmfirst import pipeline  # noqa: E402
+from llmfirst import rulebench  # noqa: E402
 
 
 def run(repeat: int) -> list[dict]:

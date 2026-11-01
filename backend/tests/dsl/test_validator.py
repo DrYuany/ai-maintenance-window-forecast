@@ -1,7 +1,7 @@
 """校验器单测（纯 Python，不依赖 OR-Tools/求解）。"""
 from __future__ import annotations
 
-from app.core.dsl.validator import validate_dsl
+from dsl_core.validator import validate_dsl
 
 
 def test_valid_co_occur_dsl_passes_structure_check() -> None:

@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 
-from app.core.dsl.runner import DslError, run
+from dsl_core.runner import DslError, run
 import pytest
 
 pytestmark = pytest.mark.slow

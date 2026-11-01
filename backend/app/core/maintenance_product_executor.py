@@ -74,7 +74,7 @@ class MaintenanceProductExecutor:
             extra_constraints = None
             custom_stages = None
             if dsl:
-                from app.core.dsl.validator import validate_dsl
+                from dsl_core.validator import validate_dsl
 
                 dsl_errors = validate_dsl(dsl, data)
                 if dsl_errors:
@@ -83,8 +83,8 @@ class MaintenanceProductExecutor:
                     )
                 # 第三期：DSL 全段编译——参数/数据/目标并入 PlanningRequest，
                 # 只剩 PlanningRequest 表达不了的约束/目标走注入闭包。
-                from app.core.dsl.compiler import constraints_builder, stages_builder
-                from app.core.dsl.planning_bridge import custom_objectives, dsl_to_request
+                from dsl_core.compiler import constraints_builder, stages_builder
+                from dsl_core.planning_bridge import custom_objectives, dsl_to_request
 
                 request, residual, timeline = dsl_to_request(dsl, request)
                 if request.relative_overrides:

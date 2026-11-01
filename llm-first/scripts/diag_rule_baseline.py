@@ -30,7 +30,7 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE.parent / "src"))
 
 from eval.cases import suite as load_suite  # noqa: E402
-from rulebench import understand_rule  # noqa: E402
+from llmfirst.rulebench import import understand_rule  # noqa: E402
 
 _ABSTAIN = {"needs_llm", "unparsed", ""}
 

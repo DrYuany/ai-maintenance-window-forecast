@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-import contract
+from llmfirst import contract
 
 
 def test_plain_object_still_parses() -> None:

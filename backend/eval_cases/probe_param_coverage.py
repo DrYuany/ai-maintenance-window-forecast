@@ -29,9 +29,10 @@ for path in (BACKEND_ROOT, PROJECT_ROOT / "maintenance-milp-modeler" / "scripts"
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from app.core.dsl.planning_bridge import dsl_to_request  # noqa: E402
-from app.core.dsl.registry import parameters as param_reg  # noqa: E402
-from app.core.dsl.validator import validate_dsl  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: dsl_core
+from dsl_core.planning_bridge import dsl_to_request  # noqa: E402
+from dsl_core.registry import parameters as param_reg  # noqa: E402
+from dsl_core.validator import validate_dsl  # noqa: E402
 from product_data import OVERRIDES, load_project  # noqa: E402
 
 # 每项的探针取值：只求"格式合法"，不追求业务含义。

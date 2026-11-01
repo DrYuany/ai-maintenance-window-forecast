@@ -5,8 +5,8 @@
 """
 from __future__ import annotations
 
-import answer
-import execute
+from llmfirst import answer
+from llmfirst import execute
 
 
 # ── 1. 问的是哪个参数 ──────────────────────────────────────────────────────

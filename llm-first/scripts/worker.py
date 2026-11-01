@@ -49,7 +49,7 @@ def _load(dsl: dict | None = None, max_tasks: int | None = None, base_id: str = 
     base = load_project(ROOT, base_id=base_id)
     overrides = data_patches = timeline = None
     if dsl:
-        from app.core.dsl.compiler import compile_data, compile_parameters
+        from dsl_core.compiler import compile_data, compile_parameters
 
         if dsl.get("parameters"):
             overrides = compile_parameters(dsl["parameters"], base)
@@ -78,7 +78,7 @@ def _breakdown(data, schedule) -> dict:
 
 
 def mode_solve(payload: dict) -> dict:
-    from app.core.dsl.runner import DslError, run
+    from dsl_core.runner import DslError, run
 
     dsl = payload.get("dsl") or {}
     seconds = int(payload.get("seconds") or 10)
@@ -152,7 +152,7 @@ def mode_profile(payload: dict) -> dict:
 def mode_diff(payload: dict) -> dict:
     """同一批任务，换目标策略各解一次。**这不是"哪个方案更好"的证明**，
     只是同一时限下两种目标各自能走到哪——时限短，结论要打折。"""
-    from app.core.dsl.runner import run
+    from dsl_core.runner import run
 
     base_dsl = payload.get("dsl") or {}
     seconds = int(payload.get("seconds") or 5)

@@ -44,8 +44,9 @@ BACKEND = Path(__file__).resolve().parents[1]
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from app.core.dsl.registry import parameters as param_reg  # noqa: E402
-from app.core.dsl.registry.primitives import (  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: dsl_core
+from dsl_core.registry import parameters as param_reg  # noqa: E402
+from dsl_core.registry.primitives import (  # noqa: E402
     CONSTRAINT_PRIMITIVES,
     OBJECTIVE_PRIMITIVES,
     OPS,

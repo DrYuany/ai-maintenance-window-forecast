@@ -5,75 +5,17 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.core import objective_catalog
+from dsl_core import objective_catalog
+from dsl_core.part_catalog import (
+    _PART_ALIASES,
+    _PART_ALIAS_KEYS,
+    _PART_ALIAS_TO_ID,
+    _SEVERITY_ALIASES,
+    part_catalog_text,
+)
+from dsl_core.planning_request import PlanningRequest
 
 _TZ = timezone(timedelta(hours=8))
-
-# 业务零件的注册名：模型侧内部编号 → 人话别名。
-# 大模型只会看到别名，永远看不到“部件04”这类内部编号；查不到就报错，不许猜。
-_PART_ALIASES = {
-    "部件01": ("部件01", "叶片", "叶片备件", "桨叶"),
-    "部件02": ("部件02", "轮毂", "轮毂备件"),
-    "部件03": ("部件03", "主轴", "主轴备件"),
-    "部件04": ("部件04", "齿轮箱", "齿轮箱备件"),
-    "部件05": ("部件05", "发电机", "发电机备件"),
-    "部件06": ("部件06", "偏航电机", "偏航"),
-    "部件07": ("部件07", "变桨电机", "变桨"),
-    "部件08": ("部件08", "变频器"),
-}
-_PART_ALIAS_TO_ID = {
-    alias: part_id for part_id, aliases in _PART_ALIASES.items() for alias in aliases
-}
-# 长别名优先，避免“叶片”抢先匹配掉“叶片备件”。
-_PART_ALIAS_KEYS = sorted(_PART_ALIAS_TO_ID, key=len, reverse=True)
-
-_SEVERITY_ALIASES = (
-    (("严重故障", "高风险", "高严重", "高严重度", "高危"), "高"),
-    (("中等故障", "中风险", "中严重", "中严重度"), "中"),
-    (("轻微故障", "低风险", "低严重", "低严重度"), "低"),
-)
-
-
-def part_catalog_text() -> str:
-    """给大模型看的零件名清单（能力目录的一部分）。"""
-    return "、".join(aliases[1] if len(aliases) > 1 else aliases[0] for aliases in _PART_ALIASES.values())
-
-
-@dataclass(frozen=True)
-class PlanningRequest:
-    base: str = "基座01"
-    strategy: str = "成本最低优先"
-    mode: str = "分层"
-    seconds: int = 300
-    weights: dict[str, float] | None = None
-    limits: dict[str, Any] = field(default_factory=dict)
-    overrides: dict[str, Any] = field(default_factory=dict)
-    relative_overrides: dict[str, float] = field(default_factory=dict)
-    # 行级数据补丁：改的是业务记录行，不是全局参数。
-    # 三种：part_arrival（备件到货）、task_deadline（任务期限）、part_hours（部件工时）。
-    data_patches: list[dict[str, Any]] = field(default_factory=list)
-
-    def to_payload(self) -> dict[str, Any]:
-        return {
-            "base": self.base,
-            "strategy": self.strategy,
-            "mode": self.mode,
-            "seconds": self.seconds,
-            "weights": self.weights,
-            "limits": dict(sorted(self.limits.items())),
-            "overrides": dict(sorted(self.overrides.items())),
-            "relative_overrides": dict(sorted(self.relative_overrides.items())),
-            "data_patches": sorted(
-                (dict(sorted(patch.items(), key=lambda kv: kv[0])) for patch in self.data_patches),
-                key=lambda patch: json_key(patch),
-            ),
-        }
-
-
-def json_key(patch: dict[str, Any]) -> str:
-    import json
-
-    return json.dumps(patch, ensure_ascii=False, sort_keys=True)
 
 
 @dataclass(frozen=True)

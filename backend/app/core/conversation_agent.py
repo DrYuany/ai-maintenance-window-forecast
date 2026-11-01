@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from anthropic import Anthropic
 
-from app.core import objective_catalog
+from dsl_core import objective_catalog
 from app.core.agent_tools import AgentToolbox
 from app.core.conversation_memory import (
     RECENT_MESSAGES,
