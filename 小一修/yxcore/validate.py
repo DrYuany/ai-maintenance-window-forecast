@@ -237,6 +237,20 @@ def _check_static(patch: Patch, data, options: dict[str, list[dict]]) -> list[st
     return errors
 
 
+def _check_cap_zero(patch: Patch) -> str | None:
+    """cap_max 拧到 0 的护栏：那是「那条船/那台风机一个都不许用」，不是「全部停工」。
+
+    「2 号船别排」被误译成 cap_max[作业线, 某日]=0 时，约束实际变成「那天一条船都不派」——
+    过度封锁且不报错，是典型的"生效了但生效错了"。这里明确说出来。
+    """
+    if patch.slot != "cap_max" or patch.value != 0:
+        return None
+    dim = patch.index.get("维度", {}).get("value")
+    bucket = patch.index.get("桶", {}).get("value", "全程")
+    return (f"容量上限拧到 0 等于「{bucket} 一条{dim or '实例'}都不许用」。"
+            f"如果只是某一条{dim or '实例'}不派，请用 bucket_max（组=作业线编号）")
+
+
 def _check_conflicts(patches: list[Patch], data) -> list[str]:
     """第 5 条：槽位冲突——同一批任务既被钉死必修又被钉死不修。"""
     errors: list[str] = []
@@ -318,6 +332,11 @@ def validate(
         errors.extend(_check_static(patch, data, options))
 
     errors.extend(_check_conflicts(patches, data))
+
+    for patch in patches:
+        hint = _check_cap_zero(patch)
+        if hint:
+            warnings.append(hint)
 
     # 硬软同现：同一批任务既有硬排序又有软权重
     hard_sort = any(p.slot in ("sev_before", "before_seq") for p in patches)

@@ -114,7 +114,11 @@ _ENUM_KINDS = {
 # 显式登记别名是确定的映射，不是猜——猜是指「两个候选都对得上还硬选一个」。
 _KIND_ALIASES = {
     "budget_口径": {"人工费": "人工", "备件费": "备件", "船舶艘天": "租船天",
-                    "租船费用": "租船天", "总费用": "总成本"},
+                    "租船费用": "租船天", "总经济成本": "总成本", "总费用": "总成本",
+                    "现金支出": "现金"},
+    # 「起」不是「开始」的子串，是同义词——子串匹配救不了，只能显式登记
+    "端": {"起": "开始", "起始": "开始", "开始时间": "开始",
+           "止": "结束", "结束时间": "结束"},
 }
 
 
@@ -128,14 +132,23 @@ def normalize_patch(patch: "Patch") -> "Patch":
 
     # 模型写的 kind 常常是口语（"口径"而非"budget_口径"）。枚举按注册表**声明**的
     # kind 去查——校验器本来也只用声明的 kind，这里跟它保持一致。
+    # 单 kind 的维度（量/口径/维度/任务/部件/窗口/项/端…）只有一种可能，写好值就够了；
+    # 多 kind 的维度（组/桶/范围：部件还是风机？窗口还是某日？）必须带 kind，否则就是猜。
     declared = dict(S.SLOTS.get(patch.slot).index) if patch.slot in S.SLOTS else {}
+    multi_kind = {"group", "bucket", "group_or_bucket"}
     index = {}
     for key, spec in patch.index.items():
         if not isinstance(spec, dict):
-            index[key] = spec
-            continue
+            kind = declared.get(key)
+            if kind and kind not in multi_kind:
+                spec = {"kind": kind, "value": spec}
+            else:
+                index[key] = spec  # 多 kind 维度给了裸值：不猜，交给校验器报错
+                continue
         spec = dict(spec)
         value = spec.get("value")
+        if isinstance(value, str) and re.fullmatch(r"\d+\s*号(船|作业线|线)?", value.strip()):
+            value = int(re.match(r"\d+", value.strip()).group())  # 「2号船」→ 2
         # 「11月16号」被写成区间 [16,16] 或单元素清单，都归一成单值
         if isinstance(value, (list, tuple)):
             if len(value) == 1:
