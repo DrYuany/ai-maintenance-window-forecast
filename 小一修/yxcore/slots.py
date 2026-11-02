@@ -139,7 +139,9 @@ SLOTS: dict[str, Slot] = {
         default="成本最低优先", default_note="成本最低优先",
         value_type="enum", consumption="model", strength="both",
         reconcile="reconcile_strategy",
-        examples=("按成本最低排", "先保高危", "越早干完越好", "尽量多修几个"),
+        examples=("按成本最低排", "整体按高风险抢修的思路排", "越早干完越好", "尽量多修几个"),
+        note="只在用户要**整体切换排程风格**时用它（四选一）。"
+             "「高危优先」「先保高严重」这类只点了一个偏好量的，落 weight（软），不要动 strategy",
     ),
     "weight": Slot(
         name="weight", group="B", label="目标权重", route="weights",
@@ -218,7 +220,8 @@ SLOTS: dict[str, Slot] = {
         unit="个", value_type="int", bounds=(0, 999), consumption="model", strength="hard",
         reconcile="reconcile_cap",
         examples=("11月8号最多开两条船", "这周每天最多动 3 台风机"),
-        note="默认不是无穷大，是跟随 A 组作业线数——否则会把内核的 NoOverlap 语义改掉",
+        note="默认不是无穷大，是跟随 A 组作业线数——否则会把内核的 NoOverlap 语义改掉。"
+             "桶必须是一个明确时段（某日/窗口）；**不带时段的「最多开 N 条船」是参数「最多作业线数」，不落这里**",
     ),
     # G 组 · 花多少
     "budget_max": Slot(
