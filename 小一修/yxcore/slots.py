@@ -136,7 +136,7 @@ SLOTS: dict[str, Slot] = {
     # B 组 · 目标
     "strategy": Slot(
         name="strategy", group="B", label="排程策略", route="strategy",
-        index=(("策略", "strategy"),), default="成本最低优先", default_note="成本最低优先",
+        default="成本最低优先", default_note="成本最低优先",
         value_type="enum", consumption="model", strength="both",
         reconcile="reconcile_strategy",
         examples=("按成本最低排", "先保高危", "越早干完越好", "尽量多修几个"),
@@ -199,9 +199,10 @@ SLOTS: dict[str, Slot] = {
         index=(("组", "group"),), default=None, default_note="任务自带期限",
         unit="时刻", value_type="minutes", consumption="candidates", strength="hard",
         reconcile="reconcile_deadline",
-        examples=("高危一周内干完", "期限整体放宽 3 天", "齿轮箱提前到 20 号前完成"),
+        examples=("高危一周内干完", "齿轮箱提前到 20 号前完成", "这批活 18 号前必须收尾"),
         note="只走数据补丁，不走注入口：verify_schedule 按 task['截止分钟'] 复算，"
-             "走注入口会出现两边口径不一致（R2）",
+             "走注入口会出现两边口径不一致（R2）。"
+             "且**只能提前不能放宽**——内核的期限补丁只做收紧，放宽会明确拒绝",
     ),
     # F 组 · 用哪条船
     "line_fixed": Slot(
