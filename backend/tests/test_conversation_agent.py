@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+import re
 from types import SimpleNamespace
 
 from app.core import conversation_agent as module
@@ -228,6 +230,24 @@ def test_prompt_states_description_is_the_authority() -> None:
     prompt = _system_prompt()
 
     assert "以每个工具的说明为准" in prompt
+
+
+def test_prompt_tool_map_matches_tool_specs() -> None:
+    """提示词里的工具地图必须和 tool_specs 实际下发的工具对得上。
+
+    真出过的事：工具从 6 个长到 9 个，提示词还写着"八个"，`read_jobs` 一直不在
+    名单里——模型不知道能查求解进度，只好凭印象说"请到方案页面查看"。
+    这里从 tool_specs 的源码里数名字：工具增减会让本测试自己红，逼着一起改。
+    """
+    source = inspect.getsource(AgentToolbox.tool_specs)
+    names = re.findall(r'"name":\s*"([a-z_]+)"', source)
+    assert names, "没从 tool_specs 里解析出工具名，正则要更新了"
+    assert len(names) == 9, f"工具数变成 {len(names)} 个（{names}），提示词里的数量话术要一起改"
+
+    prompt = _system_prompt()
+    missing = [name for name in names if name not in prompt]
+    assert not missing, f"提示词的工具地图漏了：{missing}"
+    assert "九个工具" in prompt
 
 
 def test_contract_preview_is_not_paraphrased(monkeypatch) -> None:
