@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -71,6 +72,33 @@ from app.schemas.dashboard import DashboardResponse
 
 SHANGHAI_TZ = timezone(timedelta(hours=8))
 SKILL_NAME = "maintenance-milp-modeler"
+
+# --------------------------------------------------------------- 理解引擎
+# llm = LLM 主导（llm-first），rule = 规则主导（旧路径）。
+# 产线默认 llm：两套理解层并排跑了很久，规则侧该退了；前端默认也是 llm，
+# 服务端跟着改，免得「前端发 llm、直接调 API 的走 rule」两套口径。
+#
+# 回滚不用改代码：设环境变量 AGENT_ENGINE=rule 即可（改完重启进程）。
+# 之所以敢默认切过去：LLM 主导解析在没配 key、包没接好、调用异常时都会
+# 自己返回 None 退回规则路径，不会把对话搞死——最坏情况是慢一点，不是答错。
+ENGINE_LLM = "llm"
+ENGINE_RULE = "rule"
+ENGINE_ENV_VAR = "AGENT_ENGINE"
+
+
+def default_engine() -> str:
+    """产线默认引擎。环境变量 AGENT_ENGINE=rule 时回滚到规则主导。"""
+    return (
+        ENGINE_RULE
+        if os.environ.get(ENGINE_ENV_VAR, "").strip().lower() == ENGINE_RULE
+        else ENGINE_LLM
+    )
+
+
+def resolve_engine(engine: str | None) -> str:
+    """请求里带了就用带的（前端切换控件），没带或带了不认识的值就用默认。"""
+    value = (engine or "").strip().lower()
+    return value if value in (ENGINE_LLM, ENGINE_RULE) else default_engine()
 
 # 实体快照缓存：load_project 首次约 0.6s，之后内部缓存 0.01s；
 # 这里再缓存一层，避免每次解析都走 import/路径拼接。
@@ -279,7 +307,7 @@ class AgentRuntime:
         selected_version_id: str | None = None,
         selected_window_id: str | None = None,
         sink: StreamSink | None = None,
-        engine: str = "rule",
+        engine: str | None = None,
         llm_api_key: str | None = None,
     ) -> AgentResponse:
         # 访客自带的密钥只在这一轮有效，退出时还原——线程会复用，
@@ -292,7 +320,7 @@ class AgentRuntime:
                 selected_version_id=selected_version_id,
                 selected_window_id=selected_window_id,
                 sink=sink,
-                engine=engine,
+                engine=resolve_engine(engine),
             )
         finally:
             end_llm_turn(previous_key)
@@ -306,7 +334,7 @@ class AgentRuntime:
         content: str,
         selected_version_id: str | None = None,
         selected_window_id: str | None = None,
-        engine: str = "rule",
+        engine: str | None = None,
         llm_api_key: str | None = None,
     ):
         queue: Queue = Queue()
@@ -319,7 +347,7 @@ class AgentRuntime:
                     selected_version_id=selected_version_id,
                     selected_window_id=selected_window_id,
                     sink=StreamSink(queue.put),
-                    engine=engine,
+                    engine=resolve_engine(engine),
                     llm_api_key=llm_api_key,
                 )
                 queue.put({"event": "done", "data": response.model_dump()})
@@ -340,14 +368,14 @@ class AgentRuntime:
         selected_version_id: str | None = None,
         selected_window_id: str | None = None,
         sink: StreamSink | None = None,
-        engine: str = "rule",
+        engine: str | None = None,
     ) -> AgentResponse:
         conversation = self.conversations.get(conversation_id)
         if not conversation:
             raise ValueError("Conversation not found")
 
         self._begin_trace(conversation_id, content)
-        self._tls.engine = engine
+        self._tls.engine = resolve_engine(engine)
 
         now = datetime.now(SHANGHAI_TZ).isoformat()
         self.messages.add(Message(
@@ -1079,7 +1107,7 @@ class AgentRuntime:
         LLM 失败（超时/网络/坏响应）降级为 clarify，不再回退旧 conversation_agent
         二次调 LLM；只有「未配置 key」（ParseUnavailable）才返回 None 走旧路径。
         """
-        if getattr(self._tls, "engine", "rule") == "llm":
+        if resolve_engine(getattr(self._tls, "engine", None)) == "llm":
             return self._llm_first_parse(content, sink=sink)
 
         try:

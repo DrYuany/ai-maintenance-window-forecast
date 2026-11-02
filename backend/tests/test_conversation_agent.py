@@ -188,6 +188,48 @@ def test_verbatim_plus_other_request_does_not_drop_the_second_half(monkeypatch) 
     assert "目标函数……" in out, "原样内容仍然要出现在最终答复里"
 
 
+# --- 系统提示词：只装工具说明装不下的东西 -----------------------------------
+# 「什么时候调哪个工具、参数怎么传」的唯一权威是 agent_tools.tool_specs() 里的
+# description。系统提示词再写一遍就会漂移：改了这边忘那边，模型看到两份说法。
+# 它真正该装的是三样：跨工具顺序 / 产品级事实 / 输出规范。
+
+
+def _system_prompt() -> str:
+    agent = module.ConversationAgent(api_key="test-key")
+    return agent._system_prompt(
+        SimpleNamespace(latestResultId=None),
+        SimpleNamespace(ordered=[], plan_numbers={}),
+        None,
+        None,
+    )
+
+
+def test_prompt_does_not_repeat_tool_parameter_recipes() -> None:
+    """参数级用法（include=、versions=、scope=）属于工具说明，不该出现在提示词里。"""
+    prompt = _system_prompt()
+
+    for leaked in ('include=["model"]', 'include=["costs"]', 'include=["status"]',
+                   'include=["parameters"]', "scope=", "detail=", "baseline"):
+        assert leaked not in prompt, f"{leaked} 是工具参数，应该只在 description 里"
+
+
+def test_prompt_keeps_what_descriptions_cannot_hold() -> None:
+    """跨工具顺序、产品事实、输出规范——这三样工具说明装不下，必须留着。"""
+    prompt = _system_prompt()
+
+    assert "submit_change" in prompt and "solve" in prompt, "跨工具状态机要留"
+    assert "comparability.savingsClaimAllowed" in prompt, "可不可比是产品级判据"
+    assert "原样输出" in prompt, "输出规范要留"
+    assert "CP-SAT" in prompt, "求解器是产品级事实"
+    assert "UNKNOWN" in prompt, "四态口径是产品级事实"
+
+
+def test_prompt_states_description_is_the_authority() -> None:
+    prompt = _system_prompt()
+
+    assert "以每个工具的说明为准" in prompt
+
+
 def test_contract_preview_is_not_paraphrased(monkeypatch) -> None:
     """变更预览是契约，模型这轮说的话不能和它一起摆出来。
 

@@ -4,10 +4,10 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Literal
 
-from app.core.agent_runtime import AgentRuntime
+from app.core.agent_runtime import AgentRuntime, default_engine
 from app.core.demo_access import USER_KEY_HEADER, normalize_key
 from app.schemas.agent import AgentResponse, SolveJobPayload
 
@@ -25,9 +25,10 @@ class AgentMessageRequest(BaseModel):
     message: str
     selectedVersionId: str | None = None
     selectedWindowId: str | None = None
-    # 理解引擎：llm = LLM 主导，rule = 规则主导。默认 rule 保持旧行为；
-    # 「默认 LLM 优先」由前端切换控件实现（前端默认发 llm）。
-    engine: Literal["llm", "rule"] = "rule"
+    # 理解引擎：llm = LLM 主导，rule = 规则主导。
+    # 默认跟产线走（default_engine，见 agent_runtime）；前端切换控件会显式带上。
+    # 回滚：设环境变量 AGENT_ENGINE=rule，不用改代码也不用重新发版。
+    engine: Literal["llm", "rule"] = Field(default_factory=default_engine)
 
 
 def get_runtime() -> AgentRuntime:

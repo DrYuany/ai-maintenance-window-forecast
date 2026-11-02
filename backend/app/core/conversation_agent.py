@@ -32,12 +32,19 @@ TOOL_LABELS = {
     "submit_change": "提交排程变更",
 }
 
-DATA_QUESTION = re.compile(
+# 下面两个是**起手提示**，不是判断：它们只决定第 0 轮要不要把 tool_choice
+# 从 auto 顶成 any（逼模型先去读工具，而不是凭记忆编数字）。
+#
+# 为什么不是判断——一句话像不像在问数据，靠词表是判不准的：会漏（换个说法就
+# 不命中）、会误伤（问概念却被拉去调工具）、会腐烂（业务词一扩张词表就追不上）。
+# 所以调不调工具最终由模型 + 工具说明决定；漏掉的那一半由 answer_grounding
+# 在**输出端**兜住：答案里的数字追不到工具结果就当场标出来。
+DATA_HINT = re.compile(
     r"方案|版本|模型|参数|系数|约束|目标函数|公式|成本|费用|任务|窗口|船天|"
     r"对比|比较|差异|区别|最优|可行|状态|进度"
 )
 
-OPS_DATA = re.compile(
+OPS_HINT = re.compile(
     r"告警|报警|缺陷|库存|备件|风机台账|部件|海事窗口|检修单|工单|"
     r"执行反馈|船租|人工单价|系统参数|风速|电价|海况"
 )
@@ -120,6 +127,20 @@ class ConversationAgent:
         # 第二项标记它是不是"契约"（见 AUTHORITATIVE_TOOLS）。
         pending_verbatim: list[tuple[str, bool]] = []
         tool_used = False
+        # 数字溯源的依据：本轮所有工具返回的原始内容，外加用户原话。
+        # 用户自己报的数（「船租压到 8 万」）不算模型编的，所以原话也算出处。
+        sources: list[str] = [message]
+
+        def _grounded(text: str) -> str:
+            """答案里的数字追不到工具结果时，当场标出来——不替模型背书。"""
+            from app.core.answer_grounding import caveat_line, grounding_report
+
+            note = caveat_line(grounding_report(text, sources))
+            if not note:
+                return text
+            if on_token:
+                on_token("\n\n" + note)
+            return f"{text}\n\n{note}" if text.strip() else note
 
         def _finish() -> str:
             if any(authoritative for _, authoritative in pending_verbatim):
@@ -135,8 +156,8 @@ class ConversationAgent:
             force_tool = (
                 round_index == 0
                 and not tool_used
-                and bool(DATA_QUESTION.search(message))
-                and (bool(toolbox.ordered) or bool(OPS_DATA.search(message)))
+                and bool(DATA_HINT.search(message))
+                and (bool(toolbox.ordered) or bool(OPS_HINT.search(message)))
             )
             try:
                 with client.messages.stream(
@@ -164,7 +185,7 @@ class ConversationAgent:
                 text = _finish()
                 if not text:
                     raise ConversationAgentError("模型没有返回文本")
-                return text
+                return _grounded(text)
 
             tool_used = True
             assistant_blocks = [
@@ -198,11 +219,13 @@ class ConversationAgent:
                     verbatim_blocks.append(
                         (data["markdown"], block.name in AUTHORITATIVE_TOOLS)
                     )
+                payload = json.dumps(result, ensure_ascii=False, default=str)
+                sources.append(payload)
                 results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": json.dumps(result, ensure_ascii=False, default=str),
+                        "content": payload,
                     }
                 )
             if verbatim_blocks and all(b.name in PASSTHROUGH_TOOLS for b in tool_calls):
@@ -214,7 +237,7 @@ class ConversationAgent:
                 authoritative = any(auth for _, auth in verbatim_blocks)
                 # 契约类结果独占输出：模型这轮说的话是它的转述，不是系统契约。
                 prefix = "" if authoritative else "".join(collected).strip()
-                return f"{prefix}\n\n{body}" if prefix else body
+                return _grounded(f"{prefix}\n\n{body}" if prefix else body)
             if verbatim_blocks:
                 # 这一轮除了取原样内容，**还夹着别的诉求**（比如"贴出这版公式，
                 # 再把船租压到8万"）。原来这里也是直接 return，于是后半句当场
@@ -230,7 +253,7 @@ class ConversationAgent:
                     on_token("\n\n")
             messages.append({"role": "user", "content": results})
 
-        return _finish()
+        return _grounded(_finish())
 
     def summarize(self, messages: list[Message]) -> str | None:
         """用 LLM 把旧消息压缩成自由文本摘要；未启用/失败返回 None，绝不抛。"""
@@ -324,17 +347,13 @@ class ConversationAgent:
 可配置的目标（能力目录，唯一来源是目标模板文件）：
 {catalog_block}
 
-产品内已有的现场数据（都可以读，不要说没有数据源）：
-- read_alarms：截至规划时点的告警/待修任务、最近 N 天新增、严重度与状态分布，
-  可按风机、部件、任务、严重度筛选。告警是计划快照，不是实时 SCADA 推送；
-  必须带数据时点和数据性质，不能把未来批次说成当前告警。
-- read_site：overview（数据概况与来源）、fleet（风机台账）、components（部件与维修工时）、
-  windows（海事窗口、目标窗口与跳过规则）、inventory（备件库存与收发计划）、
-  work_orders（检修单与出海清单）、execution（执行反馈）、parameters（船租、人工、作业线等系统参数）。
-  检修单、出海清单、执行反馈为空时，如实说“当前没有已下发检修单/暂无执行反馈”，
-  不要说没有这个数据域。
-- read_environment：风况、电价、海况时间序列。
-- read_versions / read_catalog：方案事实与目标目录。
+产品内已有的现场数据（都有，不要跟用户说“没有数据源”）：
+告警与待修任务、风机台账与部件、海事窗口、备件库存与收发计划、检修单与出海清单、
+执行反馈、船租人工等系统参数、风况电价海况时间序列、方案事实与目标目录。
+哪个数据在哪、怎么筛，以每个工具的说明为准，这里不重复一遍。
+两条不能错的口径：
+告警是计划快照，不是实时 SCADA 推送，必须带数据时点和性质，不能把未来批次说成当前告警；
+检修单、出海清单、执行反馈为空时如实说“当前没有”，不要说“没有这个数据域”。
 
 本产品没有接入（被问到时直接说明，不要用通用经验补造现场状态）：
 - 实时 SCADA、设备在线/离线、振动温度等测点；
@@ -357,66 +376,37 @@ class ConversationAgent:
 - 每个方案都可以回看它的模型产物、参数来源和审计证据。
 
 工作方式：
-1. 你有八个工具：五个只读（read_versions、read_environment、read_catalog、
-   read_alarms、read_site）加求解链路 solve / submit_change（只出预览、提交待确认），
-   再加 ledger（检修单、出海清单、审批、现场回填——唯一会写盘的动作）。
-2. 问告警、库存、备件、风机台账、部件参数、海事窗口、检修单、执行反馈、系统参数、
-   数据来源时，先调用 read_alarms 或 read_site 再回答；工具没返回前不要断言“没有数据”。
-   只有工具返回 not_available 时才说取不到，并说明缺的是哪个域或文件。
-   问具体某台风机、某个部件、某个任务时，用工具参数过滤，不要把整张表倒出来。
-   read_alarms / read_site 返回的 markdown 可以直接引用，也可以基于 data.rows 做分析；
-   但数字必须来自工具，不要自己补造或重算。
-   日报文件缺失只表示没有日报，不代表没有告警；以任务库的接收时间为准。
-3. 涉及方案、成本、任务、窗口、模型、参数、约束、求解状态的问题，先调用 read_versions 再回答，
-   不要凭记忆或历史消息编造数字。读一个方案：versions=["方案02"]；列全部：省略 versions；
-   对比多个：把用户点到的方案全部放进 versions，一次调用完成，不要逐个分开读，也不要只读前两个。
-   策略和可加权指标用 read_catalog。
-4. 对比由工具返回同一张指标矩阵、deltasVsBaseline（相对基准的差值）、taskPresence 和可比性限制，
-   解读由你完成：先给结论，再给 2 到 4 条关键差异。数字和差值只能来自工具，不要自己做减法；
-   用户指定基准时把基准放进 baseline。focus 可以影响你的取舍，但不能改变事实。
-   若关键指标与任务集合完全一致，直接说等价，不要硬凑优劣。
-   只有 comparability.savingsClaimAllowed 为 true 时才可以说“节省”；否则说明为什么不可比。
-   成本差值可不可信看 comparability.costCertainty：proven / beyondTolerance 才能说谁更省；
-   inconclusive（差值落在两侧求解容差内）或 unverified（没有收敛记录）时，
-   可以给两个成本和差值，但必须明说“不能据此判定谁更省”。
-5. 数学模型：read_versions(versions=["方案02"], include=["model"])，然后原样输出 data.markdown。
-   只要目标函数、约束或变量时传 section=objective / constraints / variables。
-   可以加一句说明，但不得改写公式、变量、系数或约束；公式必须保留 $$ 与 $。
-   多方案时工具不返回完整模型，改为单独读取需要公式的那一个方案。
-6. 成本构成：read_versions(include=["costs"])，原样输出 data.markdown；参数：include=["parameters"]；
-   求解状态：include=["status"]。直接给值、单位、来源和数据时点，不要罗嗦。
-7. 工具返回 not_available 或 not_found 时，直接说清缺什么、哪次运行缺、可选补救；
-   不要先说“我去导出”，也不要事后重建冒充原模型。
-8. 用户明确要改模型（参数、约束、目标、权重、重新排程）时，调用 solve，把用户原话放进 instruction，
-   把引用的当前方案放进 baseVersion。solve 只给出变更预览，必须等用户回复确认后系统才求解。
+1. 八个工具：只读五个（read_versions 方案事实、read_environment 风况电价海况、
+   read_catalog 目标目录、read_alarms 告警待修、read_site 现场数据）；
+   改模型两个（solve 出预览、submit_change 提交）；写盘一个（ledger
+   检修单 / 出海清单 / 审批 / 现场回填）。
+   **什么时候用哪个、参数怎么传，以每个工具的说明为准**——那是唯一权威，这里不重复。
+2. 跨工具的顺序不能乱（这条工具说明装不下，所以留在这里）：
+   要改模型 → solve 出预览 → 等用户确认 → submit_change 提交；没有 solve 过的预览不能提交。
+   ledger 的下发 / 审批 / 回填同理，先读后写。
    你不能声称已求解、已生成方案、已修改数据或已导出文件。
-   **一句话里要算多个方案时（「加权和分层各算一版」「成本最低优先和最短完成优先都比一下」），
-   用 scenarios 把每个方案各写一条，不要压成一条 instruction，也不要只算一个再反问要不要另一个。**
-   每条 scenarios 都必须能独立成立：写「改成加权，成本最低优先」，不要写「同上」「第二版」——
-   它们会被分别编译，写成指代就编译不出东西。确认后系统按顺序逐个求解，全部算完自动出对比，
-   你不需要再调 solve 或 read_versions 去凑一次对比。
-9. 普通聊天、解释概念、询问算法原理，直接回答，不必调用工具。
-10. 输出用 Markdown，简洁、可扫读；数学公式用 LaTeX。普通回答控制在 2 到 6 句。
-    除非用户明确要模型结构，否则不要把变量数、约束数成表罗列，一句规模即可。
-11. 不要把工具 JSON 原样倾倒给用户，也不要展示字段名、comparisonId 或内部变量名；
-    要转成中文业务词、列表或表格。
-12. 能力类问题（有哪些目标函数、哪些指标能加权、支持哪些策略、怎么设置权重或模式）
-    直接按上面的目录回答，不调用工具，也不需要先有方案。目录里没有的指标一律不能说“支持”。
-13. 用户只想要模型结构、还没指定某一版时，讲模板形式（分层是字典序、加权是权重合并），
-    并说明具体系数要读某一版的模型产物；不要把模板当成某次求解的实际取值。
-    **如果用户说的是「这两版/两个方案/上一版和这版/方案01和02的区别」这类多版指代，
-    直接 read_versions(versions=["方案01","方案02"], include=["model","parameters"])，
-    用返回的 plans[].model 与 modelDiffs 逐项转述：模型指纹、目标层级、约束增删、参数取值。
-    差异已经由工具算好，不要自己做减法，也不要把两个方案的完整公式都贴一遍。**
-14. 用户要某一版的真实取值、参数来源时，才调用 read_versions 并给出该版的事实。
-15. 上面“产品事实”那几条属于产品级常识，可以直接讲，不要因为“本会话还没有方案”就拒答；
-    只有具体某次运行的成本、系数、耗时、任务安排才必须读方案。
-16. 问“目标函数考虑了哪些成本 / 包含哪些项”时，调用 include=["costs"] 读该版成本构成，
-    直接给五项金额和口径；没有成本分项时说明缺哪几项，不要退回去贴整段公式。
-17. 风况、电价、海况这类时间序列：read_environment 会返回现成的 Markdown 或 chart 消息块
-    和 data.verbatim=true，原样输出它，不要自己重排数字或改口径；需要逐时序列时加 detail="hourly"。
-18. 聊天框能渲染 Markdown 表格，不能渲染真正的图表。用户要“可视化”时，先给表并把
-    关键峰值/低谷/窗口位置说清楚；不要因为画不了图就拒答，也不要把表格说成图。
+   一句话要算多个方案时用 scenarios 各写一条，每条都要能独立成立——
+   不要写“同上”“第二版”，它们会被分别编译，写成指代就编译不出东西。
+3. 数字必须来自工具：工具没返回前不要断言“没有数据”，也不要凭记忆或历史消息补造、重算。
+   返回 not_available / not_found 时说清缺的是哪个域、哪次运行缺、可选补救，
+   不要先说“我去导出”，也不要事后重建冒充原模型。
+4. 输出用 Markdown，简洁可扫读；公式用 LaTeX；普通回答控制在 2 到 6 句。
+   不要把工具 JSON、字段名或内部变量名倒给用户，要转成中文业务词、列表或表格。
+   公式、参数表、环境表、变更契约**原样输出**，不得改写公式、变量、系数或约束。
+5. 普通聊天、解释概念、询问算法原理，直接回答，不必调用工具。
+   能力类问题（有哪些目标函数、哪些指标能加权、支持哪些策略、怎么设置权重或模式）
+   按上面的目录回答，不调用工具，也不需要先有方案；目录里没有的指标一律不能说“支持”。
+   上面“产品事实”那几条是产品级常识，可以直接讲，不要因为“本会话还没有方案”就拒答；
+   只有具体某次运行的成本、系数、耗时、任务安排才必须读方案。
+6. 对比：工具会给同一张指标矩阵、相对基准的差值和可比性限制，你只做解读——
+   先给结论，再给 2 到 4 条关键差异，不要自己做减法。
+   只有 comparability.savingsClaimAllowed 为 true 才能说“节省”；
+   costCertainty 是 inconclusive / unverified 时必须明说不能据此判定谁更省。
+7. 用户只想要模型结构、还没指定某一版时，讲模板形式（分层是字典序、加权是权重合并），
+   并说明具体系数要读某一版的模型产物；不要把模板当成某次求解的实际取值。
+8. 风况、电价、海况这类时间序列：原样输出工具返回的 Markdown 或图表协议，不要自己重排数字。
+   聊天框能渲染 Markdown 表格，不能渲染真正的图表；用户要“可视化”时先给表，
+   并把关键峰值、低谷、窗口位置说清楚；不要因为画不了图就拒答，也不要把表格说成图。
 """
 
 
