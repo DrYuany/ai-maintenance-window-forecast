@@ -259,6 +259,10 @@ def account(data, schedule):
 
 def build_model(data, options, partial=False, strategy='成本最低优先', mode='分层', weights=None, limits=None, extra_constraints=None, custom_stages=None):
     m=cp_model.CpModel();choices=[];task_vars={};cost_terms=[];cash_terms=[];constant=0
+    # 小一修（小一修/）要按「人工费 / 备件费 / 船舶艘天」三个口径设上限和权重，
+    # 这三个量不进目标函数，只是登记进 metrics 供注入口闭包和目标加权取用。
+    # 纯增量：不加任何约束，不改已有任何一项成本的算法。
+    labor_terms=[];spare_terms=[];rent_days=[]
     line_count=min(data.params['最多作业线数'],data.params['人员总上限'])
     line_intervals=defaultdict(list); turbine_intervals=defaultdict(list)
     tasks={t['任务编号']:t for t in data.tasks}
@@ -277,9 +281,11 @@ def build_model(data, options, partial=False, strategy='成本最低优先', mod
                 interval=m.NewOptionalIntervalVar(c['开始'],c['下项最早开始']-c['开始'],c['下项最早开始'],x,f'line_{x.Name()}')
                 line_intervals[(line,c['窗口编号'])].append(interval)
                 turbine_intervals[task['风机编号']].append(m.NewOptionalIntervalVar(c['开始'],c['完成']-c['开始'],c['完成'],x,f'turbine_{x.Name()}'))
-                direct=(sum(b-a for a,b in c['作业段'])/60*data.params['人工单价（元每人时）']
-                        +part['维修包成本（元每套）']+part.get('其他费用（元每任务）',0))
+                labor=sum(b-a for a,b in c['作业段'])/60*data.params['人工单价（元每人时）']
+                spare=part['维修包成本（元每套）']+part.get('其他费用（元每任务）',0)
+                direct=labor+spare
                 cash_terms.append(round(direct*MONEY)*x)
+                labor_terms.append(round(labor*MONEY)*x);spare_terms.append(round(spare*MONEY)*x)
                 change=0
                 if task['风机编号'] not in multi:
                     change=(data.revenue(max(data.now,0,task['发生分钟']),max(data.now,c['开始']))*(1-task['剩余出力'])
@@ -309,6 +315,7 @@ def build_model(data, options, partial=False, strategy='成本最低优先', mod
                 m.Add(y<=a);m.Add(y<=b);m.Add(y>=a+b-1)
                 term=round(data.params['船租（元每艘每天）']*MONEY)*y
                 cost_terms.append(term);cash_terms.append(term)
+                rent_days.append(y)
     for turbine in multi:
         ts=[t for t in data.tasks if t['风机编号']==turbine]
         group=[(c,x) for c,x in choices if c['风机编号']==turbine]
@@ -330,6 +337,10 @@ def build_model(data, options, partial=False, strategy='成本最低优先', mod
     m.AddMaxEquality(finish,[c['完成']*x for c,x in choices] or [0])
     metrics={'总经济成本':cost,'现金支出':cash,'完成任务数':count,'最后完工时间':finish,
              '完工时间和':sum(c['完成']*x for c,x in choices)}
+    # 小一修登记的三个口径（同上，纯增量）。空列表用常数 0 兜住，避免 CP-SAT 拿到空和式。
+    metrics['人工费']=sum(labor_terms) if labor_terms else 0
+    metrics['备件费']=sum(spare_terms) if spare_terms else 0
+    metrics['船舶艘天']=sum(rent_days) if rent_days else 0
     for level in ('高','中','低'):
         metrics[level+'严重完成数']=sum(x for c,x in choices if c['严重等级']==level)
         metrics[level+'严重完工时间和']=sum(c['完成']*x for c,x in choices if c['严重等级']==level)
@@ -377,6 +388,12 @@ def build_model(data, options, partial=False, strategy='成本最低优先', mod
             for level in ('高','中','低'):
                 ranges[level+'严重完成数']=max(1,sum(t['严重等级']==level for t in data.tasks))
                 ranges[level+'严重完工时间和']=ranges[level+'严重完成数']*data.end
+            # 小一修三个新口径的归一化分母。不补这三个键，加权模式一旦带上
+            # 人工/备件/租船天权重就会 KeyError——ranges 必须和 metrics 同keyspace。
+            ranges['人工费']=ranges['现金支出']
+            ranges['备件费']=max(1,sum(data.parts[t['部件编号']]['维修包成本（元每套）']*MONEY
+                                       for t in data.tasks))
+            ranges['船舶艘天']=max(1,data.end//1440*line_count)
             for name,w in weights.items():
                 coeff=round(1000000000000000*w/ranges[name])
                 if w and coeff==0: raise ValueError('权重经整数缩放后为零，请提高加权精度或调整权重')
