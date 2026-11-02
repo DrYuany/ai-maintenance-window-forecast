@@ -176,6 +176,8 @@ class AgentToolbox:
         self.on_submit_change = on_submit_change
         self.planner = planner or PlanningIntentCompiler()
         self.pending_change: dict[str, Any] | None = None
+        # 这一轮到底动过待确认没有：动过但最后没剩下，说明要清掉上一轮遗留的那份。
+        self.pending_touched = False
         self.ordered = chronological_versions(
             versions.list_by_conversation(conversation_id)
         )
@@ -440,21 +442,32 @@ class AgentToolbox:
                 "description": (
                     "把用户明确提出的排程变更（策略、目标模式、权重、参数、约束、重新排程）"
                     "编译成确定性变更预览。只预览，不会求解、不会写库；"
-                    "用户回复确认后系统才会真正求解。引用必须原样保留用户的关键数字和说法。"
+                    "用户回复确认后系统才会真正求解。引用必须原样保留用户的关键数字和说法。\n"
+                    "用户一句话里要算**多个方案**（「加权和分层各算一版，对比」"
+                    "「成本最低优先和最短完成优先都比一下」）时，用 scenarios 把每个方案"
+                    "各写一条；每条都要能独立成立，不要写「同上」「第二版」。"
                 ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "instruction": {
                             "type": "string",
-                            "description": "用户这次要改的内容，尽量原文；不要自行补参数。",
+                            "description": "用户这次要改的内容，尽量原文；不要自行补参数。单方案时用它。",
+                        },
+                        "scenarios": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "多方案时用：每个方案一条，按用户说的顺序。"
+                                "例如「加权和分层各算一版」→ [「改成加权，成本最低优先」，"
+                                "「改成分层，成本最低优先」]。给了它就不必再给 instruction。"
+                            ),
                         },
                         "baseVersion": {
                             **version_arg,
                             "description": "变更基于哪个方案；省略时用当前选中方案。",
                         },
                     },
-                    "required": ["instruction"],
                 },
             },
             {
@@ -1534,6 +1547,14 @@ class AgentToolbox:
             notes.append("各次完成的任务集合不同，不能宣称同等服务下的节省。")
         if same_model:
             notes.append("这些方案的模型指纹相同，结论应一致；差异更可能来自求解时间或随机性。")
+        gaps = [_dict(fact.get("convergence")).get("costGap") for fact in facts]
+        if any(gap is None for gap in gaps):
+            notes.append("至少一版没有收敛记录，成本差值未核实，不能当结论。")
+        elif gaps and max(gaps) > 0:
+            notes.append(
+                f"有方案未证明最优（最大成本相对差距 {max(gaps):.2%}）；"
+                "成本差值小于该容差时，不能判定谁更省。"
+            )
         return {
             "sameDataSnapshot": same_data,
             "sameTaskUniverse": same_universe,
@@ -1548,6 +1569,8 @@ class AgentToolbox:
     def _solve_facts(version: WindowVersion) -> dict[str, Any]:
         solver = _solver(version)
         summary = version.resultSummary or {}
+        from app.core.version_compare import convergence_of
+
         return {
             "status": _status(version),
             "verified": summary.get("verified"),
@@ -1555,6 +1578,9 @@ class AgentToolbox:
             "elapsedSeconds": solver.get("总耗时秒") or solver.get("总耗时"),
             "stopReason": solver.get("终止原因"),
             "solverParameters": solver.get("求解器参数"),
+            # 收敛到哪一步、差多少，是"能不能说谁更省"的前提；
+            # 不放进 facts，模型只能看到两个成本数字，然后自己编结论。
+            "convergence": convergence_of(version),
             "modelFingerprint": version.modelFingerprint,
         }
 
@@ -1568,7 +1594,20 @@ class AgentToolbox:
         送到用户眼前。所以这里对**每一个**出口补 markdown，并且它属于
         AUTHORITATIVE_TOOLS，独占本轮输出。
         """
-        return self._as_contract(self._solve_inner(arguments))
+        return self._as_contract(self._solve_inner_cleared(arguments))
+
+    def _solve_inner_cleared(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """solve 的统一出口：这一轮没产出新预览，就把上一轮那份待确认清掉。
+
+        不清的后果很具体：上一轮留着一份“分层→加权”，这一轮用户说“改成分层”
+        没被识别，屏幕上没有新预览，但内存里那份还在；接着一句“确认”派出去的
+        就是上一轮那份——用户确认的和他以为的不是同一件事。
+        """
+        self.pending_touched = True
+        result = self._solve_inner(arguments)
+        if result.get("status") != "needs_confirmation":
+            self.pending_change = None
+        return result
 
     @staticmethod
     def _as_contract(result: dict[str, Any]) -> dict[str, Any]:
@@ -1637,16 +1676,27 @@ class AgentToolbox:
 
     def _solve_inner(self, arguments: dict[str, Any]) -> dict[str, Any]:
         instruction = str(arguments.get("instruction") or "").strip()
+        scenario_args = [
+            str(item).strip()
+            for item in (arguments.get("scenarios") or [])
+            if str(item).strip()
+        ]
         base = self.resolve_version(arguments.get("baseVersion"))
-        if not instruction:
+        if not instruction and not scenario_args:
             return self._envelope(
                 "clarify",
                 {"message": "还需要一句明确的排程变更，例如“船租上涨 20%，最多两条作业线”。"},
                 version=base,
             )
+        if not instruction and len(scenario_args) == 1:
+            # 只给一条 scenarios 就是单方案，按 instruction 走，不硬造批量。
+            instruction = scenario_args[0]
         current = self._request_from(base)
         base_id = base.id if base else None
 
+        segments = self._batch_segments(scenario_args, instruction)
+        if segments:
+            return self._solve_batch(segments, base, current, base_id, instruction)
         # DSL 优先：约束/目标类修改（互斥、先后、最早、预算、加权目标…）旧规划器表达不了。
         from app.core.change_planning import plan_dsl_change
 
@@ -1745,6 +1795,105 @@ class AgentToolbox:
             },
             version=base,
             next_actions=["等待用户确认；确认前不得声称已求解或已生成方案。"],
+        )
+
+    @staticmethod
+    def _batch_segments(explicit: list[str], instruction: str) -> list[str] | None:
+        """判断这一轮是不是多场景。
+
+        两条以上显式 scenarios 直接算批量；只给一条 instruction 时，看它本身
+        是不是并列句（「加权和分层，都…」）——模型没学会新参数也不至于退化成单版。
+        """
+        if len(explicit) >= 2:
+            return explicit
+        if explicit:
+            return None
+        if not instruction:
+            return None
+        from app.core.model_change import split_scenarios
+
+        found = split_scenarios(instruction)
+        return found if len(found) >= 2 else None
+
+    def _solve_batch(
+        self,
+        segments: list[str],
+        base,
+        current,
+        base_id: str | None,
+        instruction: str,
+    ) -> dict[str, Any]:
+        """多场景：一份预览里并列 N 个变体，确认后由 runtime 逐个求解。
+
+        产出必须和 runtime 认识的 pendingChange 同构（kind=batch + scenarios[]），
+        否则确认时会走进单方案分支，报“待确认的变更已经失效”。
+        """
+        from app.core.model_change import build_scenario_batch_from_segments, wants_compare
+
+        source = self.user_message or instruction or "；".join(segments)
+        batch = build_scenario_batch_from_segments(
+            segments,
+            current,
+            base_id,
+            self.planner,
+            compare=wants_compare(instruction or source),
+            source_prompt=source,
+        )
+        preview = batch.preview
+        if batch.blocked:
+            # 有场景立不住就整批不出：只算能算的那一半，用户会以为另外那版也算了。
+            return self._envelope(
+                "clarify",
+                {
+                    "message": preview,
+                    "preview": preview,
+                    "markdown": preview,
+                    "verbatim": True,
+                    "requiresUserConfirmation": False,
+                },
+                version=base,
+                warnings=["有场景无法成立，这批没有进入求解。"],
+                next_actions=["按提示说清每个场景差在哪，再重新预览。"],
+            )
+        payload = {
+            "kind": "batch",
+            "baseVersionId": batch.base_version_id,
+            "scenarios": [
+                {
+                    "label": item.label,
+                    "request": item.request.to_payload(),
+                    "operations": item.operations,
+                    "notes": item.notes,
+                    "sourcePrompt": item.source_prompt,
+                }
+                for item in batch.scenarios
+            ],
+            "compare": batch.compare,
+            "preview": preview,
+            "sourcePrompt": source,
+        }
+        self.pending_change = payload
+        if self.on_pending_change:
+            self.on_pending_change(payload)
+        return self._envelope(
+            "needs_confirmation",
+            {
+                "preview": preview,
+                # 预览就是契约：两个场景分别是什么，必须原样送到用户眼前。
+                "markdown": preview,
+                "verbatim": True,
+                "scenarios": [
+                    {"label": item.label, "operations": item.operations}
+                    for item in batch.scenarios
+                ],
+                "compare": batch.compare,
+                "basePlanNumber": self.plan_numbers.get(base.id) if base else None,
+                "requiresUserConfirmation": True,
+            },
+            version=base,
+            next_actions=[
+                "等待用户确认；确认后按场景顺序逐个求解，确认前不得声称已求解。"
+            ],
         )
 
     def _submit_change(self, arguments: dict[str, Any]) -> dict[str, Any]:

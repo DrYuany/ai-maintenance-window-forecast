@@ -48,7 +48,13 @@ def test_contradictory_constraints_are_reported_not_faked() -> None:
     try:
         report = run({"constraints": constraints}, seconds=40, max_tasks=13)
     except DslError as exc:
-        assert "没有在满足这些约束的前提下找到解" in str(exc)
+        text = str(exc)
+        # 诊断上线后不再用「没有找到解」这种笼统说法，改成带证据的归因。
+        # 这里核三件事：明确判不可行、指出是同一个任务的冲突、点名了具体任务
+        # —— 光有「不可行」三个字不够，原因得能复算、不能是编的。
+        assert "不可行" in text, text
+        assert "同一个任务" in text, text
+        assert "任务001" in text, text
         return
 
     info = report["求解"]

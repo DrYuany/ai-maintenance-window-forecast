@@ -752,12 +752,30 @@ def _parameter_rows(snapshot: Any) -> list[dict[str, Any]]:
         ("每日告警处理时间", "", "每天该时刻之前的告警参与本轮"),
         ("预测性质", "", "数据性质与精度声明"),
     ]
+    # 这两行必须显示"真正会用的数"：表里写 60、实际被部署上限压到 30，
+    # 等于把参数总表当摆设。其余参数照原样显示。
+    from solve_budget import resolve as resolve_budget
+
+    budget = resolve_budget(params)
+    effective = {
+        "求解时间上限（秒）": (
+            budget["seconds"],
+            f"本次生效 {budget['secondsSource']}；表内值 {budget['tableSeconds']}"
+            if budget["secondsSource"] != "参数总表"
+            else "参数总表默认值；用户点名时限时按点名值执行，实际值见本次求解信息",
+        ),
+        "求解相对差距": (
+            budget["gapLimit"],
+            "仅成本阶段生效；完成数等整数阶段要求证明最优",
+        ),
+    }
     return [
         {
             "name": name,
-            "value": params.get(name),
+            "value": effective[name][0] if name in effective else params.get(name),
             "unit": unit,
-            "note": note,
+            "note": effective[name][1] if name in effective else note,
+            "tableValue": params.get(name),
             "constraint": catalog_by_alias.get(name, {}).get("取值约束"),
             "sourceStatus": catalog_by_alias.get(name, {}).get("来源与确认状态"),
             "category": catalog_by_alias.get(name, {}).get("参数类别"),

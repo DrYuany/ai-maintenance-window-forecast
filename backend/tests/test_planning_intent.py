@@ -12,7 +12,8 @@ def test_high_risk_request_compiles_to_registered_strategy_deterministically() -
     assert first == second
     assert first.strategy == "高风险优先抢修"
     assert first.mode == "分层"
-    assert first.seconds == 300
+    # 没点名时限就不该编一个数：交给参数总表（求解01），公告按它如实说。
+    assert first.seconds is None
 
 
 def test_operational_overrides_are_compiled_without_llm_guessing() -> None:

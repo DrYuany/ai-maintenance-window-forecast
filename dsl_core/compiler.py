@@ -24,10 +24,10 @@ from .registry.entities import resolve_day, resolve_minute, resolve_task
 
 MONEY = 1_000_000  # 微元，与 product_planner.MONEY 一致
 
-# must 按维度批量时允许的过滤键：只留任务行本身就有的字段。
+# must/only 按维度批量时允许的过滤键：只留任务行本身就有的字段。
 # day/window/line 是**候选**的属性（同一个任务可以排在不同天/窗/线），
 # 拿来筛任务没有意义，给了就明确报错，不要猜。
-_MUST_FILTERS = frozenset({"task", "severity", "turbine", "part"})
+_MUST_FILTERS = frozenset(prim_reg.TASK_FILTER_KEYS)
 
 # 出现这些原语说明用户在**挑拣**要修哪些，而不是"全都得修"。
 # 完整模式给每个任务加 sum(x)==1（必须排入），跟"少修"直接矛盾：
@@ -36,14 +36,14 @@ _MUST_FILTERS = frozenset({"task", "severity", "turbine", "part"})
 #
 # at_least_one 不在此列：它只说"至少一个"，没说其余能不能排，完整模式下恒真；
 # 切 partial 反而会把"全修"降级成"挑一个"。
-_SELECTION_PRIMITIVES = frozenset({"exclude", "at_most_one"})
+_SELECTION_PRIMITIVES = frozenset({"exclude", "only", "at_most_one"})
 
 
 def needs_partial(dsl: dict[str, Any]) -> bool:
     """这份 DSL 是不是在"挑拣任务"，也就是必须走部分排程。
 
     只在能判死的地方返回 True：
-      - exclude / at_most_one：本身就是"少修几个"的选择语义
+      - exclude / only / at_most_one：本身就是"少修几个"的选择语义
       - cardinality 的上限（<= / ==）：完整模式下每个任务都被强制排入，
         这类上限只要小于在册任务数就必然不可行
     """
@@ -194,6 +194,25 @@ def compile_constraint(
         terms = generator.per_task_terms(cands, task, "day", data)
         variables = [choices[i][1] for _c, i in terms]
         model.Add(sum(variables) == 0)
+    elif ctype == "only":
+        # 范围裁剪：「只修 1 号风机的叶片」。
+        #
+        # 做法是把**没命中 filter 的任务**的候选变量全部压 0——也就是"其余一律不排"，
+        # 而不是给命中的任务加"必须排"。差别在于：只修 ≠ 都得修。
+        # 用户说"只修 1 号风机的叶片"，是说别的别动；1 号风机这几片叶片能不能全修，
+        # 由窗口/工时/目标决定，不该被这条约束强行钉成"全修"。
+        #
+        # 命中为空必须报错：否则模型会排出一个空方案，看起来像"按你说的做了"。
+        filter_spec = spec.get("filter") or {}
+        keep = {t["任务编号"] for t in data.tasks if task_matches(t, filter_spec, data)}
+        if not keep:
+            return [f"only 的条件 {filter_spec!r} 在任务表里没有匹配到任何任务"]
+        for task in data.tasks:
+            if task["任务编号"] in keep:
+                continue
+            terms = generator.per_task_terms(cands, task["任务编号"], "day", data)
+            variables = [choices[i][1] for _c, i in terms]
+            model.Add(sum(variables) == 0)
     elif ctype in ("at_most_one", "at_least_one"):
         # 分组选择：「这几个里最多/至少挑一个」。
         # 每个任务在模型里有一串候选变量，且至多一个为真（完整模式恰好一个），

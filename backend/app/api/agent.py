@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Literal
 
 from app.core.agent_runtime import AgentRuntime
+from app.core.demo_access import USER_KEY_HEADER, normalize_key
 from app.schemas.agent import AgentResponse, SolveJobPayload
 
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
+
+
+def _visitor_key(request: Request) -> str | None:
+    """访客自带的模型密钥。没有就用服务端配置的那把（免费额度内）。"""
+    return normalize_key(request.headers.get(USER_KEY_HEADER))
 
 
 class AgentMessageRequest(BaseModel):
@@ -29,7 +35,11 @@ def get_runtime() -> AgentRuntime:
 
 
 @router.post("/message", response_model=AgentResponse)
-def post_message(payload: AgentMessageRequest, runtime: AgentRuntime = Depends(get_runtime)) -> AgentResponse:
+def post_message(
+    payload: AgentMessageRequest,
+    request: Request,
+    runtime: AgentRuntime = Depends(get_runtime),
+) -> AgentResponse:
     try:
         return runtime.submit_message(
             payload.conversationId,
@@ -37,6 +47,7 @@ def post_message(payload: AgentMessageRequest, runtime: AgentRuntime = Depends(g
             selected_version_id=payload.selectedVersionId,
             selected_window_id=payload.selectedWindowId,
             engine=payload.engine,
+            llm_api_key=_visitor_key(request),
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -45,8 +56,11 @@ def post_message(payload: AgentMessageRequest, runtime: AgentRuntime = Depends(g
 @router.post("/message/stream")
 def post_message_stream(
     payload: AgentMessageRequest,
+    request: Request,
     runtime: AgentRuntime = Depends(get_runtime),
 ) -> StreamingResponse:
+    api_key = _visitor_key(request)
+
     def events():
         for item in runtime.stream_message(
             payload.conversationId,
@@ -54,6 +68,7 @@ def post_message_stream(
             selected_version_id=payload.selectedVersionId,
             selected_window_id=payload.selectedWindowId,
             engine=payload.engine,
+            llm_api_key=api_key,
         ):
             data = json.dumps(item.get("data", {}), ensure_ascii=False, default=str)
             yield f"event: {item.get('event', 'message')}\ndata: {data}\n\n"

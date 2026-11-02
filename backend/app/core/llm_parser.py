@@ -23,6 +23,8 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+
+from app.core.demo_access import resolve_api_key
 from pathlib import Path
 from typing import Any, Callable
 
@@ -504,10 +506,14 @@ _PARSE_SYSTEM = """你是检修排程 DSL 生成器。把用户的排程约束�
 只允许使用以下约束原语与字段（不要编造原语、字段或指标名）：
 
 原语（type 取值）与字段：
-- must/exclude: {"task": "任务018"}
+- must: {"task": "任务018"} 或 {"filter": {"severity": "高"}}
+- exclude: {"task": "任务018"}
+- only: {"filter": {"turbine": "风机001", "part": "叶片"}}  —— 只修范围内任务，范围外一律不排
+- at_most_one/at_least_one: {"tasks": ["任务018","任务022"]}
 - precedence: {"before": "任务018", "after": "任务022", "gap": 分钟数(可选)}
 - co_occur: {"mode": "diff_day"|"same_day", "tasks": ["任务018","任务022"]}
 - fix: {"task": "任务018", "line": 1}
+- capacity: {"resource": "line"|"turbine"|"part", "time": "2026-11-16", "limit": 2}  —— 只作用在那一天
 - cardinality: {"filter": {"severity": "高"}, "op": ">="|"<="|"==", "value": 3}
 - deadline: {"task": "任务018", "time": "2026-11-08T08:00:00+08:00"}
 - earliest: {"task": "任务018", "time": "2026-11-05T08:00:00+08:00"}
@@ -515,14 +521,18 @@ _PARSE_SYSTEM = """你是检修排程 DSL 生成器。把用户的排程约束�
 - budget: {"quantity": "完工时间和", "op": "<=", "value": 数值}
 - linear: {"terms": [[系数, 量]], "op": "<=", "value": 数值}
 
-任务编号写全称"任务018"（三位）。日期必须带时区。只输出 JSON，不要解释。
+filter 只认 task/severity/turbine/part（任务行自己的属性），不要写 day/window/line。
+任务编号写全称"任务018"（三位），风机写"风机001"。日期必须带时区。只输出 JSON，不要解释。
 
 除 constraints/objectives 外，还有两段（按需输出，不要编造参数名）：
 - parameters：全局参数覆盖，{"field": "122项注册表参数名", "op": "="|"*", "value": 数值}，
   例如 {"field":"船舶日租金","op":"*","value":1.2}、{"field":"最大作业线","op":"=","value":2}。
 - data：行级补丁与时序假设：
   {"kind":"part_arrival","part":"叶片","at":"2026-11-05T08:00:00+08:00","quantity":2,"blockBefore":true}
-  {"kind":"part_hours","part":"齿轮箱","factor":1.2}
+  {"kind":"part_hours","part":"齿轮箱","factor":1.2}  —— 整件工时乘倍率
+  {"kind":"part_hours","part":"叶片","severity":"高","hours":15}  —— 定点到高严重度的绝对小时数
+  {"kind":"part_hours","part":"叶片","severity":"高","sea":"常态","hours":15}  —— 再定点到某一海况
+  part_hours 的 factor 与 hours 只能给一个；severity 取 高/中/低，sea 取 常态/恶劣但安全，不给就是该维全改。
   {"kind":"task_deadline","severity":"高","at":"2026-11-08T08:00:00+08:00"}
   {"kind":"weather","day":"2026-11-03","wind":15.0} 或 {"kind":"weather","day":"2026-11-04","state":"不可作业"}
   {"kind":"hourly","time":"2026-11-03T12:00:00+08:00","price":400}
@@ -563,7 +573,8 @@ class ParseUnavailable(RuntimeError):
 
 
 def _llm_config() -> tuple[str, str, str] | None:
-    api_key = os.environ.get("MINIMAX_API_KEY")
+    # 访客自带密钥优先（演示超限后由前端传入），否则用服务端配置的。
+    api_key = resolve_api_key(os.environ.get("MINIMAX_API_KEY"))
     if not api_key:
         return None
     return (

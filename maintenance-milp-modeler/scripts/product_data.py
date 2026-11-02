@@ -146,13 +146,36 @@ def _patched_business(business, patches, base, end):
             rows = [r for r in business['部件库'] if r['部件编号'] == patch['partId']]
             if not rows:
                 raise ValueError(f"部件{patch['partId']}不存在于部件库")
-            factor = float(patch['factor'])
-            if factor <= 0:
-                raise ValueError(f"部件{patch['partId']}的工时倍率必须为正")
+            # 定点范围：severity 管严重度这一维，sea 管海况这一维。
+            # 不给就是该维全改（factor 的老口径：整件 × 三级两况）。
+            levels = (patch['severity'],) if patch.get('severity') else ('高', '中', '低')
+            seas = (patch['sea'],) if patch.get('sea') else ('常态', '恶劣但安全')
+            for level in levels:
+                if level not in ('高', '中', '低'):
+                    raise ValueError(f"严重度 {level!r} 只能是 高/中/低")
+            for sea in seas:
+                if sea not in ('常态', '恶劣但安全'):
+                    raise ValueError(f"海况 {sea!r} 只能是 常态/恶劣但安全")
+            keys = [f'{level}严重度{sea}维修工时（小时）' for level in levels for sea in seas]
             for row in rows:
-                for level in ('高', '中', '低'):
-                    for sea in ('常态', '恶劣但安全'):
-                        key = f'{level}严重度{sea}维修工时（小时）'
+                missing = [k for k in keys if k not in row]
+                if missing:
+                    raise ValueError(f"部件库缺少工时刻：{missing}")
+
+            if 'hours' in patch:
+                # 绝对值：把命中的格子直接定成 N 小时。
+                hours = float(patch['hours'])
+                if hours <= 0:
+                    raise ValueError(f"部件{patch['partId']}的维修工时必须为正")
+                for row in rows:
+                    for key in keys:
+                        row[key] = round(hours, 6)
+            else:
+                factor = float(patch['factor'])
+                if factor <= 0:
+                    raise ValueError(f"部件{patch['partId']}的工时倍率必须为正")
+                for row in rows:
+                    for key in keys:
                         row[key] = round(float(row[key]) * factor, 6)
         elif kind == 'part_arrival':
             moment = datetime.fromisoformat(patch['at'])

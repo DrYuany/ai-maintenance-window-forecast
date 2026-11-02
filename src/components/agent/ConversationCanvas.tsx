@@ -3,6 +3,7 @@ import {
   Bot,
   ChevronDown,
   Database,
+  KeyRound,
   Layers3,
   Paperclip,
   Play,
@@ -15,6 +16,7 @@ import {
 import type {
   Message,
   PendingModelChange,
+  QuotaInfo,
   SolveJob,
   StageEvent,
   WindowVersion,
@@ -39,6 +41,9 @@ interface Props {
   onControlJob?: (action: "wait" | "background" | "use_incumbent" | "stop") => Promise<void>;
   engine?: "llm" | "rule";
   onEngineChange?: (engine: "llm" | "rule") => void;
+  /** 免费体验额度；null 表示服务端没开限额或还没读到 */
+  quota?: QuotaInfo | null;
+  onRequestKey?: () => void;
 }
 
 const suggestions = [
@@ -146,6 +151,8 @@ export function ConversationCanvas({
   onControlJob,
   engine = "llm",
   onEngineChange = () => undefined,
+  quota = null,
+  onRequestKey = () => undefined,
 }: Props) {
   const [value, setValue] = useState("");
   const [showProcess, setShowProcess] = useState(true);
@@ -197,23 +204,42 @@ export function ConversationCanvas({
           <strong>一修</strong>
           <span>东海一号风场</span>
         </div>
-        <div className="engine-toggle" role="group" aria-label="理解引擎">
-          <button
-            type="button"
-            className={`engine-option${engine === "llm" ? " is-active" : ""}`}
-            onClick={() => onEngineChange("llm")}
-            title="LLM 主导：模型先读全句，护栏只做否决"
-          >
-            LLM 优先
-          </button>
-          <button
-            type="button"
-            className={`engine-option${engine === "rule" ? " is-active" : ""}`}
-            onClick={() => onEngineChange("rule")}
-            title="规则主导：正则先拦，拦不住再问模型"
-          >
-            规则优先
-          </button>
+        <div className="agent-topbar-side">
+          {quota && (quota.enabled || quota.ownKey) ? (
+            <button
+              type="button"
+              className={`quota-pill${quota.ownKey ? " is-own" : ""}${
+                !quota.ownKey && quota.remaining <= 0 ? " is-empty" : ""
+              }`}
+              onClick={onRequestKey}
+              title={
+                quota.ownKey
+                  ? "当前使用你自己填的 DeepSeek 密钥，点击可更换或移除"
+                  : `免费体验共 ${quota.limit} 轮，已用 ${quota.used} 轮，点击填入自己的密钥`
+              }
+            >
+              <KeyRound size={12} />
+              {quota.ownKey ? "我的密钥" : `免费剩 ${quota.remaining} 轮`}
+            </button>
+          ) : null}
+          <div className="engine-toggle" role="group" aria-label="理解引擎">
+            <button
+              type="button"
+              className={`engine-option${engine === "llm" ? " is-active" : ""}`}
+              onClick={() => onEngineChange("llm")}
+              title="LLM 主导：模型先读全句，护栏只做否决"
+            >
+              LLM 优先
+            </button>
+            <button
+              type="button"
+              className={`engine-option${engine === "rule" ? " is-active" : ""}`}
+              onClick={() => onEngineChange("rule")}
+              title="规则主导：正则先拦，拦不住再问模型"
+            >
+              规则优先
+            </button>
+          </div>
         </div>
       </header>
 
@@ -413,6 +439,15 @@ export function ConversationCanvas({
               </div>
             );
           })()
+        ) : null}
+        {quota && quota.enabled && !quota.ownKey && quota.remaining <= 0 ? (
+          <div className="quota-banner" role="status">
+            <div>
+              <strong>免费体验的 {quota.limit} 轮已经用完</strong>
+              <small>填入你自己的 DeepSeek API Key 就能继续，额度不限。</small>
+            </div>
+            <button type="button" onClick={onRequestKey}>填入密钥</button>
+          </div>
         ) : null}
         <div className="suggestion-row">
           {suggestions.map((item) => (

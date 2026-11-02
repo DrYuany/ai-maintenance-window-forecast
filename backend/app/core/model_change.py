@@ -17,7 +17,21 @@ _SCENARIO_RE = re.compile(
     r"(?:算一遍|排一遍|算一版|排一版|生成一版|来一版|算一次|排一次|排个|算个|排|算)"
 )
 _COMPARE_RE = re.compile(r"(?:然后|最后|接着|并且|再|顺便)?(?:帮我)?(?:对比|比较|比一比|比一下)")
-_DEFAULT_TOKENS = ("默认", "原样", "不变", "当前配置", "原来的", "照旧")
+# 「默认」单字太宽：「默认权重」「用默认权重」是加权模式的正常说法，
+# 不能被当成「按默认配置重跑」，否则场景会被沿用当前模式、两版撞成同一个。
+# 只认整段确实在说「按原样再来一遍」的词组。
+_DEFAULT_TOKENS = ("默认配置", "默认方法", "默认参数", "原样", "不变", "当前配置", "原来的", "照旧")
+
+# 「加权和分层，都以成本最低优先，算一版」——名词并列 + 共享谓语。
+# 动词并列（按 A 算一版、按 B 算一版）由 _SCENARIO_RE 管，这种句式它一条也匹配不到。
+_SHARED_MARK_RE = re.compile(r"都|各|分别|一并|同时")
+_PLANNING_VERB_RE = re.compile(r"算|排|生成|做|跑")
+_LEADING_NOISE_RE = re.compile(r"^(?:帮我|请|麻烦|我想|我要|那就|就|再)\s*")
+_MODE_WORDS = ("加权", "分层")
+# 「不要加权」「而非分层」不能算声明了那个模式，否则会把用户明确排除的版本算出来。
+_NEGATED_MODE_RE = re.compile(
+    r"(?:不要|不用|别用|别|不采用|不按|而非|而不是)\s*(?:用|按|走|要)?\s*(?:加权|分层)"
+)
 
 
 PARAMETER_LABELS = {
@@ -177,8 +191,117 @@ class ScenarioBatch:
 
 
 def split_scenarios(message: str) -> list[str]:
-    """把「先按 A 算一遍，再按 B 算一遍」拆成 [A, B]。"""
-    return [match.group(1).strip("，,。.、 ") for match in _SCENARIO_RE.finditer(message)]
+    """把一句话拆成多个场景。
+
+    两种句式都认：
+      - 动词并列：「按加权算一版，再按分层算一版」——正则逐个抽；
+      - 名词并列：「加权和分层，都以成本最低优先，算一版」——拆前半个句子的并列项，
+        再把共享谓语接回去。光杆模式词不成句，交给 _normalize_segment 补全。
+    """
+    segments = [
+        match.group(1).strip("，,。.、 ")
+        for match in _SCENARIO_RE.finditer(message)
+    ]
+    if len(segments) >= 2:
+        return segments
+    shared = _split_shared_predicate(message)
+    return shared or segments
+
+
+def _split_shared_predicate(message: str) -> list[str]:
+    """名词并列 + 共享谓语：「加权和分层，都以成本最低优先，算一版」。
+
+    「都/各/分别」是并列标记，后面接的谓语由两个场景共享。标记位置之后必须
+    出现排程动词，否则「成本最低优先和最短完成优先都要考虑」会被误拆。
+    """
+    marker = _SHARED_MARK_RE.search(message)
+    if not marker:
+        return []
+    heads_text = _LEADING_NOISE_RE.sub("", message[: marker.start()].strip("，,。.、 "))
+    tails = message[marker.start():].strip("，,。.、 ")
+    if not _PLANNING_VERB_RE.search(tails):
+        return []
+    heads = [
+        head.strip("，,。.、 ")
+        for head in re.split(r"(?:和|与|及|、|,|，)", heads_text)
+        if head.strip("，,。.、 ")
+    ]
+    if len(heads) < 2 or not all(_is_scenario_head(head) for head in heads):
+        return []
+    # 每一项都要补上共享谓语，否则「加权」两个字单独编译不出任何东西。
+    return [f"{head}，{tails}" for head in heads]
+
+
+def _is_scenario_head(text: str) -> bool:
+    """并列项必须是模式词或策略名——避免把「船租和人工都按…」也当场景拆开。"""
+    head = text.strip()
+    if head in _MODE_WORDS:
+        return True
+    try:
+        from dsl_core import objective_catalog as catalog
+
+        return catalog.is_strategy(head)
+    except Exception:  # noqa: BLE001 - 目录不可用就不拆，交给下游
+        return False
+
+
+def _normalize_segment(segment: str) -> str:
+    """把光杆模式词补成「改成加权」，全局解析器才认。
+
+    只对整段就是模式词、或模式词打头接逗号的情形动手，不动句子中间的词，
+    所以“成本分层核算”这类说法不会被误伤。
+    """
+    text = segment.strip("，,。.、 ")
+    bare = re.fullmatch(r"(加权|分层)\s*(?:目标模式|目标|模式)?", text)
+    if bare:
+        return f"改成{bare.group(1)}"
+    head = re.match(r"^(加权|分层)\s*(?:目标模式|目标|模式)?\s*[，,、]\s*(.+)$", text)
+    if head:
+        return f"改成{head.group(1)}，{head.group(2)}"
+    return segment
+
+
+def _declared_mode(segment: str) -> str | None:
+    """场景里点名的目标模式；明确排除的不算。"""
+    text = _NEGATED_MODE_RE.sub("", segment)
+    for word in _MODE_WORDS:
+        if word in text:
+            return word
+    return None
+
+
+def _force_mode(request: PlanningRequest, mode: str) -> PlanningRequest:
+    """场景点了名就以它为准。
+
+    解析器只认「改成加权／加权模式」这几种说法，「按加权算一版」「目标模式加权」
+    都识别不出来——识别不出就会沿用当前模式，两段场景编译成同一份，
+    用户要两版、系统拦下报“完全相同”。这里补的是这层兜底，不是替代解析器。
+    """
+    from dataclasses import replace
+
+    updates: dict[str, Any] = {"mode": mode}
+    if mode == "加权" and not request.weights:
+        try:
+            from dsl_core import objective_catalog as catalog
+
+            updates["weights"] = dict(catalog.weighted_defaults(request.strategy))
+        except Exception:  # noqa: BLE001 - 目录取不到就交给下游校验
+            pass
+    return replace(request, **updates)
+
+
+def _declared_label(strategy: str, mode: str | None) -> str:
+    return f"{strategy}·{mode}" if mode else strategy
+
+
+def _scenario_label(raw: str) -> str:
+    """能用「加权」「分层」这种短标签，就别把整句塞进预览。"""
+    text = raw.strip("，,。.、 ")
+    head = re.sub(r"^(?:改成|改为|设成|设为|用|按|走)", "", text.split("，")[0].strip())
+    head = re.sub(r"(?:目标模式|目标|模式)$", "", head).strip()
+    if head in _MODE_WORDS or _is_scenario_head(head):
+        return head
+    return text
 
 
 def wants_compare(message: str) -> bool:
@@ -195,11 +318,38 @@ def build_scenario_batch(
     base_version_id: str | None,
     compiler: PlanningIntentCompiler | None = None,
 ) -> ScenarioBatch:
+    return build_scenario_batch_from_segments(
+        split_scenarios(message),
+        current,
+        base_version_id,
+        compiler,
+        compare=wants_compare(message),
+        source_prompt=message,
+    )
+
+
+def build_scenario_batch_from_segments(
+    segments: list[str],
+    current: PlanningRequest,
+    base_version_id: str | None,
+    compiler: PlanningIntentCompiler | None = None,
+    *,
+    compare: bool = True,
+    source_prompt: str | None = None,
+) -> ScenarioBatch:
+    """把若干场景片段各自编译成一份独立变体。
+
+    片段可以来自正则拆分，也可以直接来自模型（solve 的 scenarios 参数）。
+    无论哪来都过一遍 _normalize_segment，保证光杆「加权／分层」也能编译。
+    """
     compiler = compiler or PlanningIntentCompiler()
-    segments = split_scenarios(message)
     plans: list[ScenarioPlan] = []
-    for segment in segments:
-        if any(token in segment for token in _DEFAULT_TOKENS):
+    for raw in segments:
+        segment = _normalize_segment(raw)
+        # 点名了模式的场景一律走正常编译，哪怕文案里顺带出现「默认权重」。
+        # 这是语义护栏：以后再冒出含「默认」的新说法也不会误判成默认重跑。
+        declared_mode = _declared_mode(segment)
+        if not declared_mode and any(token in segment for token in _DEFAULT_TOKENS):
             # “按默认方法算一遍”没有改动项，但仍然是一次真实的求解。
             plans.append(
                 ScenarioPlan(
@@ -216,17 +366,23 @@ def build_scenario_batch(
             )
             continue
         compiled = compiler.compile_detailed(segment, current=current)
-        operations = [] if compiled.errors else _diff_requests(current, compiled.request)
+        request = compiled.request
+        named_mode = declared_mode
+        if named_mode and request.mode != named_mode:
+            request = _force_mode(request, named_mode)
+        operations = [] if compiled.errors else _diff_requests(current, request)
         errors = list(compiled.errors)
         if not errors and not operations:
             # 场景里点名了完整配置、只是恰好和当前一致时，它仍然是一次独立求解。
             declared = compiler.declared_strategy(segment)
-            if declared:
+            mode = named_mode
+            if declared or mode:
                 operations = [{
                     "kind": "rerun",
                     "key": "求解配置",
                     "before": "当前配置",
-                    "after": f"按「{declared}」重新求解",
+                    # 不写模式的话，两版预览会长得一样，用户没法确认哪版是哪版。
+                    "after": f"按「{_declared_label(declared or current.strategy, mode)}」重新求解",
                 }]
             else:
                 errors.append(
@@ -235,20 +391,47 @@ def build_scenario_batch(
                 )
         plans.append(
             ScenarioPlan(
-                label=segment,
-                request=compiled.request,
+                label=_scenario_label(raw),
+                request=request,
                 operations=operations,
                 notes=list(compiled.notes),
                 errors=errors,
                 source_prompt=segment,
             )
         )
+    _reject_duplicate_scenarios(plans)
     return ScenarioBatch(
         scenarios=plans,
-        compare=wants_compare(message),
-        source_prompt=message,
+        compare=compare,
+        source_prompt=source_prompt or "；".join(segments),
         base_version_id=base_version_id,
     )
+
+
+def _reject_duplicate_scenarios(plans: list[ScenarioPlan]) -> None:
+    """两个场景编译出同一份请求，说明模式或权重有一环没被识别——拆了等于没拆。
+
+    宁可当场报错，也不能给用户两份一模一样、还挂着“对比”的方案：
+    那会比只给一版更误导。
+    """
+    from app.core.decision_contract import fingerprint
+
+    seen: dict[str, int] = {}
+    for index, item in enumerate(plans, start=1):
+        if item.errors:
+            continue
+        try:
+            key = fingerprint(item.request.to_payload())
+        except Exception:  # noqa: BLE001 - 指纹算不出就别拦，不能把正常请求挡死
+            continue
+        first = seen.get(key)
+        if first is not None:
+            item.errors.append(
+                f"和场景 {first} 编译出的模型完全相同，不是两个不同的方案。"
+                "请说清这两版差在哪里（目标模式或权重）。"
+            )
+            continue
+        seen[key] = index
 
 
 def _format_batch_preview(batch: ScenarioBatch) -> str:
@@ -366,7 +549,14 @@ def _patch_label(patch: dict[str, Any]) -> str:
     if kind == "part_arrival":
         return f"备件到货·{patch.get('partName', '')}"
     if kind == "part_hours":
-        return f"维修工时·{patch.get('partName', '')}"
+        scope = "·".join(
+            part for part in (
+                f"{patch['severity']}严重度" if patch.get("severity") else "",
+                str(patch.get("sea") or ""),
+            ) if part
+        )
+        suffix = f"·{scope}" if scope else ""
+        return f"维修工时·{patch.get('partName', '')}{suffix}"
     if kind == "task_deadline":
         return f"完工期限·{patch.get('scope', '')}"
     return str(kind)
@@ -378,7 +568,18 @@ def _patch_text(patch: dict[str, Any]) -> str:
         at = datetime.fromisoformat(patch["at"])
         return f"{at.strftime('%Y-%m-%d')} 到货 {patch['quantity']} 套"
     if kind == "part_hours":
-        return f"×{float(patch['factor']):.4g}（基准工时 × 倍率）"
+        # 定点信息必须出现在预览里：只写"15 小时"，用户不知道改的是哪一档，
+        # 也就没法定点否决（比如他只想改常态，不想动恶劣海况那一列）。
+        scope = "·".join(
+            part for part in (
+                f"{patch['severity']}严重度" if patch.get("severity") else "",
+                str(patch.get("sea") or ""),
+            ) if part
+        )
+        where = f"（{scope}）" if scope else "（全部严重度·两种海况）"
+        if "hours" in patch:
+            return f"定为 {float(patch['hours']):g} 小时{where}"
+        return f"整件工时 ×{float(patch['factor']):.4g}{where}"
     if kind == "task_deadline":
         at = datetime.fromisoformat(patch["at"])
         return f"{at.strftime('%Y-%m-%d')} 前完成"

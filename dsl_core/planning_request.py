@@ -15,7 +15,10 @@ class PlanningRequest:
     base: str = "基座01"
     strategy: str = "成本最低优先"
     mode: str = "分层"
-    seconds: int = 300
+    # None = 用户没点名时限，交给参数总表（求解01「总求解预算」）决定；
+    # 只有用户在对话里说了「最多 90 秒」或 DSL 写了 solver.seconds 才是具体数字。
+    # 以前这里写死 300，于是公告永远说 300 秒，而参数总表写 60、实际跑 30。
+    seconds: int | None = None
     weights: dict[str, float] | None = None
     limits: dict[str, Any] = field(default_factory=dict)
     overrides: dict[str, Any] = field(default_factory=dict)

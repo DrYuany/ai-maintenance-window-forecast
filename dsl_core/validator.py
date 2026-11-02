@@ -17,8 +17,9 @@ from .registry import primitives as prim_reg
 from .registry import quantities as qty_reg
 
 # data 段各补丁类型的必需字段（第二期）
+# part_hours 只强制 part：factor / hours 二选一，在 _validate_data_patch 里判。
 _DATA_PATCH_REQUIRED: dict[str, tuple[str, ...]] = {
-    "part_hours": ("part", "factor"),
+    "part_hours": ("part",),
     "part_arrival": ("part", "at"),
     "task_deadline": ("at",),
     "weather": ("day",),
@@ -120,8 +121,25 @@ def _validate_data_patch(spec: Any, data, where: str) -> list[str]:
         if field_name not in spec:
             errors.append(f"{where}: 补丁 {kind} 缺少必需字段 {field_name}")
     if kind == "part_hours":
-        if "factor" in spec:
+        # 两种写法，二选一：
+        #   factor：整件工时乘倍率（"齿轮箱维修工时上涨 20%"）
+        #   hours ：把指定范围的工时定成绝对值（"叶片高风险修 15 小时"）
+        # 同时给会让人分不清"到底是乘还是定"，直接拒。
+        has_factor, has_hours = "factor" in spec, "hours" in spec
+        if has_factor and has_hours:
+            errors.append(f"{where}: part_hours 的 factor 与 hours 只能给一个")
+        if not has_factor and not has_hours:
+            errors.append(f"{where}: part_hours 需要 factor（倍率）或 hours（绝对小时）之一")
+        if has_factor:
             errors.extend(_check_bound(spec["factor"], where, "factor", minimum=0))
+        if has_hours:
+            errors.extend(_check_bound(spec["hours"], where, "hours", minimum=0))
+        if "severity" in spec and spec["severity"] not in ("高", "中", "低"):
+            errors.append(f"{where}: part_hours 的 severity 只能是 高/中/低，收到 {spec['severity']!r}")
+        if "sea" in spec and spec["sea"] not in ("常态", "恶劣但安全"):
+            errors.append(
+                f"{where}: part_hours 的 sea 只能是 常态/恶劣但安全，收到 {spec['sea']!r}"
+            )
     if kind == "part_arrival":
         if "quantity" in spec:
             errors.extend(_check_bound(spec["quantity"], where, "quantity", integer=True, minimum=1))
@@ -203,10 +221,10 @@ def _validate_constraint(spec: Any, data, where: str) -> list[str]:
             errors.extend(_check_filter(spec.get("filter"), where))
             # must 是"哪些任务必须做"，只能按任务行自己的属性筛；
             # day/window/line 是候选的属性，一个任务可以有多个候选，筛它没有意义。
-            unsupported = set(spec.get("filter") or {}) - {"task", "severity", "turbine", "part"}
+            unsupported = set(spec.get("filter") or {}) - set(prim_reg.TASK_FILTER_KEYS)
             if unsupported:
                 errors.append(
-                    f"{where}: must 的 filter 只支持 task/severity/turbine/part，"
+                    f"{where}: must 的 filter 只支持 {'/'.join(prim_reg.TASK_FILTER_KEYS)}，"
                     f"不支持 {sorted(unsupported)}"
                 )
     if ctype in ("exclude", "deadline", "earliest", "fix"):
@@ -238,6 +256,20 @@ def _validate_constraint(spec: Any, data, where: str) -> list[str]:
                     errors.append(f"{where}: 日期 {date!r} 不在规划范围内")
     if ctype == "cardinality":
         errors.extend(_check_filter(spec.get("filter"), where))
+    if ctype == "only":
+        # 范围裁剪：filter 必须非空（空 filter 命中全部任务，等于没约束），
+        # 键只能是任务行自己的属性。
+        filter_spec = spec.get("filter")
+        errors.extend(_check_filter(filter_spec, where))
+        if isinstance(filter_spec, dict):
+            if not filter_spec:
+                errors.append(f"{where}: only 的 filter 不能为空（空条件等于不裁剪范围）")
+            unsupported = set(filter_spec) - set(prim_reg.TASK_FILTER_KEYS)
+            if unsupported:
+                errors.append(
+                    f"{where}: only 的 filter 只支持 {'/'.join(prim_reg.TASK_FILTER_KEYS)}，"
+                    f"不支持 {sorted(unsupported)}"
+                )
     if ctype == "budget":
         errors.extend(_check_quantity(spec.get("quantity"), where))
     if ctype == "linear":

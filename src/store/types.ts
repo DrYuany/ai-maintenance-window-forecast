@@ -225,6 +225,19 @@ export interface DegradedPayload {
   detail?: string | null;
 }
 
+/** 免费体验额度（服务端按访客计数）。enabled=false 表示不限轮次。 */
+export interface QuotaInfo {
+  enabled: boolean;
+  limit: number;
+  used: number;
+  remaining: number;
+  dailyCap: number;
+  dailyUsed: number;
+  dailyRemaining: number;
+  /** 本次请求带了访客自己的密钥 */
+  ownKey: boolean;
+}
+
 export interface AgentResponse {
   assistantMessage: {
     id: string;

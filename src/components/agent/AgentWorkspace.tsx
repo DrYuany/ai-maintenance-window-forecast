@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useAgentStore } from "../../store/agent-store";
+import { ApiKeyDialog } from "./ApiKeyDialog";
 import { ConversationCanvas } from "./ConversationCanvas";
 import { ConversationRail } from "./ConversationRail";
 import { PlanDetailDrawer } from "./PlanDetailDrawer";
@@ -29,9 +30,14 @@ export function AgentWorkspace() {
     controlActiveJob,
     engine,
     setEngine,
+    quota,
+    quotaBlocked,
+    saveApiKey,
+    clearApiKey,
   } = useAgentStore();
   const [contextVersionId, setContextVersionId] = useState<string | null>(null);
   const [detailVersionId, setDetailVersionId] = useState<string | null>(null);
+  const [keyDialogOpen, setKeyDialogOpen] = useState(false);
   const chronologicalVersions = sortVersionsChronologically(versions);
   const contextVersion =
     versions.find((item) => item.id === contextVersionId) ?? versions[0] ?? null;
@@ -61,6 +67,10 @@ export function AgentWorkspace() {
       setContextVersionId(persistedContextVersionId);
     }
   }, [persistedContextVersionId, versions]);
+
+  useEffect(() => {
+    if (quotaBlocked) setKeyDialogOpen(true);
+  }, [quotaBlocked]);
 
   return (
     <div className="agent-workspace">
@@ -96,6 +106,8 @@ export function AgentWorkspace() {
           onControlJob={(action) => controlActiveJob(action)}
           engine={engine}
           onEngineChange={setEngine}
+          quota={quota}
+          onRequestKey={() => setKeyDialogOpen(true)}
         />
       )}
       {error ? <div className="agent-error">{error}</div> : null}
@@ -117,6 +129,19 @@ export function AgentWorkspace() {
         elapsedSeconds={activeJob?.elapsedSeconds ?? 0}
         hasIncumbent={activeJob?.hasIncumbent ?? false}
         onAction={(action) => void controlActiveJob(action)}
+      />
+      <ApiKeyDialog
+        open={keyDialogOpen}
+        hasKey={Boolean(quota?.ownKey)}
+        limit={quota?.limit ?? 10}
+        onClose={() => setKeyDialogOpen(false)}
+        onSubmit={async (key) => {
+          await saveApiKey(key);
+          setKeyDialogOpen(false);
+        }}
+        onClear={async () => {
+          await clearApiKey();
+        }}
       />
     </div>
   );

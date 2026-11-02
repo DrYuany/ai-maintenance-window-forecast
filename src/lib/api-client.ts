@@ -4,10 +4,17 @@ import type {
   ConversationDetail,
   DashboardResponse,
   ModelArtifact,
+  QuotaInfo,
   SortMode,
   SolveJob,
   StageEvent,
 } from "@/store/types";
+import {
+  LLM_KEY_HEADER,
+  VISITOR_HEADER,
+  getStoredApiKey,
+  getVisitorId,
+} from "@/lib/llm-key";
 
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ?? "";
@@ -19,6 +26,54 @@ export interface StreamHandlers {
   onStage?: (stage: StageEvent) => void;
 }
 
+/** 带上访客标识；只有填过密钥才带密钥头。 */
+function identityHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { [VISITOR_HEADER]: getVisitorId() };
+  const key = getStoredApiKey();
+  if (key) headers[LLM_KEY_HEADER] = key;
+  return headers;
+}
+
+/** 带状态码与业务错误码的异常，前端据此区分"额度用完"和普通失败。 */
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export function isQuotaError(error: unknown): boolean {
+  return error instanceof ApiError && error.code === "quota_exhausted";
+}
+
+async function toApiError(response: Response): Promise<ApiError> {
+  const text = await response.text();
+  let message = text || `Request failed: ${response.status}`;
+  let code: string | undefined;
+  try {
+    const parsed = JSON.parse(text) as { detail?: unknown; code?: unknown };
+    if (typeof parsed.code === "string") code = parsed.code;
+    const detail = parsed.detail;
+    if (typeof detail === "string") {
+      message = detail;
+    } else if (detail && typeof detail === "object") {
+      const nested = detail as { detail?: unknown; message?: unknown; code?: unknown };
+      if (typeof nested.code === "string") code = code ?? nested.code;
+      if (typeof nested.message === "string") message = nested.message;
+      else if (typeof nested.detail === "string") message = nested.detail;
+      else message = JSON.stringify(detail);
+    }
+  } catch {
+    // 不是 JSON（隧道错误页之类），保留原始文本
+  }
+  return new ApiError(message, response.status, code);
+}
+
 async function request<T>(
   path: string,
   init?: RequestInit,
@@ -26,14 +81,14 @@ async function request<T>(
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
       "Content-Type": "application/json",
+      ...identityHeaders(),
       ...(init?.headers ?? {}),
     },
     ...init,
   });
 
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `Request failed: ${response.status}`);
+    throw await toApiError(response);
   }
 
   if (response.status === 204) {
@@ -44,6 +99,12 @@ async function request<T>(
 }
 
 export const apiClient = {
+  getQuota: () => request<QuotaInfo>("/api/access/quota"),
+  verifyApiKey: (key: string) =>
+    request<{ ok: boolean }>("/api/access/verify-key", {
+      method: "POST",
+      headers: { [LLM_KEY_HEADER]: key },
+    }),
   listConversations: () => request<Conversation[]>("/api/conversations"),
   createConversation: (title: string) =>
     request<Conversation>("/api/conversations", {
@@ -79,7 +140,7 @@ export const apiClient = {
   ): Promise<AgentResponse> => {
     const response = await fetch(`${API_BASE_URL}/api/agent/message/stream`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...identityHeaders() },
       body: JSON.stringify({
         conversationId,
         message,
@@ -88,8 +149,11 @@ export const apiClient = {
         engine,
       }),
     });
-    if (!response.ok || !response.body) {
-      throw new Error((await response.text()) || `Request failed: ${response.status}`);
+    if (!response.ok) {
+      throw await toApiError(response);
+    }
+    if (!response.body) {
+      throw new ApiError("浏览器不支持流式响应", response.status);
     }
     const reader = response.body.getReader();
     const decoder = new TextDecoder();

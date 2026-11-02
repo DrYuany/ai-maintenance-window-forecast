@@ -61,6 +61,8 @@ def _render_constraint(spec: dict[str, Any]) -> str:
             text = f"必修（{_fmt_filter(spec.get('filter'))}）"
     elif ctype == "exclude":
         text = f"排除：{spec.get('task')}"
+    elif ctype == "only":
+        text = f"只修（{_fmt_filter(spec.get('filter'))}），其余任务一律不排"
     elif ctype == "at_most_one":
         text = f"{_fmt_tasks(spec.get('tasks'))} 中最多选 1 个"
     elif ctype == "at_least_one":

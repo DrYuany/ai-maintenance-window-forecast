@@ -81,6 +81,12 @@ class PlanningIntentCompiler:
         current: PlanningRequest | None = None,
     ) -> CompiledIntent:
         text = self._normalize(message)
+        # 「叶片在高风险需要修 15 小时」里的"高风险"是工时档位，不是"按风险优先排"。
+        # 策略匹配是全文本包含判断，不遮掉这段就会把一句改工时的话读成换策略——
+        # 用户没说过的话，不能自己补进请求里。
+        text_for_strategy = self._HOURS_LEVEL_PHRASE.sub(
+            lambda match: "○" * len(match.group(0)), text
+        )
         request = replace(current) if current else PlanningRequest()
         notes: list[str] = []
         errors: list[str] = []
@@ -88,7 +94,7 @@ class PlanningIntentCompiler:
 
         original_strategy = request.strategy
         for phrases, strategy in self._STRATEGIES:
-            if any(phrase in text for phrase in phrases):
+            if any(phrase in text_for_strategy for phrase in phrases):
                 request = replace(request, strategy=strategy)
                 consumed.append(f"策略={strategy}")
                 break
@@ -120,7 +126,7 @@ class PlanningIntentCompiler:
 
         daily_hours = re.search(
             r"每天[^\d]{0,6}(?:最多|不超过|只能|限定|只有|至多|只|仅)"
-            r"(?:维修|作业|施工|检修|干活|干|做|工作|时间)?\s*"
+            r"(?:维修|作业|施工|检修|干活|干|做|工作|时间|修)?\s*"
             r"(\d+(?:\.\d+)?)\s*(?:个)?小时",
             text,
         )
@@ -246,6 +252,8 @@ class PlanningIntentCompiler:
         notes.extend(weight_notes)
         errors.extend(weight_errors)
 
+        # 只有用户这句话里真的点了时限才写进请求；没点就留 None，
+        # 由参数总表（求解01「总求解预算」）决定——公告不能再自己编一个数。
         seconds = request.seconds
         solve_minutes = re.search(r"(?:求解)?(?:最多|最长|上限)?\s*(\d+(?:\.\d+)?)\s*分钟", text)
         solve_seconds = re.search(r"(?:求解)?(?:最多|最长|上限)?\s*(\d+)\s*秒", text)
@@ -253,7 +261,8 @@ class PlanningIntentCompiler:
             seconds = int(float(solve_minutes.group(1)) * 60)
         elif solve_seconds:
             seconds = int(solve_seconds.group(1))
-        seconds = min(1800, max(30, seconds))
+        if seconds is not None:
+            seconds = min(1800, max(30, seconds))
 
         # 多轮上下文：同一参数本轮新说的口径取代旧口径（绝对 vs 相对不叠加）。
         prev_overrides = dict(request.overrides)
@@ -281,6 +290,31 @@ class PlanningIntentCompiler:
 
     # ------------------------------------------------------------- 行级数据补丁
     _MONTH_DAY = re.compile(r"(?:(\d{4})年)?(\d{1,2})月(\d{1,2})[日号]")
+
+    # 「高风险 / 中风险」紧跟着「修 N 小时」——这是工时档位，不是策略口径。
+    # 只做遮蔽，不做抽取；抽取在 _parse_data_patches 里按部件名锚定。
+    _HOURS_LEVEL_PHRASE = re.compile(
+        r"(?:高风险|中风险|低风险|高严重度|中严重度|低严重度)"
+        r"(?:下|时|的情况下|的)?"
+        r"(?:需要|需|要|得|只|就)?"
+        r"修\s*\d+(?:\.\d+)?\s*(?:个)?小时"
+    )
+
+    # 部件名 + （可选定语）+ 修 N 小时 = 行级工时定点。用于路由判定：
+    # 必须锚定到部件名，"这个任务要修 15 小时"那种说法不进规则路径
+    # （部件库没有任务级的工时刻，硬猜等于编造改动）。
+    _HOURS_ABSOLUTE = re.compile(
+        r"(?:" + "|".join(re.escape(alias) for alias in _PART_ALIAS_KEYS) + r")"
+        r"[^，。；;]{0,12}?"
+        r"(?:修|工时\s*(?:定|改|设|调整|调)(?:成|为|到))\s*\d+(?:\.\d+)?\s*(?:个)?小时"
+    )
+
+    # 部件名和「修 N 小时」之间允许出现的定语。出现别的东西就说明这不是在给这个
+    # 部件定工时而是在说日常参数（「叶片每天最多修 8 小时」）。
+    _HOURS_SCOPE_GLUE = re.compile(
+        r"(?:在|的|下|时|的?情况|高|中|低|风险|严重度|等级|常态|恶劣|但安全|海况|"
+        r"维修|工时|需要|需|要|得|只|就|也|都|这|那)+"
+    )
 
     @staticmethod
     def _resolve_moment(year: str | None, month: str, day: str) -> str:
@@ -382,10 +416,15 @@ class PlanningIntentCompiler:
 
     @staticmethod
     def _patch_identity(patch: dict[str, Any]) -> tuple:
-        """同一件事只留一条：后说的取代先说的，避免重复叠加。"""
+        """同一件事只留一条：后说的取代先说的，避免重复叠加。
+
+        part_hours 的身份是（部件, 严重度, 海况）这一格，不是整个部件：
+        「整件 ×1.2」和「高风险定 15 小时」是两件不同的事，都该留着。
+        """
         kind = patch.get("kind")
         if kind == "part_hours":
-            return (kind, patch.get("partId"))
+            return (kind, patch.get("partId"),
+                    patch.get("severity") or "*", patch.get("sea") or "*")
         if kind == "part_arrival":
             return (kind, patch.get("partId"), patch.get("at"))
         if kind == "task_deadline":
@@ -485,6 +524,47 @@ class PlanningIntentCompiler:
             }
             if level:
                 patch["severity"] = level
+            patches.append(patch)
+
+        # 工时绝对值 + 定点：「叶片在高风险需要修 15 小时」「把叶片工时定成 15 小时」。
+        # 和下面那条倍率写法的区别：这里给的是**这一档的最终小时数**，不是乘数。
+        # 只在能锚定到部件名时才收——「015 要 15 小时」这种没点部件的说法，
+        # 部件库里没有对应列可改，硬猜一个部件等于编造改动。
+        for match in re.finditer(
+            r"(?:修|工时\s*(?:定|改|设|调整|调)(?:成|为|到))\s*(\d+(?:\.\d+)?)\s*(?:个)?小时",
+            text,
+        ):
+            head = text[max(0, match.start() - 16): match.start()]
+            if re.search(r"每天|每日|最多|不超过|上限|只能", head):
+                continue
+            part = self._match_part(head)
+            if not part:
+                continue
+            # 部件名之后到"修"之间只能有定语，否则不是给这个部件定工时。
+            index = head.rfind(part[1])
+            glue = head[index + len(part[1]):]
+            if self._HOURS_SCOPE_GLUE.sub("", glue).strip():
+                continue
+            hours = float(match.group(1))
+            if hours <= 0:
+                errors.append(f"「{part[1]}」的维修工时必须是正数。")
+                continue
+            level = self._match_severity(glue)
+            sea = "恶劣但安全" if "恶劣" in glue else ("常态" if "常态" in glue else None)
+            key = f"hours:{part[0]}:{level or '*'}:{sea or '*'}"
+            if key in seen:
+                continue
+            seen.add(key)
+            patch = {
+                "kind": "part_hours",
+                "partId": part[0],
+                "partName": part[1],
+                "hours": round(hours, 6),
+            }
+            if level:
+                patch["severity"] = level
+            if sea:
+                patch["sea"] = sea
             patches.append(patch)
 
         # 工时：「齿轮箱维修工时上涨 20%」
@@ -664,7 +744,9 @@ class PlanningIntentCompiler:
 
     @classmethod
     def _is_record_change(cls, text: str) -> bool:
-        return any(re.search(pattern, text) for pattern in cls._RECORD_PATTERNS)
+        if any(re.search(pattern, text) for pattern in cls._RECORD_PATTERNS):
+            return True
+        return bool(cls._HOURS_ABSOLUTE.search(text))
 
     @classmethod
     def _is_weight_change(cls, text: str) -> bool:

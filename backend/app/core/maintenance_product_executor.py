@@ -42,11 +42,17 @@ class MaintenanceProductExecutor:
             overrides=prepared.overrides,
             data_patches=prepared.data_patches,
         )
+        # 预算只在这里算一次：参数总表 → 用户显式 → 部署上限。
+        # 公告、job 进度、模型产物参数表、版本对比都读这个结果，
+        # 不再各写一个数（曾经同时存在 300 / 60 / 30）。
+        from solve_budget import resolve as resolve_budget
+
         snapshot = {
             "input_hash": data.meta.get("输入哈希"),
             "run_hash": data.meta.get("运行哈希"),
             "as_of": data.meta.get("规划时点"),
             "business_version": data.meta.get("业务版本"),
+            "budget": resolve_budget(data.params, requested_seconds=prepared.seconds),
         }
         return prepared, snapshot
 

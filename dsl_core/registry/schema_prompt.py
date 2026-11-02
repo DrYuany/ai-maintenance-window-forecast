@@ -242,11 +242,16 @@ def data_block() -> str:
         "data 段写法示例（kind 是固定枚举，不要自创）：",
         '{"kind":"part_arrival","part":"叶片","at":"2026-11-05T08:00:00+08:00","quantity":2,"blockBefore":true}',
         '{"kind":"part_hours","part":"齿轮箱","factor":1.2}',
+        '{"kind":"part_hours","part":"叶片","severity":"高","hours":15}',
+        '{"kind":"part_hours","part":"叶片","severity":"高","sea":"常态","hours":15}',
         '{"kind":"task_deadline","severity":"高","at":"2026-11-08T08:00:00+08:00"}',
         '{"kind":"weather","day":"2026-11-03","wind":15.0}',
         '{"kind":"weather","day":"2026-11-04","state":"不可作业"}',
         '{"kind":"hourly","time":"2026-11-03T12:00:00+08:00","price":400}',
         '{"kind":"window","window":"窗口02","start":"2026-11-01T00:00:00+08:00"}',
+        "part_hours 两种写法二选一：factor=整件工时倍率，hours=绝对小时数。"
+        "severity（高/中/低）和 sea（常态/恶劣但安全）用来定点到某一档；"
+        "不给就等于该维全改。要限定只修哪些任务，用约束 only，不要逐条列 exclude。",
     ])
     return "\n".join(lines)
 

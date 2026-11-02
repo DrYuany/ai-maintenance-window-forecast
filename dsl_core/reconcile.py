@@ -413,6 +413,33 @@ def _constraint_checks(
                         f"实际用了 {len(used)} 个：{'、'.join(map(str, sorted(used, key=str))) or '无'}",
                     )
                 )
+            elif ctype == "only":
+                # 「只修 X」的核对是**产物里不能有任何一行落在范围外**，
+                # 不是"范围内至少排了一个"。少排是求解器的选择，多排才是违约。
+                filter_spec = dict(spec.get("filter") or {})
+                if "part" in filter_spec and data is not None:
+                    # DSL 里 part 可以写编号（部件01）也可以写名称（叶片），
+                    # 产物行只有名称，先归一再比，否则写编号会被误判成全部越界。
+                    from .registry.entities import resolve_part
+
+                    part_id = resolve_part(data, str(filter_spec["part"]))
+                    if part_id is not None:
+                        filter_spec["part"] = data.parts[part_id]["部件名称"]
+                selected = _matching(rows, filter_spec)
+                if selected is None:
+                    checks.append(_item(f"{where}：只修范围", UNVERIFIED, "过滤维度无法核对"))
+                    continue
+                outside = [
+                    str(row.get("任务编号")) for row in rows if row not in selected
+                ]
+                checks.append(
+                    _item(
+                        f"{where}：只修 {spec.get('filter')}",
+                        PASS if not outside else FAIL,
+                        f"排入 {len(rows)} 项，范围外 {len(outside)} 项："
+                        + ("、".join(outside[:5]) or "无"),
+                    )
+                )
             elif ctype == "cardinality":
                 filter_spec = spec.get("filter") or {}
                 selected = _matching(rows, filter_spec)

@@ -12,6 +12,8 @@
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| v0.6 | 2026-11-02 | #4/#5 修复落地（workbuddy 主修 exclude+fallback，我补「解状态≠FEASIBLE」）；#6 仍待修改 |
+| v0.5 | 2026-11-02 | 记录 #4-#6（现场排程对话暴露：exclude 约束链路中断、HEURISTIC_FALLBACK 误标、复核不验证意图） |
 | v0.4 | 2026-11-01 | #3 结构分离落地：抽 `dsl_core/` 中立共享包，两产品解耦，两侧测试全绿 |
 | v0.3 | 2026-11-01 | 记录问题 #3（llm-first 与 rule-first 两套理解层并存，产线未切换） |
 | v0.2 | 2026-11-01 | 记录问题 #2（工具调用规则没有单一事实源）；为问题清单新增「问题来源」字段 |
@@ -98,3 +100,51 @@
 
 - **已做（2026-11-01，方案 B）**：抽出 `dsl_core/` 中立共享包（registry、validator、compiler、generator、runner、planning_bridge、objective_catalog、part_catalog、planning_request）；`llm_parser.py` 留 backend（规则侧理解层）；`PlanningRequest`/`json_key`/`part_catalog` 抽进 dsl_core；两产品 import 全部改指 dsl_core，互不 import。验证：backend pytest 373 过、llm-first pytest 168 过。
 - **未做**：产线从 rule-first 切到 llm-first（这是另一场迁移；rulebench 的规则侧对照 import 仍在 llm-first 内，见 README「遗留」）。
+
+### #4 「排除（不安排）」约束在 DSL→模型链路中断
+
+- **状态**：已修复（workbuddy 主修 + 我验证：`exclude` 走 `constraints_builder` 编出 `=0`，并切 `partial` 模式避免与完整模式 `sum(x)==1` 冲突；`test_exclude_partial.py` 3 过，真求解验证「exclude 009-011 → 恰好排 001-008」）
+- **严重度**：高（用户的核心指令被静默丢弃，产出与意图不符的方案，且看起来「合规」）
+- **位置**：
+  - `dsl_core/planning_bridge.py:168-180` — `dsl_to_request` 把 `must` 映射到 `limits["必修任务"]`，但 `exclude` 落入 `else: residual.append(spec)`，未映射成可执行约束
+  - `dsl_core/compiler.py:164` — 编译器**已支持** `exclude` → `model.Add(sum(variables)==0)`，但这条路没接到求解链路
+  - `maintenance-milp-modeler/scripts/product_planner.py:588` — 求解器只「感知」exclude 用于切换部分排程模式，不把被排除任务加 `=0`
+- **问题来源**：现场排程对话（2026-11-02）——用户「只需要修前 8 个，其余 009–013 不安排」，产出却 11/13（009/010/011 被排入）；agent 两轮自查定位到「模型里只有 8 条必做约束，没有任何一条把 009–013 锁在 0」。
+
+- **现象**：「只修前 8 个」→ 生成了 8 条必做（=1，任务 001–008），但「其余不安排」没有生成 exclude（=0）；求解器在「成本最低优先 + 完成数次级优化」下把 009、010、011 一并排入 → 11/13。
+
+- **根因**：`must` 有专属映射（`必修任务`），`exclude` 没有对应映射，归入 `residual` 后，这份 residual DSL 在求解时没有把 `=0` 约束编进模型。改措辞重跑没有用——不是措辞问题，是编译链路缺一条「排除」的映射 + 求解消费。
+
+- **建议方向**：镜像 `must → 必修任务` 的路子——`planning_bridge` 加 `exclude → limits["排除任务"]` 映射，求解器据此对每个被排除任务加 `sum(x)==0`；并在 `format_dsl_preview` 与求解结果之间加对账（预览里的排除项，模型里必须有对应 =0）。
+
+- **决策备注**：llm-first 的 README「八个真实缺口」其实登记过「exclude 是『这次不修』」，但那是 LLM 主导版的能力盘点，没回落到 rule-first 产线的编译链路。这条是 rule-first 产线的实际事故，优先级应高于能力盘点。
+
+### #5 HEURISTIC_FALLBACK 误标解状态 FEASIBLE（「启发式兜底」与「CP-SAT FEASIBLE」自相矛盾）
+
+- **状态**：已修复（workbuddy 删了 `selected=fallback` 起手 + `方案来源` 改判 `CP_SAT if selected else None`；我补了兜底分支 `解状态='FEASIBLE'` → `'UNKNOWN'`，消除来源与解状态的口径打架）
+- **严重度**：中（不影响求解正确性，但状态表述自相矛盾，导致 agent 反复误报、自我纠正，用户无法判断真实状态）
+- **位置**：
+  - `maintenance-milp-modeler/scripts/product_planner.py:605-614` — 兜底分支写 `info['方案来源']='HEURISTIC_FALLBACK'` **同时** `info['解状态']='FEASIBLE'`（:610）
+  - `backend/app/core/agent_runtime.py:2001` — `_format_product_reply` 按 `方案来源==HEURISTIC_FALLBACK` 输出「启发式基线兜底」，与 job 状态里显示的 FEASIBLE 对不上
+- **问题来源**：同一段对话——agent 先说「启发式基线兜底」，后又纠正「CP-SAT 返回 FEASIBLE、独立复核通过、不是启发式兜底」；schedule card 显示「启发式兜底方案 · 未证明最优」。
+
+- **现象**：同一个求解结果，两处口径打架：`方案来源=HEURISTIC_FALLBACK` 触发「启发式兜底」文案，`解状态=FEASIBLE` 触发「CP-SAT 有可行解」表述。
+
+- **根因**：兜底分支（完整+部分排程都没在时限内找到可行解时）把启发式基线标成 `解状态=FEASIBLE`，复用了四态（OPTIMAL/FEASIBLE/UNKNOWN/INFEASIBLE）里 FEASIBLE 的语义——但 FEASIBLE 意味着「CP-SAT 找到的可行解」，启发式基线不是 CP-SAT 解，两者不能共用一个值。代码注释（:433-438）自述修过这个坑（「解状态 FEASIBLE、来源 HEURISTIC_FALLBACK… 永远降不了级」），但 :610 仍保留 `解状态='FEASIBLE'`，等于没修干净。
+
+- **建议方向**：HEURISTIC_FALLBACK 的解状态不得复用 FEASIBLE，改为 UNKNOWN（或新增独立值），并在 `_format_product_reply` 与 job 状态展示两处统一口径；加一条测试断言「来源=HEURISTIC_FALLBACK 时解状态 ≠ FEASIBLE」。
+
+### #6 独立复核不验证「约束是否符合用户意图」
+
+- **状态**：待修改
+- **严重度**：高（复核通过 ≠ 正确：复核的是自洽但错误的模型，给用户「已复核」的假保障）
+- **位置**：复核环节（`verified` 标记 + 独立复核流程）只验证约束自洽/模型可解，不对照用户原话验证意图是否实现
+- **问题来源**：同一段对话——「独立复核通过」，但复核的是 13 条必做（错误模型），而非用户要的 8 必做 + 5 排除；agent 自己点破「复核的是错的模型」。
+
+- **现象**：`scheduled=11/13`、约束全是 13 条 `=1`，与用户「只修 8 个、排除 009–013」完全不符，但复核照样通过。
+
+- **根因**：复核只做「数学自洽」（约束无矛盾、能解出解），不做「意图对账」（用户点名的必做/排除任务，与模型里的 =1/=0 约束逐项是否一一对应）。#4 的 exclude 丢了，复核察觉不到，因为复核根本不知道用户说过「排除」。
+
+- **建议方向**：在复核里加一道「意图↔约束」对账——把用户原话里点名的任务（必做/排除）与模型约束逐项核对；对不上的判复核不通过，而不是只看能解。可与 #4 的验收标准合并成同一条判据。
+
+- **决策备注**：这条与 #4 是因果链：#4 让 exclude 丢进模型，本可由 #6 拦住但没拦。修复顺序上，先补 #4（让 exclude 能编译），再补 #6（让复核能拦住下次类似丢失）。

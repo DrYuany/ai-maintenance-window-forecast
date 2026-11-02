@@ -35,7 +35,11 @@ export function EvidencePanel({ artifact, evidence, job, version }: { artifact: 
       <section className="evidence-hero">
         <div><CircleDashed size={17} /><span>求解状态</span></div>
         <strong>{statusTitle(evidence, job, version)}</strong>
-        <p>{running ? `任务 ${job?.id} 已运行 ${job?.elapsedSeconds ?? 0} 秒。超过 3 分钟会询问是否继续。` : evidence?.status === "UNKNOWN" ? "UNKNOWN 仅表示当前未取得结论，不等于无解。" : "可行性、最优性与复核状态分别记录，不混为一谈。"}</p>
+        <p>{running
+          ? `任务 ${job?.id} 已运行 ${job?.elapsedSeconds ?? 0} 秒。${job?.nextDecisionAt ? `超过 ${job.nextDecisionAt} 秒仍没算完才会询问是否继续` : "时限内不会打断求解"}。`
+          : evidence?.status === "UNKNOWN"
+            ? "UNKNOWN 仅表示当前未取得结论，不等于无解。"
+            : "可行性、最优性与复核状态分别记录，不混为一谈。"}</p>
       </section>
       {version ? (
         <section className="evidence-section result-detail-section">
@@ -68,7 +72,7 @@ export function EvidencePanel({ artifact, evidence, job, version }: { artifact: 
         <dl>
           <div><dt>策略</dt><dd>{String(job?.request.strategy ?? "待确认")}</dd></div>
           <div><dt>目标模式</dt><dd>{String(job?.request.mode ?? "待确认")}</dd></div>
-          <div><dt>时间预算</dt><dd>{job ? `${job.request.seconds} 秒` : "待确认"}</dd></div>
+          <div><dt>时间预算</dt><dd>{job ? `${String(job.request.budgetSeconds ?? job.request.seconds ?? "待确认")} 秒` : "待确认"}</dd></div>
         </dl>
       </section>
       <section className="evidence-section">

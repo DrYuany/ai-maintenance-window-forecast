@@ -16,6 +16,13 @@ CONSTRAINT_PRIMITIVES: dict[str, dict] = {
     # 会让排不下的任务静默进"未安排"，加上 must 才是"要么修完、要么明确不可行"。
     "must":            {"required": [], "optional": ["task", "filter"]},
     "exclude":         {"required": ["task"]},
+    # only 是**范围裁剪**：「只修 1 号风机的叶片」= 任务集收缩到 filter 命中的那些，
+    # 其余一律不排。和 exclude 不重复：exclude 说的是"排除命中的"，要表达"只修 X"
+    # 就得枚举补集，而 DSL 的 filter 没有否定形式，模型只能瞎猜补集。
+    #
+    # filter 的键只能是任务行自己的属性（TASK_FILTER_KEYS），不能是 day/window/line
+    # ——那是候选的属性，同一个任务可以落在不同天/窗/线，拿来筛任务没有意义。
+    "only":            {"required": ["filter"]},
     "at_most_one":     {"required": ["tasks"]},
     "at_least_one":    {"required": ["tasks"]},
     # 关系维度
@@ -42,10 +49,15 @@ CONSTRAINT_PRIMITIVES: dict[str, dict] = {
 
 # 原型已实现编译的约束原语；其余登记在册但报"原型未实现"
 COMPILED_CONSTRAINTS: frozenset[str] = frozenset({
-    "must", "exclude", "precedence", "co_occur", "fix",
+    "must", "exclude", "only", "precedence", "co_occur", "fix",
     "cardinality", "deadline", "earliest", "forbidden_dates", "budget", "linear",
     "at_most_one", "at_least_one", "capacity",
 })
+
+# 任务过滤维度：能拿来筛**任务行**的属性。
+# day/window/line 不在这里——它们是候选（一个任务可以有多个候选），筛它们筛不出任务。
+# must/only/cardinality/deadline 的 filter 共用这一份，避免各写各的再走偏。
+TASK_FILTER_KEYS: tuple[str, ...] = ("task", "severity", "turbine", "part")
 
 # capacity 的资源维度：问的是"那天开了几条线"这类**维度级**配额。
 # crew（班组）不在里面：模型里没有班组变量，"人员总上限"只用来算线数，

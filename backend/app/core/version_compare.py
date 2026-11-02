@@ -130,6 +130,169 @@ def _artifact_constraints(artifact: dict[str, Any] | None) -> dict[str, dict[str
     return result
 
 
+# ── 收敛状态：差值能不能当结论，取决于两侧算到什么程度 ─────────────────────
+#
+# 曾经这里只比大小：242.52 与 243.17 差 0.65 万，就写"方案02 更贵"。
+# 可两版都是 FEASIBLE，各自离自己的最优还差 1%~3%，0.65 万完全落在
+# 这个不确定区间里——那不是结论，是求解器停在哪里的偶然。
+# 现在把每版的收敛情况摊开，用区间判断：只有两个区间不重叠才敢说谁更省。
+
+_COST_STAGE = "总经济成本"
+
+
+def _stage_rows(version: WindowVersion) -> list[dict[str, Any]]:
+    return [_dict(item) for item in _list(_solver(version).get("阶段"))]
+
+
+def _budget(version: WindowVersion) -> dict[str, Any]:
+    solver = _solver(version)
+    budget = _dict(solver.get("预算"))
+    params = _dict(solver.get("求解器参数"))
+    seconds = _number(budget.get("seconds"))
+    if seconds is None:
+        seconds = _number(params.get("max_time_in_seconds"))
+    gap = _number(budget.get("gapLimit"))
+    if gap is None:
+        gap = _number(params.get("relative_gap_limit"))
+    return {
+        "seconds": seconds,
+        "gapLimit": gap,
+        "secondsSource": budget.get("secondsSource"),
+        "gapSource": budget.get("gapSource"),
+    }
+
+
+def _cost_gap(version: WindowVersion) -> float | None:
+    """成本阶段自己的相对差距；没有这一阶段就退回全场最大差距。"""
+    for stage in _stage_rows(version):
+        if str(stage.get("目标") or "") == _COST_STAGE:
+            return _number(stage.get("相对差距"))
+    return _number(_solver(version).get("最大相对差距"))
+
+
+def _cost_gap_metric(version: WindowVersion) -> str:
+    """这个差距到底属于哪个目标，别把「加权目标最优」说成「成本最优」。
+
+    求解日志里除了业务阶段还混着「确定性决胜」条目，那些只是打破平局、
+    不是业务目标，数阶段时得先把它们摘出去。
+    """
+    stages = [
+        item
+        for item in _stage_rows(version)
+        if not str(item.get("目标") or "").startswith("确定性决胜")
+    ]
+    if any(str(item.get("目标") or "") == _COST_STAGE for item in stages):
+        return _COST_STAGE
+    if len(stages) == 1:
+        return str(stages[0].get("目标") or "本版目标")
+    return "本版目标"
+
+
+def convergence_of(version: WindowVersion) -> dict[str, Any]:
+    solver = _solver(version)
+    stages = _stage_rows(version)
+    planned = _number(solver.get("计划阶段数"))
+    executed = _number(solver.get("执行阶段数"))
+    if planned is None:
+        planned = len(stages)
+    if executed is None:
+        executed = len([item for item in stages if item.get("状态") in ("OPTIMAL", "FEASIBLE")])
+    optimal = len([item for item in stages if item.get("状态") == "OPTIMAL"])
+    status = _status(version)
+    gap = _cost_gap(version)
+    return {
+        "status": status,
+        "quality": solver.get("最优性") or ("已证明最优" if status == "OPTIMAL" else "未证明最优"),
+        "progress": solver.get("分层进度") or f"{int(executed)}/{int(planned)}",
+        "stagesPlanned": int(planned),
+        "stagesExecuted": int(executed),
+        "stagesOptimal": optimal,
+        "stagesWithinTolerance": _list(solver.get("容差内阶段")),
+        "stagesUnproven": _list(solver.get("未达最优阶段")),
+        "costGap": gap,
+        "costGapMetric": _cost_gap_metric(version),
+        "maxRelativeGap": _number(solver.get("最大相对差距")),
+        "stopReason": solver.get("终止原因"),
+        "elapsedSeconds": _number(solver.get("总耗时秒")),
+        "budgetSeconds": _budget(version).get("seconds"),
+        "gapLimit": _budget(version).get("gapLimit"),
+    }
+
+
+def _cost_range(version: WindowVersion, convergence: dict[str, Any]) -> dict[str, Any] | None:
+    """成本的可能区间（万元）。
+
+    最小化问题里：当前解 best 是上界，最优不可能比 best 更差；
+    相对差距 g 意味着最优值不低于 best*(1-g)。所以区间是
+    [best*(1-g), best]，不是 [best, best*(1+g)]。
+    """
+    best = _number((version.resultSummary or {}).get("totalCost"))
+    if best is None:
+        return None
+    best_wan = round(best / 10_000, 2)
+    status = convergence.get("status")
+    gap = convergence.get("costGap")
+    if status == "OPTIMAL":
+        gap = 0.0
+    if gap is None:
+        return {"best": best_wan, "gap": None, "low": None, "high": best_wan, "proven": False}
+    gap = max(0.0, float(gap))
+    return {
+        "best": best_wan,
+        "gap": round(gap, 6),
+        "low": round(best_wan * (1 - gap), 2),
+        "high": best_wan,
+        "proven": gap == 0.0,
+    }
+
+
+def _cost_decision(
+    left: dict[str, Any] | None,
+    right: dict[str, Any] | None,
+    *,
+    comparable: bool,
+) -> dict[str, Any]:
+    if not comparable:
+        return {"certainty": "incomparable", "cheaper": None, "reason": "两次运行的数据或任务集合不同，成本不可比。"}
+    if not left or not right:
+        return {"certainty": "incomparable", "cheaper": None, "reason": "至少一侧缺少总成本。"}
+    if left.get("gap") is None or right.get("gap") is None:
+        return {
+            "certainty": "unverified",
+            "cheaper": None,
+            "reason": "至少一侧没有记录收敛状态，成本差值未核实，不能当结论。",
+        }
+    if left["proven"] and right["proven"]:
+        if left["best"] == right["best"]:
+            return {"certainty": "proven", "cheaper": "tie", "reason": "两侧都证明最优，成本相同。"}
+        cheaper = "right" if right["best"] < left["best"] else "left"
+        return {
+            "certainty": "proven",
+            "cheaper": cheaper,
+            "reason": "两侧都证明最优，成本差值就是结论。",
+        }
+    if left["high"] < right["low"]:
+        return {
+            "certainty": "beyondTolerance",
+            "cheaper": "left",
+            "reason": "左侧最差情况仍低于右侧最好情况，差值超出两侧求解容差。",
+        }
+    if right["high"] < left["low"]:
+        return {
+            "certainty": "beyondTolerance",
+            "cheaper": "right",
+            "reason": "右侧最差情况仍低于左侧最好情况，差值超出两侧求解容差。",
+        }
+    return {
+        "certainty": "inconclusive",
+        "cheaper": None,
+        "reason": (
+            "两侧都没证明最优，成本区间有重叠：差值落在求解容差之内，"
+            "不能据此判定谁更省。"
+        ),
+    }
+
+
 def _metric(
     key: str,
     label: str,
@@ -311,6 +474,8 @@ def compare_versions(
     right_constraints = _artifact_constraints(right_artifact)
     left_solver = _solver(left)
     right_solver = _solver(right)
+    left_conv = convergence_of(left)
+    right_conv = convergence_of(right)
 
     same_data = bool(
         left_snapshot.get("inputHash")
@@ -333,7 +498,20 @@ def compare_versions(
         and left.modelFingerprint == right.modelFingerprint
     )
     cost_comparable = same_data and same_universe
-    savings_allowed = cost_comparable and left_tasks == right_tasks
+    left_range = _cost_range(left, left_conv)
+    right_range = _cost_range(right, right_conv)
+    # 「差值能不能当结论」比「成本数字能不能并列」更严：两次完成的任务集合
+    # 不同，服务量就不等价，即使两侧区间不重叠也不能说谁更省。
+    cost_decision = _cost_decision(
+        left_range, right_range, comparable=cost_comparable and left_tasks == right_tasks
+    )
+    # 只有差值真的超出两侧容差（或两侧都证明最优）才允许说"省了多少"。
+    savings_allowed = bool(
+        cost_comparable
+        and left_tasks == right_tasks
+        and cost_decision["certainty"] in ("proven", "beyondTolerance")
+        and cost_decision["cheaper"] in ("left", "right")
+    )
 
     notes: list[str] = []
     if not same_data:
@@ -346,6 +524,10 @@ def compare_versions(
         notes.append("两次运行的模型指纹相同；结论应一致，差异更可能来自求解时间或随机性。")
     if not left_artifact or not right_artifact:
         notes.append("至少一侧缺少完整模型产物，参数与约束差异只能部分核对。")
+    if cost_decision["certainty"] == "inconclusive":
+        notes.append(cost_decision["reason"])
+    elif cost_decision["certainty"] == "unverified":
+        notes.append(cost_decision["reason"])
 
     total_left = _money(left_summary.get("totalCost"))
     total_right = _money(right_summary.get("totalCost"))
@@ -438,6 +620,7 @@ def compare_versions(
             "status": _status(left),
             "verified": left_summary.get("verified"),
             "modelFingerprint": left.modelFingerprint,
+            "convergence": left_conv,
         },
         "right": {
             "id": right.id,
@@ -450,6 +633,7 @@ def compare_versions(
             "status": _status(right),
             "verified": right_summary.get("verified"),
             "modelFingerprint": right.modelFingerprint,
+            "convergence": right_conv,
         },
         "comparability": {
             "sameDataSnapshot": same_data,
@@ -458,6 +642,11 @@ def compare_versions(
             "sameModelFingerprint": same_model,
             "costComparable": cost_comparable,
             "savingsClaimAllowed": savings_allowed,
+            # 差值本身可不可信，和"两侧数据是否可比"是两件事：
+            # 数据一致但都没算到最优，照样不能下结论。
+            "costCertainty": cost_decision["certainty"],
+            "costConclusion": cost_decision["reason"],
+            "costRange": {"left": left_range, "right": right_range},
             "notes": notes,
         },
         "metrics": metrics,
@@ -468,13 +657,8 @@ def compare_versions(
             "startMetric": window_metric,
         },
         "quickVerdict": {
-            "cheaper": (
-                None
-                if not cost_comparable or total_left is None or total_right is None
-                else "tie"
-                if total_left == total_right
-                else "right" if total_right < total_left else "left"
-            ),
+            "cheaper": cost_decision["cheaper"],
+            "cheaperCertainty": cost_decision["certainty"],
             "moreTasks": (
                 "tie" if tasks_left == tasks_right else "right" if tasks_right > tasks_left else "left"
             ),
@@ -513,6 +697,7 @@ def compare_versions(
                 "parameters": left_solver.get("求解器参数"),
                 "stopReason": left_solver.get("终止原因"),
                 "verified": left_summary.get("verified"),
+                "convergence": left_conv,
             },
             "right": {
                 "status": _status(right),
@@ -520,7 +705,9 @@ def compare_versions(
                 "parameters": right_solver.get("求解器参数"),
                 "stopReason": right_solver.get("终止原因"),
                 "verified": right_summary.get("verified"),
+                "convergence": right_conv,
             },
+            "costDecision": cost_decision,
         },
         "baselines": {
             "left": left_summary.get("baselineSavings"),
@@ -597,13 +784,81 @@ def render_compare_summary(payload: dict[str, Any]) -> str:
 
     comparability = _dict(layer1.get("comparability"))
     task_set = _dict(layer2.get("taskSet"))
+    certainty = str(comparability.get("costCertainty") or "")
+
+    def title(side: dict[str, Any]) -> str:
+        label = str(side.get("label") or "未命名方案")
+        mode = str(side.get("objectiveMode") or "").strip()
+        return f"{label}（{mode}）" if mode else label
+
+    def convergence_text(side: dict[str, Any]) -> str:
+        conv = _dict(side.get("convergence"))
+        planned = conv.get("stagesPlanned") or 0
+        if not planned:
+            return "未记录收敛状态"
+        executed = conv.get("stagesExecuted") or 0
+        parts = [f"{executed}/{planned} 阶段"]
+        tolerant = _list(conv.get("stagesWithinTolerance"))
+        unproven = _list(conv.get("stagesUnproven"))
+        if tolerant:
+            parts.append(f"{len(tolerant)} 段容差内")
+        if unproven:
+            names = "、".join(str(item) for item in unproven[:2])
+            more = "等" if len(unproven) > 2 else ""
+            parts.append(f"{len(unproven)} 段未证明最优（{names}{more}）")
+        gap = conv.get("costGap")
+        metric = str(conv.get("costGapMetric") or "目标")
+        if isinstance(gap, (int, float)):
+            parts.append(f"{metric}相对差距 {gap:.2%}" if gap else f"{metric}已证明最优")
+        elapsed = conv.get("elapsedSeconds")
+        budget = conv.get("budgetSeconds")
+        if isinstance(elapsed, (int, float)):
+            if isinstance(budget, (int, float)) and budget:
+                parts.append(f"用时 {elapsed:.1f}/{budget:.0f} 秒")
+            else:
+                parts.append(f"用时 {elapsed:.1f} 秒")
+        return "，".join(parts)
+
+    if certainty == "inconclusive":
+        cost_note = "；差值落在两侧求解容差内，不能据此判定谁更省"
+    elif certainty == "unverified":
+        cost_note = "；缺收敛记录，差值未核实"
+    elif certainty == "incomparable":
+        cost_note = "；两次数据或任务集合不同，不可直接比"
+    else:
+        cost_note = ""
+
+    if certainty == "inconclusive":
+        comparable_text = (
+            "两次数据快照与任务集合一致，但两侧都未证明最优："
+            "成本差值小于求解容差，不能据此宣称谁更省。"
+        )
+    elif certainty == "unverified":
+        comparable_text = "两次数据快照与任务集合一致，但缺少收敛记录，成本差值未经核实。"
+    elif certainty == "proven":
+        comparable_text = (
+            "两次数据快照与任务集合一致，两版各自算到了本目标的最优；"
+            "注意分层先锁定成本最小、加权优化的是加权和，两者成本数字可对照，但目标口径不同。"
+        )
+    elif comparability.get("savingsClaimAllowed"):
+        comparable_text = "两次数据快照与任务集合一致，差值超出求解容差，成本可直接比较。"
+    else:
+        comparable_text = "存在数据快照、任务集合或模型产物差异，不能直接宣称节省。"
+
     lines = [
-        f"**{left.get('label')} 与 {right.get('label')} 的事实对比**",
+        f"**{title(left)}与{title(right)}的事实对比**",
         "",
+    ]
+    if left.get("objectiveMode") or right.get("objectiveMode"):
+        lines.append(
+            f"- 目标模式：{left.get('objectiveMode') or '未记录'} → "
+            f"{right.get('objectiveMode') or '未记录'}"
+        )
+    lines.extend([
         f"- 窗口：{value('window', 'left')} → {value('window', 'right')}",
         (
             f"- 总成本：{value('totalCost', 'left', '万元')} → "
-            f"{value('totalCost', 'right', '万元')}（{delta('totalCost', '万元')}）"
+            f"{value('totalCost', 'right', '万元')}（{delta('totalCost', '万元')}{cost_note}）"
         ),
         (
             f"- 完成任务：{value('scheduledTasks', 'left')} → "
@@ -617,21 +872,15 @@ def render_compare_summary(payload: dict[str, Any]) -> str:
             f"- 求解状态：{value('solverStatus', 'left')} → "
             f"{value('solverStatus', 'right')}"
         ),
+        f"- 收敛：左侧 {convergence_text(left)}；右侧 {convergence_text(right)}",
         (
             f"- 任务集合：仅左侧 {task_set.get('onlyLeftCount', 0)} 项，"
             f"仅右侧 {task_set.get('onlyRightCount', 0)} 项，"
             f"共同 {task_set.get('bothCount', 0)} 项，改期 {task_set.get('movedCount', 0)} 项"
         ),
         "",
-        (
-            "可比性："
-            + (
-                "两次数据快照与任务集合一致，成本可直接比较。"
-                if comparability.get("savingsClaimAllowed")
-                else "存在数据快照、任务集合或模型产物差异，不能直接宣称节省。"
-            )
-        ),
-    ]
+        "可比性：" + comparable_text,
+    ])
     notes = _list(comparability.get("notes"))
     if notes:
         lines.append("限制：" + "；".join(str(item) for item in notes[:3]))

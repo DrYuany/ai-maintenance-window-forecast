@@ -13,6 +13,23 @@ JobStatus = Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
 SolverStatus = Literal["OPTIMAL", "FEASIBLE", "UNKNOWN", "INFEASIBLE"]
 
 
+# 求解器会在预算处自己收工，之后还有独立复核。给一小段宽限，避免"刚好卡在
+# 预算上"和弹出询问撞在一起；只有超预算仍在跑才真的需要问用户要不要继续等。
+DECISION_GRACE_SECONDS = 30
+
+
+def _effective_budget(request: dict[str, Any] | None) -> int:
+    """本次真实时限：budgetSeconds 优先，老任务退回 seconds，最后才兜底。
+
+    必须和 _with_elapsed 用同一个口径，否则"进度说 180 秒、170 秒就弹询问"。
+    """
+    request = request or {}
+    try:
+        return max(1, int(request.get("budgetSeconds") or request.get("seconds") or 60))
+    except (TypeError, ValueError):
+        return 60
+
+
 class SolveJob(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -60,6 +77,9 @@ class SolveJobRepository:
             modelFingerprint=model_fingerprint,
             snapshot=snapshot,
             request=request_payload,
+            # 询问阈值跟着本次预算走，别再钉死在 180：预算给到 180 秒时，
+            # 正好撞上旧阈值会让用户在求解器即将收工时被无故打断。
+            nextDecisionAt=_effective_budget(request_payload) + DECISION_GRACE_SECONDS,
         )
         self._save(job)
         return job
@@ -237,8 +257,9 @@ class SolveJobRepository:
         if job.status != "RUNNING":
             return job
         elapsed = self._elapsed(job, now)
-        max_seconds = int((job.request or {}).get("seconds") or 300)
-        max_seconds = max(1, max_seconds)
+        # budgetSeconds 是 prepare 时按参数总表算好的真实时限；老任务没有这个
+        # 字段才退回 seconds，最后才用 60 兜底（曾经写 300，和实际跑的 30 对不上）。
+        max_seconds = _effective_budget(job.request)
         ratio = min(1.0, elapsed / max_seconds)
         progress = min(80, 35 + int(45 * ratio))
         if elapsed <= max_seconds:
@@ -248,7 +269,12 @@ class SolveJobRepository:
         return job.model_copy(
             update={
                 "elapsedSeconds": elapsed,
-                "needsUserDecision": elapsed >= job.nextDecisionAt and not job.backgrounded,
+                # 预算之内绝不打扰；只有真的超时且仍没算完才请用户决定。
+                "needsUserDecision": (
+                    elapsed > max_seconds
+                    and elapsed >= job.nextDecisionAt
+                    and not job.backgrounded
+                ),
                 "progressPercent": progress,
                 "statusMessage": message,
             }

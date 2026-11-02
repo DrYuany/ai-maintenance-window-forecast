@@ -15,6 +15,7 @@ from fractions import Fraction
 from pathlib import Path
 from ortools.sat.python import cp_model
 from model_artifact import build_model_artifact, export_model_file, write_model_artifact
+from solve_budget import resolve as resolve_budget
 
 MONEY = 1000000  # micro-yuan; all costs are reported in yuan
 STRATEGIES = ('成本最低优先','高风险优先抢修','最短完成优先','检修最多器件优先')
@@ -23,8 +24,10 @@ STRATEGIES = ('成本最低优先','高风险优先抢修','最短完成优先',
 #   业务阶段 = 目标模板 references/四种目标模板.json 声明的顺序（按指标去重后），
 #              当前四套模板分别 4/8/4/6 段，加 partial 前置最多 8 段；
 #   决胜阶段 = 每 60 个选择变量一段，随任务数×候选数×作业线数增长，可以几十段。
-# 控制手段不是"限条数"而是"限总时限"：所有阶段共用同一个 seconds，
-# 前一段花超了，后一段会以 TIME_LIMIT 收工并如实记录，不会假装最优。
+# 控制手段不是"限条数"而是"限总时限"：所有阶段共用同一个预算（见 solve_budget），
+# 但按剩余段数均分——前一段花超了，后一段仍有一份自己的时间；全部分完还不够，
+# 就以 TIME_LIMIT 收工并如实记录，不会假装最优。
+# 成本阶段额外允许参数总表里的相对差距（默认 1%），整数阶段仍要求证明最优。
 
 
 def _worker_count():
@@ -388,14 +391,12 @@ def build_model(data, options, partial=False, strategy='成本最低优先', mod
     return m,choices,stages,cost
 
 
-def solve(data, options, output, seconds=60, strategy='成本最低优先', mode='分层', weights=None, limits=None, partial=False, hint=None, on_solver=None, cancelled=None, model_fingerprint=None, extra_constraints=None, custom_stages=None):
-    # 演示可临时压时限：方案通常 1~3 秒就有，剩余时间都在给次要目标打磨。
-    cap = os.environ.get('MWA_SOLVE_SECONDS', '').strip()
-    if cap:
-        try:
-            seconds = min(seconds, max(5, int(cap)))
-        except ValueError:
-            pass
+def solve(data, options, output, seconds=None, strategy='成本最低优先', mode='分层', weights=None, limits=None, partial=False, hint=None, on_solver=None, cancelled=None, model_fingerprint=None, extra_constraints=None, custom_stages=None, gap_limit=None):
+    # 时限与容差只有一个来源，见 solve_budget：参数总表 → 调用方显式 → 环境上限。
+    # 以前这里还藏着一次 min(seconds, MWA_SOLVE_SECONDS)，公告却按 300 秒说，
+    # 于是在界面上同时存在 300 / 60 / 30 三个数。
+    budget = resolve_budget(data.params, requested_seconds=seconds, requested_gap=gap_limit)
+    seconds = budget['seconds']; gap_limit = budget['gapLimit']
     model,choices,stages,cost=build_model(data,options,partial,strategy,mode,weights,limits,extra_constraints,custom_stages)
     if hint:
         keys={(c['任务编号'],c['开始'],c['作业线']) for c in hint}
@@ -412,7 +413,9 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
     else:
         prototype_bytes = str(prototype).encode('utf-8')
     artifact_fingerprint = model_fingerprint or hashlib.sha256(prototype_bytes).hexdigest()
-    solver_parameters = {'num_search_workers':WORKERS,'random_seed':17,'max_time_in_seconds':seconds}
+    solver_parameters = {'num_search_workers':WORKERS,'random_seed':17,
+                         'max_time_in_seconds':seconds,'relative_gap_limit':gap_limit,
+                         'gap_scope':'仅成本阶段，其余阶段要求证明最优'}
     artifact = build_model_artifact(
         data=data,
         options=options,
@@ -461,7 +464,9 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
     for level in ('高','中','低'):
         stage_upper[level+'严重完成数']=sum(t['严重等级']==level for t in data.tasks)
     plan=[];done_metrics=set();skipped=0;business_logs=[]
-    for name,sense,expression in stages:
+    executed=0;degraded=[];tolerant=[];max_gap=0.0
+    total_stages=len(stages)
+    for index,(name,sense,expression) in enumerate(stages):
         if cancelled and cancelled():
             termination_reason='USER_CANCELLED';break
         skip=None
@@ -472,33 +477,58 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
         if skip:
             skipped+=1;plan.append({'目标':name,'结果':'跳过','原因':skip});continue
         done_metrics.add(name)
-        plan.append({'目标':name,'结果':'执行'})
         remaining=seconds-(time.monotonic()-started)
         if remaining<=0:
+            plan.append({'目标':name,'结果':'未执行','原因':'总时限已用完'})
             termination_reason='TIME_LIMIT';break
-        solver.parameters.max_time_in_seconds=remaining
+        # 剩余预算按"还没跑的段数"均分，第一段不许把后面几段的钱一次花光。
+        # 以前每段都拿 remaining，第一段一超时，后面 3 段全部连跑都没跑——
+        # 界面上写着"分层求解"，实际只优化了成本一项。
+        stages_left=max(1,total_stages-index-skipped)
+        stage_limit=max(0.5,min(remaining,remaining/stages_left))
+        if executed==0:
+            # 第一段是主目标（成本），给它一个下限：总预算的 40% 或均分值，
+            # 取大的。主目标没证明最优，后面几段优化得再好也撑不起结论。
+            stage_limit=max(stage_limit,min(remaining,max(0.5,seconds*0.4)))
+        plan.append({'目标':name,'结果':'执行','分配秒':round(stage_limit,2)})
+        solver.parameters.max_time_in_seconds=stage_limit
+        # 容差只给成本阶段：钱是连续量，1% 以内的差距落在建模误差里；
+        # 完成数是整数，必须证明最优才能锁成下一段的等式，否则"分层"名不副实。
+        solver.parameters.relative_gap_limit=gap_limit if name=='总经济成本' else 0.0
         if sense=='maximize': model.Maximize(expression)
         else: model.Minimize(expression)
         stage_model_name = ('diagnostic' if partial else 'solver') + f'_model_stage_{len(logs)+1}.pbtxt'
         export_model_file(model, output/stage_model_name)
         status=solver.Solve(model);last_status=status
         log={'目标':name,'方向':sense,'状态':solver.StatusName(status),'耗时秒':solver.WallTime(),
-             '模型文件':stage_model_name}
+             '分配秒':round(stage_limit,2),'模型文件':stage_model_name}
         logs.append(log);business_logs.append(log)
         if status not in (cp_model.OPTIMAL,cp_model.FEASIBLE):
             if status==cp_model.UNKNOWN: termination_reason='TIME_LIMIT'
             break
+        executed+=1
         selected=[c for c,x in choices if solver.Value(x)]
         last_cost=solver.Value(cost)/MONEY
         val=solver.ObjectiveValue();bound=solver.BestObjectiveBound()
+        # 状态已是 OPTIMAL 时差距按定义为 0；不去用浮点界反推，
+        # 否则会出现"已证明最优、相对差距 0.94%"这种自相矛盾的行。
+        stage_gap=0.0 if status==cp_model.OPTIMAL else abs(val-bound)/max(1,abs(val))
+        max_gap=max(max_gap,stage_gap)
+        # 容差内停止 = 成本阶段差距不超过参数总表写的 1%，可以当作"够好了"往下走；
+        # 其余情况（含其他阶段的 FEASIBLE）都记为未证明，最终结论一并如实交代。
+        tolerated = status!=cp_model.OPTIMAL and name=='总经济成本' and stage_gap<=gap_limit+1e-9
+        quality = '已证明最优' if status==cp_model.OPTIMAL else ('容差内最优' if tolerated else '未证明最优')
         log.update({'目标值':val/MONEY if name=='总经济成本' else val,'界':bound/MONEY if name=='总经济成本' else bound,
-                    '相对差距':abs(val-bound)/max(1,abs(val))})
-        if status!=cp_model.OPTIMAL:
-            termination_reason='TIME_LIMIT';break
+                    '相对差距':round(stage_gap,6),'最优性':quality})
+        if tolerated: tolerant.append(name)
+        elif status!=cp_model.OPTIMAL: degraded.append(name)
         model.Add(expression==round(val))
         _rehint()
     planned=len(stages)-skipped
-    business_complete=len(business_logs)==planned and all(r['状态']=='OPTIMAL' for r in business_logs)
+    # 分层"跑完"分两档：严格全部证明最优，和成本阶段在容差内收敛。
+    business_complete=(len(business_logs)==planned
+                       and all(r['状态']=='OPTIMAL' or r.get('最优性')=='容差内最优' for r in business_logs))
+    strictly_optimal=(len(business_logs)==planned and all(r['状态']=='OPTIMAL' for r in business_logs))
     if business_complete:
         ordered=sorted(choices,key=lambda item:(item[0]['任务编号'],item[0]['开始'],item[0]['作业线']))
         chunks=[ordered[index:index+60] for index in range(0,len(ordered),60)]
@@ -509,44 +539,77 @@ def solve(data, options, output, seconds=60, strategy='成本最低优先', mode
             if remaining<=0:
                 termination_reason='TIME_LIMIT';break
             expression=sum((1 << offset)*variable for offset,(_,variable) in enumerate(reversed(chunk)))
-            model.Minimize(expression);solver.parameters.max_time_in_seconds=remaining
+            model.Minimize(expression)
+            tie_limit=max(0.5,min(remaining,remaining/max(1,len(chunks)-index+1)))
+            solver.parameters.max_time_in_seconds=tie_limit
+            solver.parameters.relative_gap_limit=0.0
             status=solver.Solve(model);last_status=status
             stage_model_name = ('diagnostic' if partial else 'solver') + f'_model_tie_{index}.pbtxt'
             export_model_file(model, output/stage_model_name)
             log={'目标':f'确定性决胜{index}','方向':'minimize','状态':solver.StatusName(status),'耗时秒':solver.WallTime(),
-                 '模型文件':stage_model_name}
+                 '分配秒':round(tie_limit,2),'模型文件':stage_model_name}
             logs.append(log)
+            # 决胜段没证到最优 ≠ 整场时间用尽。决胜段是按"剩余段数均分"给时限的，
+            # 某一段跑满自己那 7 秒很常见，整场 180 秒才用 14 秒时说"时限用尽"
+            # 就是假的。所以只看整场还剩多少，不看这一段分到的小份。
+            overall_left=seconds-(time.monotonic()-started)
+            tie_exhausted=overall_left<=max(1.0,seconds*0.02)
             if status not in (cp_model.OPTIMAL,cp_model.FEASIBLE):
-                if status==cp_model.UNKNOWN: termination_reason='TIME_LIMIT'
+                if status==cp_model.UNKNOWN:
+                    termination_reason='TIME_LIMIT' if tie_exhausted else 'TIE_NOT_PROVEN'
                 break
             selected=[c for c,x in choices if solver.Value(x)]
             last_cost=solver.Value(cost)/MONEY
             value=round(solver.ObjectiveValue());bound=solver.BestObjectiveBound()
-            log.update({'目标值':value,'界':bound,'相对差距':abs(value-bound)/max(1,abs(value))})
+            log.update({'目标值':value,'界':bound,
+                        '相对差距':0.0 if status==cp_model.OPTIMAL else round(abs(value-bound)/max(1,abs(value)),6)})
             if status!=cp_model.OPTIMAL:
-                termination_reason='TIME_LIMIT';break
+                termination_reason='TIME_LIMIT' if tie_exhausted else 'TIE_NOT_PROVEN'
+                break
             model.Add(expression==value)
             _rehint()
         else:
             tie_complete=True
     if cancelled and cancelled(): termination_reason='USER_CANCELLED'
+    # 有阶段在分到的时限里没证明最优：不是整场超时，也不能叫 COMPLETED。
+    # 单独给一个原因，版本对比和模型问答读到它就知道该说"未证明"。
+    if termination_reason=='COMPLETED' and degraded:
+        termination_reason='STAGE_TIME_LIMIT'
     if selected is None:
         solve_status='INFEASIBLE' if last_status==cp_model.INFEASIBLE else 'UNKNOWN'
     else:
-        solve_status='OPTIMAL' if business_complete and tie_complete and termination_reason=='COMPLETED' else 'FEASIBLE'
+        solve_status='OPTIMAL' if strictly_optimal and tie_complete and termination_reason=='COMPLETED' else 'FEASIBLE'
+    # 最优性一说清楚，别让"解状态 FEASIBLE"背两种意思：
+    #   已证明最优 / 容差内最优（成本阶段差距 ≤ 参数总表允许值）/ 未证明最优
+    if solve_status=='OPTIMAL':
+        quality='已证明最优'
+    elif selected is not None and tolerant and not degraded and len(business_logs)==planned:
+        quality=f'容差内最优（成本相对差距 {max_gap:.1%}）'
+    else:
+        quality='未证明最优'
     return selected, {'求解器':'OR-Tools CP-SAT','模型形式':'有界整数线性目标及可线性化调度约束',
         '求解器参数':solver_parameters,
         '有解':selected is not None,'解状态':solve_status,'终止原因':termination_reason,
+        '最优性':quality,
+        # 预算与容差：公告、参数总表、版本对比都读这一份，不再各算各的。
+        '预算':{'seconds':seconds,'gapLimit':gap_limit,
+                'secondsSource':budget['secondsSource'],'gapSource':budget['gapSource'],
+                'tableSeconds':budget['tableSeconds'],'envCap':budget['envCap'],
+                'requestedSeconds':budget['requestedSeconds']},
+        '分层进度':f'{len(business_logs)}/{planned}' if planned else '0/0',
+        '计划阶段数':planned,'执行阶段数':len(business_logs),
+        '容差内阶段':tolerant,'未达最优阶段':degraded,'最大相对差距':round(max_gap,6),
         # 来源只描述"这份排程是谁给的"。selected 为空就是没解出来，
         # 不再用旧方案的来源字段去冒充。
         '方案来源':'CP_SAT' if selected is not None else None,
-        '分层全部最优':solve_status=='OPTIMAL','确定性决胜完成':tie_complete,
-        '阶段计划':plan,'计划阶段数':len(stages),'跳过阶段数':skipped,
+        '分层全部最优':strictly_optimal and tie_complete and termination_reason=='COMPLETED',
+        '确定性决胜完成':tie_complete,
+        '阶段计划':plan,'跳过阶段数':skipped,
         '阶段':logs,'总耗时秒':time.monotonic()-started,'模型成本':last_cost,'诊断模型':partial,
         '模型产物文件':artifact['artifactFile'],'模型产物指纹':artifact_fingerprint}
 
 
-def recommend(data, output, seconds=60, strategy='成本最低优先', mode='分层', weights=None, limits=None, on_solver=None, cancelled=None, model_fingerprint=None, extra_constraints=None, custom_stages=None, partial=False, dsl=None):
+def recommend(data, output, seconds=None, strategy='成本最低优先', mode='分层', weights=None, limits=None, on_solver=None, cancelled=None, model_fingerprint=None, extra_constraints=None, custom_stages=None, partial=False, dsl=None, gap_limit=None):
     if strategy not in STRATEGIES: raise ValueError('未知策略')
     output=Path(output);output.mkdir(parents=True,exist_ok=True)
     if (output/'结果.json').exists(): raise ValueError('输出目录已有结果，请使用新目录保留历史版本')
@@ -570,16 +633,26 @@ def recommend(data, output, seconds=60, strategy='成本最低优先', mode='分
     options={t['任务编号']:candidates(data,t) for t in data.tasks}
     baselines={name:heuristic(data,options,name) for name in ('严重性优先','低风速优先')}
     if not data.tasks:
+        budget=resolve_budget(getattr(data,'params',None),requested_seconds=seconds,requested_gap=gap_limit)
         chosen=[];info={'有解':True,'状态':'无待修告警','解状态':'OPTIMAL','终止原因':'COMPLETED','阶段':[],
+                        '最优性':'已证明最优',
+                        '预算':{'seconds':budget['seconds'],'gapLimit':budget['gapLimit'],
+                                'secondsSource':budget['secondsSource'],'gapSource':budget['gapSource'],
+                                'tableSeconds':budget['tableSeconds'],'envCap':budget['envCap'],
+                                'requestedSeconds':budget['requestedSeconds']},
+                        '分层进度':'0/0','计划阶段数':0,'执行阶段数':0,'容差内阶段':[],'未达最优阶段':[],
                         '诊断模型':False,'模型成本':0,'分层全部最优':True,'确定性决胜完成':True,
-                        '求解器参数':{'num_search_workers':WORKERS,'random_seed':17,'max_time_in_seconds':seconds}}
+                        '求解器参数':{'num_search_workers':WORKERS,'random_seed':17,
+                                      'max_time_in_seconds':budget['seconds'],
+                                      'relative_gap_limit':budget['gapLimit'],
+                                      'gap_scope':'仅成本阶段，其余阶段要求证明最优'}}
     else:
         best=max(baselines.values(),key=len)
         def _run(allow_partial):
             return solve(data,options,output,seconds,strategy,mode,weights,limits,
                          partial=allow_partial,hint=best,on_solver=on_solver,cancelled=cancelled,
                          model_fingerprint=model_fingerprint,extra_constraints=extra_constraints,
-                         custom_stages=custom_stages)
+                         custom_stages=custom_stages,gap_limit=gap_limit)
         if partial:
             # 调用方已判定"允许少修"（DSL 里出现 exclude 这类选择类约束）。
             # 完整模式把每个任务都强制排入，跟"排除某几个"直接矛盾，跑也白跑。

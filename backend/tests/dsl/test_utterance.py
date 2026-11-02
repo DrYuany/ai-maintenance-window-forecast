@@ -15,6 +15,7 @@ from dsl_core.utterance import (
     audit_utterance,
     extract_claims,
     format_audit,
+    format_metrics,
     world_from_project,
 )
 
@@ -216,7 +217,7 @@ def test_hours_not_changed_is_a_violation() -> None:
 
 
 def test_hours_changed_to_the_wrong_value_is_a_violation() -> None:
-    dsl = {"data": [{"kind": "part_hours", "part": "叶片", "factor": 1.1}]}
+    dsl = {"data": [{"kind": "part_hours", "part": "叶片", "severity": "高", "hours": 13.2}]}
 
     audit = audit_utterance("叶片严重故障得修15小时", dsl, _world())
 
@@ -272,13 +273,27 @@ def test_exclusion_covered_by_a_filter_passes() -> None:
     assert audit["明细"][0]["结论"] == PASS
 
 
-def test_hours_patch_with_the_right_factor_passes() -> None:
-    dsl = {"data": [{"kind": "part_hours", "part": "叶片", "factor": 1.25}]}
+def test_hours_patch_with_the_right_value_passes() -> None:
+    """定点定值：数值对上，且范围没超出用户点名的严重度，才判通过。"""
+    dsl = {"data": [{"kind": "part_hours", "part": "叶片", "severity": "高", "hours": 15}]}
 
     audit = audit_utterance("叶片严重故障得修15小时", dsl, _world())
 
     assert audit["明细"][0]["结论"] == PASS
     assert "15 小时" in audit["明细"][0]["证据"]
+
+
+def test_whole_part_factor_that_matches_the_number_is_still_out_of_scope() -> None:
+    """×1.25 恰好把高风险 12 凑成 15，数值对上了，但中/低风险也被乘了。
+
+    「定点修改」要防的正是这种：数值核对抓不到，得单独判范围有没有越界。
+    """
+    dsl = {"data": [{"kind": "part_hours", "part": "叶片", "factor": 1.25}]}
+
+    audit = audit_utterance("叶片严重故障得修15小时", dsl, _world())
+
+    assert audit["违例"]
+    assert "超出" in audit["明细"][0]["证据"]
 
 
 def test_deadline_with_the_same_day_passes() -> None:
@@ -420,3 +435,94 @@ def test_executor_refuses_before_solving_when_the_utterance_disagrees() -> None:
     message = str(caught.value)
     assert "原话核对未通过" in message
     assert "没有把数量压到 8 个" in message
+
+
+# ───────────── 复盘指标：断言覆盖率 / 对账召回（A2） ─────────────
+# 两个数只披露、不参与判定。加它们的目的：单看「对上 / 检查项」会把
+# 「抽得少」伪装成「判得准」（Precision 虚高），得有分母把它戳破。
+
+
+def test_metrics_are_exposed_with_recomputable_numerator_and_denominator() -> None:
+    dsl = {"constraints": [{"type": "cardinality", "filter": {}, "op": "<=", "value": 8}]}
+
+    audit = audit_utterance("只修前8个", dsl, _world())
+
+    assert audit["断言覆盖率"] == 1.0
+    assert audit["对账召回"] == 1.0
+    metrics = audit["评测口径"]
+    assert metrics["已覆盖片段"] == metrics["值得列出片段"] == 1
+    assert metrics["已判定断言"] == metrics["检查项"] == 1
+    assert metrics["未覆盖片段"] == 0
+    assert metrics["未核对断言"] == 0
+
+
+def test_coverage_drops_when_a_worthwhile_fragment_has_no_claim() -> None:
+    """「其余你看着办」值得列出，但抽不出断言 —— 覆盖率必须掉下来。"""
+    audit = audit_utterance("只修前8个，其余你看着办", {}, _world())
+
+    metrics = audit["评测口径"]
+    assert metrics["值得列出片段"] == 2
+    assert metrics["未覆盖片段"] == 1
+    assert audit["断言覆盖率"] == 0.5
+    assert "其余你看着办" in audit["未核对片段"]
+
+
+def test_recall_drops_when_a_claim_cannot_be_judged() -> None:
+    """任务不在册 → 判不了 → 未核对。对账召回要如实低于 1。"""
+    audit = audit_utterance(
+        "任务099不要排", {"constraints": [{"type": "exclude", "task": "任务099"}]}, _world()
+    )
+
+    assert audit["明细"][0]["结论"] == UNVERIFIED
+    assert audit["评测口径"]["已判定断言"] == 0
+    assert audit["对账召回"] == 0.0
+    assert audit["通过"] is False
+
+
+def test_metrics_are_none_when_nothing_is_worth_listing() -> None:
+    """纯参数变更没有能判的片段：分母 0 不许报成 100%，闸门口径也不能变。"""
+    audit = audit_utterance(
+        "船租改成5万", {"parameters": [{"field": "船舶日租金", "op": "=", "value": 50000}]}, _world()
+    )
+
+    assert audit["评测口径"]["值得列出片段"] == 0
+    assert audit["断言覆盖率"] is None
+    assert audit["对账召回"] is None
+    assert audit["通过"] is False, "披露数字不能把『根本没核』变成通过"
+
+
+def test_metrics_are_none_when_world_cannot_be_read() -> None:
+    audit = audit_utterance("只修前8个", {}, None)
+
+    assert audit["断言覆盖率"] is None
+    assert audit["对账召回"] is None
+    assert "读不到" in audit["评测口径"]["说明"]
+
+
+def test_metrics_do_not_change_the_gate_verdict() -> None:
+    """回归护栏：加了两个数字，『通过』仍由违例/未核对决定，不受覆盖率影响。"""
+    dsl = {"constraints": [{"type": "exclude", "task": f"任务{i:03d}"} for i in range(9, 14)]}
+
+    audit = audit_utterance("只修前8个", dsl, _world())
+
+    assert audit["断言覆盖率"] == 1.0
+    assert audit["对账召回"] == 1.0
+    assert audit["通过"] is True
+    assert audit["违例"] == [] and audit["未核对"] == []
+
+
+def test_format_metrics_reports_fractions_not_just_percentages() -> None:
+    text = format_metrics(audit_utterance("只修前8个", {}, _world()))
+
+    assert "复盘口径" in text
+    assert "1/1" in text
+    assert "100%" in text
+
+
+def test_format_metrics_never_claims_full_score_on_empty_denominator() -> None:
+    text = format_metrics(audit_utterance("船租改成5万", {}, _world()))
+
+    assert "没有能判的片段" in text
+    assert "一条断言都没抽到" in text
+    assert "100%" not in text
+    assert "不算通过" in text

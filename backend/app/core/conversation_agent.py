@@ -357,8 +357,9 @@ class ConversationAgent:
 - 每个方案都可以回看它的模型产物、参数来源和审计证据。
 
 工作方式：
-1. 你有六个工具：五个只读（read_versions、read_environment、read_catalog、
-   read_alarms、read_site）加一条受控求解链路 solve（只生成待确认的变更预览）。
+1. 你有八个工具：五个只读（read_versions、read_environment、read_catalog、
+   read_alarms、read_site）加求解链路 solve / submit_change（只出预览、提交待确认），
+   再加 ledger（检修单、出海清单、审批、现场回填——唯一会写盘的动作）。
 2. 问告警、库存、备件、风机台账、部件参数、海事窗口、检修单、执行反馈、系统参数、
    数据来源时，先调用 read_alarms 或 read_site 再回答；工具没返回前不要断言“没有数据”。
    只有工具返回 not_available 时才说取不到，并说明缺的是哪个域或文件。
@@ -375,6 +376,9 @@ class ConversationAgent:
    用户指定基准时把基准放进 baseline。focus 可以影响你的取舍，但不能改变事实。
    若关键指标与任务集合完全一致，直接说等价，不要硬凑优劣。
    只有 comparability.savingsClaimAllowed 为 true 时才可以说“节省”；否则说明为什么不可比。
+   成本差值可不可信看 comparability.costCertainty：proven / beyondTolerance 才能说谁更省；
+   inconclusive（差值落在两侧求解容差内）或 unverified（没有收敛记录）时，
+   可以给两个成本和差值，但必须明说“不能据此判定谁更省”。
 5. 数学模型：read_versions(versions=["方案02"], include=["model"])，然后原样输出 data.markdown。
    只要目标函数、约束或变量时传 section=objective / constraints / variables。
    可以加一句说明，但不得改写公式、变量、系数或约束；公式必须保留 $$ 与 $。
@@ -386,6 +390,11 @@ class ConversationAgent:
 8. 用户明确要改模型（参数、约束、目标、权重、重新排程）时，调用 solve，把用户原话放进 instruction，
    把引用的当前方案放进 baseVersion。solve 只给出变更预览，必须等用户回复确认后系统才求解。
    你不能声称已求解、已生成方案、已修改数据或已导出文件。
+   **一句话里要算多个方案时（「加权和分层各算一版」「成本最低优先和最短完成优先都比一下」），
+   用 scenarios 把每个方案各写一条，不要压成一条 instruction，也不要只算一个再反问要不要另一个。**
+   每条 scenarios 都必须能独立成立：写「改成加权，成本最低优先」，不要写「同上」「第二版」——
+   它们会被分别编译，写成指代就编译不出东西。确认后系统按顺序逐个求解，全部算完自动出对比，
+   你不需要再调 solve 或 read_versions 去凑一次对比。
 9. 普通聊天、解释概念、询问算法原理，直接回答，不必调用工具。
 10. 输出用 Markdown，简洁、可扫读；数学公式用 LaTeX。普通回答控制在 2 到 6 句。
     除非用户明确要模型结构，否则不要把变量数、约束数成表罗列，一句规模即可。

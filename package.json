@@ -1,7 +1,10 @@
 {
-      "name": "AI窗口期预测产品",
+      "name": "yixiu-maintenance-agent",
       "version": "0.1.0",
       "private": true,
+      "engines": {
+            "node": ">=20"
+      },
       "dependencies": {
             "@radix-ui/react-accordion": "^1.2.3",
             "@radix-ui/react-alert-dialog": "^1.1.6",

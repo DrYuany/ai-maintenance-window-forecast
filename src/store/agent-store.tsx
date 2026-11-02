@@ -7,8 +7,10 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { apiClient } from "@/lib/api-client";
+import { apiClient, isQuotaError } from "@/lib/api-client";
+import { setStoredApiKey } from "@/lib/llm-key";
 import type {
+  AgentResponse,
   CandidateWindow,
   Conversation,
   ConversationDetail,
@@ -16,6 +18,7 @@ import type {
   Message,
   PendingModelChange,
   PageId,
+  QuotaInfo,
   SortMode,
   WorkingMemory,
   DecisionArtifact,
@@ -53,6 +56,17 @@ interface AgentStoreValue {
    * 不写进消息正文：正文是产品产出，这条是系统状态，混在一起会被摘抄走。
    */
   degraded: (DegradedPayload & { messageId: string }) | null;
+  /** 免费体验额度；null = 还没读到（不显示提示） */
+  quota: QuotaInfo | null;
+  /**
+   * 额度用完时被拦下的那条话。留着是为了让用户在弹窗里填完密钥后
+   * 能原地重发——否则他得自己把刚打的字再敲一遍。
+   */
+  quotaBlocked: { message: string } | null;
+  saveApiKey: (key: string) => Promise<void>;
+  clearApiKey: () => Promise<void>;
+  refreshQuota: () => Promise<void>;
+  dismissQuota: () => void;
   createConversation: () => Promise<void>;
   selectConversation: (conversationId: string) => Promise<void>;
   sendMessage: (
@@ -127,6 +141,8 @@ export function AgentStoreProvider({
   const [stages, setStages] = useState<StageEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [degraded, setDegraded] = useState<(DegradedPayload & { messageId: string }) | null>(null);
+  const [quota, setQuota] = useState<QuotaInfo | null>(null);
+  const [quotaBlocked, setQuotaBlocked] = useState<{ message: string } | null>(null);
   const [engine, setEngine] = useState<"llm" | "rule">("llm");
   const [decisionArtifact, setDecisionArtifact] = useState<DecisionArtifact | null>(offline ? offlineDemo.decisionArtifact : null);
   const [solveEvidence, setSolveEvidence] = useState<SolveEvidence | null>(offline ? offlineDemo.solveEvidence : null);
@@ -153,6 +169,15 @@ export function AgentStoreProvider({
     setConversations(next);
     return next;
   }, []);
+
+  const refreshQuota = useCallback(async () => {
+    if (offline) return;
+    try {
+      setQuota(await apiClient.getQuota());
+    } catch {
+      // 额度只是页面提示，读不到不影响对话本身
+    }
+  }, [offline]);
 
   const syncDashboard = useCallback(
     async (conversationId: string, nextSortMode: SortMode) => {
@@ -297,6 +322,7 @@ export function AgentStoreProvider({
           });
         }
         setCurrentView(response.recommendedView);
+        void refreshQuota();
         await refreshConversationList();
         await hydrateConversation(currentConversationId, dashboard.sortMode);
       };
@@ -344,6 +370,19 @@ export function AgentStoreProvider({
         );
         await applyResponse(response);
       } catch (nextError) {
+        if (isQuotaError(nextError)) {
+          // 额度用完不是"失败"：把这轮打出去的消息收回来，等用户填完密钥原地重发。
+          setMessages((previous) =>
+            previous.filter(
+              (item) =>
+                item.id !== optimisticMessage.id
+                && item.id !== assistantPlaceholder.id,
+            ),
+          );
+          setQuotaBlocked({ message });
+          void refreshQuota();
+          return;
+        }
         if (!streamed) {
           try {
             const response = await apiClient.sendMessage(
@@ -383,8 +422,33 @@ export function AgentStoreProvider({
         setStreamStatus(null);
       }
     },
-    [currentConversationId, dashboard.sortMode, hydrateConversation, offline, refreshConversationList, engine],
+    [currentConversationId, dashboard.sortMode, hydrateConversation, offline, refreshConversationList, refreshQuota, engine],
   );
+
+  const saveApiKey = useCallback(
+    async (key: string) => {
+      const next = key.trim();
+      if (!next) return;
+      // 先验证再保存：错密钥留在浏览器里，用户每轮都会看到"模型不可用"，
+      // 却不知道问题出在自己贴错了。
+      await apiClient.verifyApiKey(next);
+      setStoredApiKey(next);
+      setError(null);
+      const blocked = quotaBlocked;
+      setQuotaBlocked(null);
+      await refreshQuota();
+      // 填完密钥把刚才被拦下的那句话直接重发，不用用户再敲一遍。
+      if (blocked) await sendMessage(blocked.message);
+    },
+    [quotaBlocked, refreshQuota, sendMessage],
+  );
+
+  const clearApiKey = useCallback(async () => {
+    setStoredApiKey(null);
+    await refreshQuota();
+  }, [refreshQuota]);
+
+  const dismissQuota = useCallback(() => setQuotaBlocked(null), []);
 
   const controlActiveJob = useCallback(async (action: "wait" | "background" | "use_incumbent" | "stop") => {
     if (!activeJob) return;
@@ -551,6 +615,7 @@ export function AgentStoreProvider({
       }
       setLoading(true);
       setError(null);
+      void refreshQuota();
       try {
         const nextConversations = await refreshConversationList();
         if (cancelled) return;
@@ -585,7 +650,7 @@ export function AgentStoreProvider({
     return () => {
       cancelled = true;
     };
-  }, [hydrateConversation, offline, refreshConversationList]);
+  }, [hydrateConversation, offline, refreshConversationList, refreshQuota]);
 
   const pendingChange = useMemo<PendingModelChange | null>(() => {
     const filters = workingMemory?.activeFilters as Record<string, unknown> | undefined;
@@ -618,9 +683,15 @@ export function AgentStoreProvider({
       stages,
       degraded,
       engine,
+      quota,
+      quotaBlocked,
       createConversation,
       selectConversation,
       sendMessage,
+      saveApiKey,
+      clearApiKey,
+      refreshQuota,
+      dismissQuota,
       setView: setCurrentView,
       setEngine,
       setSortMode,
@@ -650,6 +721,12 @@ export function AgentStoreProvider({
       stages,
       degraded,
       engine,
+      quota,
+      quotaBlocked,
+      saveApiKey,
+      clearApiKey,
+      refreshQuota,
+      dismissQuota,
       loading,
       messages,
       refreshCurrentConversation,

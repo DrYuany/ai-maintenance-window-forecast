@@ -61,3 +61,13 @@ scripts/bin/
 # 语音链路「随声译」：独立产品，与排程主链路代码零耦合、主产品测试不覆盖它。
 # 留着会让外部读者把两个产品看成一个。本地目录不动，只是不再跟踪。
 voice-bridge/
+
+# 云端发布用的裁剪包，由 scripts/build_deploy.py 生成，随时可重建
+.deploy/
+
+# 本地临时产物（截图、配额测试库等）
+.tmp/
+.pytest_tmp/
+
+# WorkBuddy 本地应用卡产物（会话临时文件，不入库）
+.wbapp_*.genie

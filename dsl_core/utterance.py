@@ -316,7 +316,19 @@ def _hours_claim(segment: str, world: World) -> list[Claim]:
     if part_name is None and not refs:
         return []
     severity = next(
-        (value for word, value in (("严重", "高"), ("高危", "高"), ("中等", "中"), ("轻微", "低"))
+        (value for word, value in (
+            ("高风险", "高"), ("中风险", "中"), ("低风险", "低"),
+            ("严重", "高"), ("高危", "高"), ("中等", "中"), ("轻微", "低"),
+        )
+         if word in segment),
+        None,
+    )
+    # 海况口径：「恶劣海况下修 15 小时」定的是恶劣那一列，常态那列不动。
+    # 原话没提海况就留 None —— 判定时按常态口径核，并在证据里写明核的是哪一列。
+    sea = next(
+        (value for word, value in (
+            ("恶劣", "恶劣但安全"), ("常态", "常态"), ("正常海况", "常态"),
+        )
          if word in segment),
         None,
     )
@@ -326,7 +338,8 @@ def _hours_claim(segment: str, world: World) -> list[Claim]:
             kind="hours",
             segment=segment,
             expect=f"{label} 的维修工时改成 {hours:g} 小时",
-            payload={"hours": hours, "part": part_name, "tasks": refs, "severity": severity},
+            payload={"hours": hours, "part": part_name, "tasks": refs,
+                     "severity": severity, "sea": sea},
         )
     ]
 
@@ -349,17 +362,29 @@ def _order_claim(segment: str) -> list[Claim]:
     ]
 
 
-def _turbine_scope_claims(segment: str) -> list[Claim]:
+def _turbine_scope_claims(segment: str, world: World) -> list[Claim]:
     match = re.search(r"只\s*(?:修|动|排|安排|做|干)?\s*(?:(\d{1,3})\s*号风机|风机\s*(\d{1,3}))", segment)
     if not match:
         return []
     raw = match.group(1) or match.group(2)
+    turbine = f"风机{int(raw):03d}"
+    # 「只修 1 号风机的叶片」还限定了部件。以前只抽风机，于是 DSL 写
+    # only{turbine:风机001}（漏掉 part）也能判 PASS —— 用户说的"叶片"被吞了。
+    part_name = next(
+        (
+            str(row.get("部件名称"))
+            for row in world.parts.values()
+            if row.get("部件名称") and str(row["部件名称"]) in segment
+        ),
+        None,
+    )
+    want = f"{turbine} 上的{part_name}" if part_name else turbine
     return [
         Claim(
             kind="turbine_scope",
             segment=segment,
-            expect=f"只修 风机{int(raw):03d} 上的任务",
-            payload={"turbine": f"风机{int(raw):03d}"},
+            expect=f"只修 {want} 的任务",
+            payload={"turbine": turbine, "part": part_name},
         )
     ]
 
@@ -375,7 +400,7 @@ def extract_claims(utterance: str, world: World) -> list[Claim]:
         claims.extend(_date_claims(segment))
         claims.extend(_hours_claim(segment, world))
         claims.extend(_order_claim(segment))
-        claims.extend(_turbine_scope_claims(segment))
+        claims.extend(_turbine_scope_claims(segment, world))
     # 同一句里"排除"和"数量"可能都抽到，各自独立判定；去重避免同义重复
     seen: set[tuple[str, str]] = set()
     unique: list[Claim] = []
@@ -422,6 +447,15 @@ def _facts(dsl: dict[str, Any], world: World) -> _Facts:
                     str(row["任务编号"]) for row in world.tasks
                     if _matches(row, spec["filter"], world)
                 )
+        elif ctype == "only":
+            # 「只修 X」= 把 X 之外的全部排除。对账要算的就是这个补集，
+            # 所以并进 excluded —— "最多会排几个""会不会排到别的风机"都靠它。
+            filter_spec = spec.get("filter") or {}
+            keep = {
+                str(row["任务编号"]) for row in world.tasks
+                if _matches(row, filter_spec, world)
+            }
+            facts.excluded.update(str(t) for t in world.task_ids if t not in keep)
         elif ctype == "must":
             if spec.get("task"):
                 facts.musts.add(str(spec["task"]))
@@ -481,43 +515,72 @@ def _deadline_of(task_id: str, facts: _Facts, world: World) -> tuple[int, int] |
     return None
 
 
-def _base_hours(row: dict[str, Any], world: World) -> float | None:
+def _part_name_of(row: dict[str, Any] | None, world: World) -> str | None:
+    if row is None:
+        return None
+    part = world.parts.get(str(row.get("部件编号")))
+    return str(part.get("部件名称")) if part and part.get("部件名称") else None
+
+
+def _base_hours(row: dict[str, Any], world: World, sea: str = "常态") -> float | None:
     part = world.parts.get(str(row.get("部件编号")))
     if not part:
         return None
     level = {"高": "高", "中": "中", "低": "低"}.get(str(row.get("严重等级")))
     if level is None:
         return None
-    value = part.get(f"{level}严重度常态维修工时（小时）")
+    value = part.get(f"{level}严重度{sea}维修工时（小时）")
     try:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
 
 
-def _factor_for(row: dict[str, Any], facts: _Facts, world: World) -> tuple[float, bool]:
-    """该任务实际生效的工时倍数（多条按乘算，与编译器一致），以及有没有被改过。"""
+def _patch_part_hits(row: dict[str, Any], spec: dict[str, Any], world: World) -> bool:
+    """这条补丁是否作用于该任务所属部件（不看严重度/海况）。"""
     part = world.parts.get(str(row.get("部件编号"))) or {}
-    factor, touched = 1.0, False
+    ref = spec.get("part") or spec.get("partId")
+    return bool(ref) and str(ref) in (
+        str(row.get("部件编号")), str(part.get("部件名称")), str(part.get("部件编号")),
+    )
+
+
+def _patch_hits(row: dict[str, Any], spec: dict[str, Any], world: World, sea: str) -> bool:
+    """这条工时补丁作不作用于「该任务的这一列」。"""
+    if not _patch_part_hits(row, spec, world):
+        return False
+    if spec.get("severity") and str(spec["severity"]) != str(row.get("严重等级")):
+        return False
+    if spec.get("sea") and str(spec["sea"]) != sea:
+        return False
+    return True
+
+
+def _effective_hours(
+    row: dict[str, Any], facts: _Facts, world: World, sea: str = "常态",
+) -> float | None:
+    """该任务这一列**实际生效**的工时。
+
+    必须按 product_data._patched_business 的顺序逐条叠加：补丁是有先后的，
+    倍率乘在"当时的值"上，绝对值直接覆盖。只取最后一条会算错。
+    """
+    value = _base_hours(row, world, sea)
+    if value is None:
+        return None
     for spec in facts.hours_patches:
-        ref = spec.get("part") or spec.get("partId")
-        if not ref:
+        if not _patch_hits(row, spec, world, sea):
             continue
-        if str(ref) in (str(row.get("部件编号")), str(part.get("部件名称")), str(part.get("部件编号"))):
+        if "hours" in spec:
             try:
-                factor *= float(spec.get("factor") or 1.0)
+                value = float(spec["hours"])
             except (TypeError, ValueError):
                 continue
-            touched = True
-    return factor, touched
-
-
-def _effective_hours(row: dict[str, Any], facts: _Facts, world: World) -> float | None:
-    base = _base_hours(row, world)
-    if base is None:
-        return None
-    factor, _touched = _factor_for(row, facts, world)
-    return base * factor
+        elif "factor" in spec:
+            try:
+                value *= float(spec["factor"] or 1.0)
+            except (TypeError, ValueError):
+                continue
+    return value
 
 
 # ─────────────────────────── 判定 ───────────────────────────
@@ -630,26 +693,42 @@ def _judge(claim: Claim, facts: _Facts, world: World, partial: bool) -> tuple[st
 
     if claim.kind == "turbine_scope":
         turbine = str(claim.payload["turbine"])
+        part_name = claim.payload.get("part")
         members = world.by_turbine(turbine)
         if not members:
             return UNVERIFIED, f"{turbine} 名下没有在册任务"
+        # 复合限定「1 号风机的叶片」：成员再按部件收一次。
+        # 少这一步，DSL 只写 only{turbine} 也会被判通过，用户说的"叶片"就丢了。
+        if part_name:
+            members = {
+                task_id for task_id in members
+                if _part_name_of(world.row(task_id), world) == str(part_name)
+            }
+            if not members:
+                return UNVERIFIED, f"{turbine} 名下没有{part_name}的在册任务"
+        want = f"{turbine} 上的{part_name}" if part_name else turbine
         if not partial:
             return FAIL, (
                 f"完整模式会把在册 {len(world.task_ids)} 个任务全排上，"
-                f"不止 {turbine} 的 {len(members)} 个"
+                f"不止 {want} 的 {len(members)} 个"
             )
         schedulable = world.task_ids - facts.excluded
         others = sorted(schedulable - members)
         if not others:
-            return PASS, f"可排的只剩 {turbine} 的任务"
-        return FAIL, f"还会排 {len(others)} 个其他风机的任务（如 {'、'.join(others[:3])}）"
+            return PASS, f"可排的只剩 {want} 的任务"
+        return FAIL, (
+            f"还会排 {len(others)} 个不在{want}范围内的任务（如 {'、'.join(others[:3])}）"
+        )
 
     if claim.kind == "hours":
         hours = float(claim.payload["hours"])
         part = claim.payload.get("part")
         tasks = list(claim.payload.get("tasks") or [])
+        severity = claim.payload.get("severity")
+        claim_sea = claim.payload.get("sea")
+        # 数值核对按原话提到的海况走，没提就按常态口径核，并在证据里写明。
+        sea = claim_sea or "常态"
         if not tasks and part:
-            severity = claim.payload.get("severity")
             tasks = [
                 str(row["任务编号"]) for row in world.tasks
                 if str((world.parts.get(str(row.get("部件编号"))) or {}).get("部件名称")) == str(part)
@@ -657,16 +736,36 @@ def _judge(claim: Claim, facts: _Facts, world: World, partial: bool) -> tuple[st
             ]
         if not tasks:
             return UNVERIFIED, "原话没点名改哪个任务/部件，也没有匹配的在册任务"
+        # 「定点」不只看数值：用户点名了严重度/海况，补丁就不许顺带改没点名的格子。
+        # 真出过的事：说"叶片高风险修 15 小时"，DSL 写整件 ×1.25 —— 高风险那格
+        # 恰好 12×1.25=15，数值对上了，但中/低风险也被乘了，用户从没要求动它们。
+        # 数值核对抓不到这种越界，得单独判。
+        overreach: list[str] = []
+        for task_id in tasks:
+            row = world.row(task_id)
+            if row is None:
+                continue
+            for spec in facts.hours_patches:
+                if not _patch_part_hits(row, spec, world):
+                    continue
+                if severity and not spec.get("severity"):
+                    overreach.append("整件工时补丁没限定严重度，会连带改动中/低风险")
+                elif claim_sea and not spec.get("sea"):
+                    overreach.append("整件工时补丁没限定海况，会连带改动另一种海况")
+        if overreach:
+            return FAIL, "；".join(sorted(set(overreach))) + "，超出你说的定点范围"
         values: list[str] = []
         mismatch: list[str] = []
         for task_id in tasks:
             row = world.row(task_id)
             if row is None:
                 continue
-            actual = _effective_hours(row, facts, world)
+            actual = _effective_hours(row, facts, world, sea)
             if actual is None:
                 continue
-            values.append(f"{task_id} 现在 {actual:g} 小时")
+            # 证据里写清核的是哪一列：{严重度}×{海况}。只写"12 小时"用户没法复核。
+            level = str(row.get("严重等级"))
+            values.append(f"{task_id}（{level}严重度·{sea}）现在 {actual:g} 小时")
             if abs(actual - hours) > 0.01:
                 mismatch.append(task_id)
         if not values:
@@ -708,6 +807,18 @@ def audit_utterance(
             "明细": [],
             "未核对片段": [],
             "通过": False,
+            # 读不到在册清单就别凑数字：两个指标都留空，评测口径里写明原因。
+            "断言覆盖率": None,
+            "对账召回": None,
+            "评测口径": {
+                "值得列出片段": 0,
+                "已覆盖片段": 0,
+                "未覆盖片段": 0,
+                "检查项": 0,
+                "已判定断言": 0,
+                "未核对断言": 0,
+                "说明": "读不到在册任务清单，不计算覆盖率与召回",
+            },
             "结论": "读不到在册任务清单，这句话没法核对",
         }
     if partial is None:
@@ -723,14 +834,40 @@ def audit_utterance(
     violations = [item for item in checks if item["结论"] == FAIL]
     unverified = [item for item in checks if item["结论"] == UNVERIFIED]
     covered = {claim.segment for claim in claims}
-    leftovers = [
-        segment[:30]
+    # 「值得列出的片段」= 这句话里看起来带具体诉求的部分。它是复盘指标的分母：
+    # 抽成断言的算已覆盖，没抽到的原样列进「未核对片段」给用户看。
+    worthy = [
+        segment
         for segment in _segments(text)
-        if segment not in covered
-        and not _is_question(segment)
+        if not _is_question(segment)
         and _WORTH_LISTING.search(segment)
         and len(segment) >= 4
     ]
+    leftovers = [segment for segment in worthy if segment not in covered]
+    covered_worthy = len(worthy) - len(leftovers)
+    decided = len(checks) - len(unverified)  # 给出确定结论（PASS/FAIL）的断言
+    passed_count = sum(1 for item in checks if item["结论"] == PASS)
+
+    # 两个复盘指标，只披露、不参与判定（闸门口径不变），配成一对：
+    # 断言覆盖率 = 已覆盖片段 / 值得列出片段 —— 用户那些能判的话，抽成断言了吗。
+    #   低了就是「该抽没抽」。管的是入口漏（标准术语里的**召回**）。
+    # 对账召回 = 对上断言 / 检查项 —— 抽出来的诉求，DSL 真正落实了的比例。
+    #   管的是出口质量（标准术语里的**精确率**）。光看它会被「抽得少」抬高，
+    #   所以必须连覆盖率一起报：Shi et al. 承认的「EMKVP 低召回抬高 Precision」
+    #   是同一个坑，「没抽到不算通过」堵的也是它。
+    # 名字沿用项目里既有的叫法，按公式理解、别望文生义。
+    # 分母为 0 时留 None：没有能判的片段 / 一条都没抽到，都不该报成 100%。
+    assertion_coverage = covered_worthy / len(worthy) if worthy else None
+    reconcile_recall = passed_count / len(checks) if checks else None
+    metrics = {
+        "值得列出片段": len(worthy),
+        "已覆盖片段": covered_worthy,
+        "未覆盖片段": len(leftovers),
+        "检查项": len(checks),
+        "对上断言": passed_count,
+        "已判定断言": decided,
+        "未核对断言": len(unverified),
+    }
     if not checks:
         conclusion = "没有可核对的诉求"
     elif violations:
@@ -746,9 +883,12 @@ def audit_utterance(
         "违例": violations,
         "未核对": unverified,
         "明细": checks,
-        "未核对片段": leftovers[:3],
+        "未核对片段": [segment[:30] for segment in leftovers[:3]],
         # 一条断言都没抽到就不算通过：那不是"核过且没问题"，是"根本没核"。
         "通过": bool(checks) and not violations and not unverified,
+        "断言覆盖率": round(assertion_coverage, 3) if assertion_coverage is not None else None,
+        "对账召回": round(reconcile_recall, 3) if reconcile_recall is not None else None,
+        "评测口径": metrics,
         "结论": conclusion,
     }
 
@@ -801,3 +941,34 @@ def format_audit(audit: dict[str, Any]) -> str:
     if leftovers:
         lines.append("这些片段系统没有核对：" + "｜".join(f"「{item}」" for item in leftovers))
     return "\n".join(lines)
+
+
+def format_metrics(audit: dict[str, Any]) -> str:
+    """复盘/测评用的一行口径：两个比例连同分子分母一起报，便于别人复算。
+
+    只给评测脚本和复盘报告用，不塞进用户预览——预览保持 ``format_audit``
+    那份简洁。分母为 0 时明说"没有能判的片段 / 一条都没抽到"，不报 100%。
+    """
+    metrics = audit.get("评测口径") or {}
+    if not metrics:
+        return "复盘口径：本次没有产出评测口径"
+
+    worthwhile = int(metrics.get("值得列出片段") or 0)
+    covered = int(metrics.get("已覆盖片段") or 0)
+    total = int(metrics.get("检查项") or 0)
+    passed = int(metrics.get("对上断言") or 0)
+
+    def pct(value: Any) -> str:
+        return "—" if value is None else f"{float(value) * 100:.0f}%"
+
+    coverage_text = f"{covered}/{worthwhile}" if worthwhile else "无（这句话没有能判的片段）"
+    recall_text = f"{passed}/{total}" if total else "无（一条断言都没抽到）"
+    parts = [
+        f"该抽的抽到 {coverage_text}（断言覆盖率 {pct(audit.get('断言覆盖率'))}）",
+        f"抽到的落实了 {recall_text}（对账召回 {pct(audit.get('对账召回'))}）",
+    ]
+    if metrics.get("说明"):
+        parts.append(str(metrics["说明"]))
+    if total == 0:
+        parts.append("一条都没抽到，按闸门口径不算通过")
+    return "复盘口径：" + "，".join(parts)

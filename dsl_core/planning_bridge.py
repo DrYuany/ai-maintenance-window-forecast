@@ -73,7 +73,9 @@ def request_to_dsl(request: PlanningRequest) -> dict[str, Any]:
     if request.data_patches:
         dsl["data"] = [dict(patch) for patch in request.data_patches]
 
-    dsl["solver"] = {"seconds": request.seconds}
+    # 用户没点时限就不写：写一个具体数字等于替用户宣布一个他没说过的预算。
+    if request.seconds is not None:
+        dsl["solver"] = {"seconds": request.seconds}
     return dsl
 
 

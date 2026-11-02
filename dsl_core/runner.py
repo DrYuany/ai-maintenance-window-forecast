@@ -30,6 +30,17 @@ class DslError(RuntimeError):
         self.errors = errors
         self.diagnosis = diagnosis
 
+    @property
+    def gate_class(self) -> str:
+        """这次拦截落在哪道门（复盘/测评计数用）。
+
+        只读、不参与判定；归因口径见 ``gate_metrics.py``。延迟导入避免
+        runner 加载时就把统计模块拖进来。
+        """
+        from .gate_metrics import from_dsl_error
+
+        return from_dsl_error(self)
+
 
 def _solver_modules():
     if str(_SCRIPTS) not in sys.path:
@@ -44,7 +55,7 @@ def run(
     *,
     base_id: str = "基座01",
     as_of: str | None = None,
-    seconds: int = 60,
+    seconds: int | None = None,
     output: Path | None = None,
     strategy: str = "成本最低优先",
     mode: str = "分层",

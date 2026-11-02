@@ -101,6 +101,15 @@ def test_dsl_constraint_message_goes_preview_confirm_solve(temp_db_path, monkeyp
     saved = [v for v in versions if v.get("solveJobId") == job_id]
     assert saved and saved[0]["parameterSnapshot"]["dsl"]["constraints"][0]["type"] == "co_occur"
 
+    # 公告、任务预算、产物参数表必须是同一个数。
+    # 以前公告说 300 秒、参数总表说 60 秒、实际跑 30 秒，三处各写各的。
+    budget = job["request"]["budgetSeconds"]
+    assert budget and budget >= 5
+    assert f"{budget} 秒" in confirmed["assistantMessage"]["content"]
+    assert job["request"]["budget"]["seconds"] == budget
+    # 用户没点名时限，请求里就不该写死一个数（求解器与产物参数表按同一份预算走）。
+    assert captured["request"]["seconds"] is None
+
 
 def test_dsl_cancellation_clears_pending(temp_db_path, monkeypatch) -> None:
     captured: dict = {}

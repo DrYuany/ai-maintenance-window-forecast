@@ -113,4 +113,10 @@ def test_heuristic_fallback_is_never_returned_as_a_solution() -> None:
                 {"type": "must", "task": "任务001"},
             ],
         }, seconds=30, max_tasks=6)
-    assert any("没有在满足这些约束的前提下找到解" in e for e in exc.value.errors), exc.value.errors
+    # 失败诊断上线后，文案从"没有找到解"换成了带证据的"不可行；[已证明] …"。
+    # 这条用例真正要守的是"不许把兜底方案当解返回"，所以两种文案都收，
+    # 但要求必须明确说了不可行——不能退化回一句含糊的"请放宽约束"。
+    assert any(
+        ("不可行" in text) or ("没有在满足这些约束的前提下找到解" in text)
+        for text in exc.value.errors
+    ), exc.value.errors

@@ -27,6 +27,7 @@ from app.core.conversation_memory import (
     build_memory_snapshot,
 )
 from app.core.decision_contract import DecisionCompiler
+from app.core.demo_access import begin_llm_turn, end_llm_turn
 from app.core.maintenance_product_executor import MaintenanceProductExecutor, solver_status
 from app.core.model_change import (
     build_change_plan,
@@ -279,15 +280,22 @@ class AgentRuntime:
         selected_window_id: str | None = None,
         sink: StreamSink | None = None,
         engine: str = "rule",
+        llm_api_key: str | None = None,
     ) -> AgentResponse:
-        response = self._submit_message(
-            conversation_id,
-            content,
-            selected_version_id=selected_version_id,
-            selected_window_id=selected_window_id,
-            sink=sink,
-            engine=engine,
-        )
+        # 访客自带的密钥只在这一轮有效，退出时还原——线程会复用，
+        # 忘了还原就等于把上一位访客的密钥借给了下一位。
+        previous_key = begin_llm_turn(llm_api_key)
+        try:
+            response = self._submit_message(
+                conversation_id,
+                content,
+                selected_version_id=selected_version_id,
+                selected_window_id=selected_window_id,
+                sink=sink,
+                engine=engine,
+            )
+        finally:
+            end_llm_turn(previous_key)
         if sink:
             sink.finish(response.assistantMessage.content)
         return response
@@ -299,6 +307,7 @@ class AgentRuntime:
         selected_version_id: str | None = None,
         selected_window_id: str | None = None,
         engine: str = "rule",
+        llm_api_key: str | None = None,
     ):
         queue: Queue = Queue()
 
@@ -311,6 +320,7 @@ class AgentRuntime:
                     selected_window_id=selected_window_id,
                     sink=StreamSink(queue.put),
                     engine=engine,
+                    llm_api_key=llm_api_key,
                 )
                 queue.put({"event": "done", "data": response.model_dump()})
             except Exception as exc:  # pragma: no cover - transport boundary
@@ -430,13 +440,12 @@ class AgentRuntime:
 
         # ── Agent-first：语义判断交给模型 ────────────────────────────────
         # 读类/解释类/纠错类/改排程都由模型自己决定调哪个工具（read_* 或 solve）。
-        # 仍然确定性处理的只有：待确认/取消（上面）、求解命令（上面）、
-        # 版本切换与场景批量（状态与批量流程，下面）。
-        # agent 不可用（无 key / 调用失败）时回落到原来的确定性链路。
+        # 场景批量也交给模型：solve 支持 scenarios[]，一句里几个方案由它拆。
+        # 确定性批量分支（下面 is_scenario_batch 那段）只在模型不可用时兜底——
+        # 它的正则只认动词并列，认不出「加权和分层，都…」，不能当主路径。
         if (
             self.conversation_agent.enabled
             and not (is_version_switch_request(content) and selected_version)
-            and not is_scenario_batch(content)
         ):
             try:
                 reply = self._answer_with_conversation_agent(
@@ -1224,6 +1233,12 @@ class AgentRuntime:
                 [],
             )
         request_payload = request.to_payload()
+        budget = dict((data_snapshot or {}).get("budget") or {})
+        budget_seconds = int(budget.get("seconds") or 60)
+        budget_gap = budget.get("gapLimit")
+        budget_note = f"{budget_seconds} 秒（{budget.get('secondsSource') or '参数总表'}）"
+        if isinstance(budget_gap, (int, float)) and budget_gap > 0:
+            budget_note += f"，成本阶段容差 {budget_gap:.0%}"
         history = self.messages.list_by_conversation(conversation_id)
         artifact = DecisionCompiler().compile(
             {
@@ -1235,13 +1250,21 @@ class AgentRuntime:
                 "compiler_version": "deterministic-intent-v1",
                 "model_version": "registered-language",
                 "prompt_version": "none",
-                "solver_profile": {"name": "ortools-cp-sat", "random_seed": 17, "workers": 1, "max_seconds": request.seconds},
+                "solver_profile": {"name": "ortools-cp-sat", "random_seed": 17, "workers": 1, "max_seconds": budget_seconds},
             },
             {"intent": "maintenance_plan", "request": request_payload, "dsl": dsl or {}},
             {"skill": SKILL_NAME, "request": request_payload, "data_snapshot": data_snapshot, "dsl": dsl or {}},
         )
-        # job.request 保持 request 字段在顶层（兼容现有断言），DSL 附加在其上
-        job_payload = request_payload if dsl is None else {**request_payload, "kind": "dsl", "dsl": dsl}
+        # job.request 保持 request 字段在顶层（兼容现有断言），DSL 附加在其上。
+        # budgetSeconds 是本次真正会用的时限（已过参数总表与部署上限），
+        # 进度条和"已超时限"提示都读它，不再各自猜一个默认值。
+        job_payload = {
+            **request_payload,
+            "budgetSeconds": budget_seconds,
+            "budget": budget,
+        }
+        if dsl is not None:
+            job_payload.update({"kind": "dsl", "dsl": dsl})
         job = self.jobs.create(conversation_id, job_payload, artifact.model_fingerprint, snapshot=data_snapshot)
         filters = dict(memory.activeFilters)
         filters["planningRequest"] = request_payload
@@ -1273,8 +1296,8 @@ class AgentRuntime:
             (
                 f"已按“{request.strategy}”编译为固定模型契约，"
                 f"{'附带自定义约束/目标，' if dsl else ''}真实 CP-SAT 求解已启动。"
-                f"{batch_message}任务 {job.id}，最长求解 {request.seconds} 秒；"
-                "超过 3 分钟我会询问是否继续，不会把超时说成无解。"
+                f"{batch_message}任务 {job.id}，本次求解预算 {budget_note}；"
+                "到时限我会如实说明是已证明最优、还是只找到可行解，不会把超时说成无解。"
             ),
             "solve_started",
             "P01",
@@ -1328,7 +1351,13 @@ class AgentRuntime:
             if trace is not None:
                 trace.message = f"{trace.message}｜提交依据：{reason}"
         try:
-            if pending.get("kind") == "dsl":
+            if pending.get("kind") == "batch":
+                response = self._start_batch_solve(
+                    conversation_id=conversation_id,
+                    batch=pending,
+                    memory=memory,
+                )
+            elif pending.get("kind") == "dsl":
                 response = self._start_dsl_solve(
                     conversation_id=conversation_id,
                     dsl=pending.get("dsl") or {},
@@ -1351,10 +1380,15 @@ class AgentRuntime:
 
         self._tls.submitted_response = response
         job = getattr(response, "solveJob", None)
+        queued = len(pending.get("scenarios") or []) if pending.get("kind") == "batch" else 1
         return {
             "ok": True,
             "jobId": getattr(job, "id", None),
-            "message": "真实求解已启动，正在后台跑。",
+            "message": (
+                f"{queued} 个场景已排队，会按顺序逐个求解；全部算完后自动出对比。"
+                if queued > 1
+                else "真实求解已启动，正在后台跑。"
+            ),
             "authorizedBy": reason,
         }
 
@@ -1688,9 +1722,25 @@ class AgentRuntime:
             on_token=sink.token if sink else None,
             on_status=sink.status if sink else None,
         )
-        if toolbox.pending_change:
-            self._persist_agent_pending(conversation_id, toolbox.pending_change)
+        if toolbox.pending_touched:
+            if toolbox.pending_change:
+                self._persist_agent_pending(conversation_id, toolbox.pending_change)
+            else:
+                self._clear_persisted_pending(conversation_id)
         return reply
+
+    def _clear_persisted_pending(self, conversation_id: str) -> None:
+        """这一轮没能给出预览，就把上一轮遗留的待确认一起作废。
+
+        只清 Toolbox 里的字段不够：下一句“确认”读的是 working memory，
+        不清的话派出去的还是上一句留下的变更。
+        """
+        latest = self.memories.get_or_create(conversation_id)
+        filters = dict(latest.activeFilters)
+        if "pendingChange" not in filters:
+            return
+        filters.pop("pendingChange", None)
+        self.memories.apply_patch(latest, {"activeFilters": filters})
 
     def _persist_agent_pending(self, conversation_id: str, pending: dict[str, Any]) -> None:
         """agent 路径产出的待确认变更落库。
@@ -1752,6 +1802,14 @@ class AgentRuntime:
         if not ordinals:
             left_label = f"{left_label}（{left.id}）"
             right_label = f"{right_label}（{right.id}）"
+        # 说"哪两版"时把目标模式带上：分层和加权算出来的是两套目标，
+        # 只说"方案01 与 方案02"，读者无法知道差异来自目标还是来自数据。
+        left_mode = (left.resultSummary or {}).get("objectiveMode")
+        right_mode = (right.resultSummary or {}).get("objectiveMode")
+        if left_mode:
+            left_label = f"{left_label}·{left_mode}"
+        if right_mode:
+            right_label = f"{right_label}·{right_mode}"
 
         lines = [f"我按最近的两版来比：{left_label} → {right_label}。"]
         left_fp = getattr(left, "modelFingerprint", None)
@@ -1976,13 +2034,17 @@ class AgentRuntime:
                 # 失败原因只能来自系统算出来的诊断，不能是模板话术。
                 # 以前这里是一句固定的"时限内没找到 / 已证明不可行"——没错，
                 # 但用户拿不到任何可行动的信息，模型还会自己补一个"可能是工时不够"。
-                diagnosis = (raw_result.get("求解") or {}).get("失败诊断") or {}
+                solving = raw_result.get("求解") or {}
+                diagnosis = solving.get("失败诊断") or {}
                 if diagnosis:
                     from dsl_core.diagnose import describe as describe_diagnosis
 
                     reason = describe_diagnosis(diagnosis)
                 else:
-                    reason = "求解达到时限，尚未找到可用方案，但未证明无解。" if status == "UNKNOWN" else "模型已由求解器证明不可行。"
+                    # 诊断缺席时也不能退回空话：按求解记录里的时间、时限、终止原因说话。
+                    from app.core.solve_explanation import explain_no_solution
+
+                    reason = explain_no_solution(status, solving)
                 self._finalize_response(
                     current.conversationId,
                     reason,
@@ -2003,17 +2065,26 @@ class AgentRuntime:
                         modelFingerprint=artifact.model_fingerprint,
                     ).model_dump(),
                 }
+            if has_incumbent:
+                # 有方案但没证到最优时，状态卡也要说清卡在哪，别只写"已完成"。
+                from app.core.solve_explanation import explain_no_solution, explain_not_optimal
+
+                incumbent_solver = (stored_result.get("summary") or {}).get("solver") or {}
+                if str(incumbent_solver.get("方案来源") or "") == "HEURISTIC_FALLBACK":
+                    status_message = explain_no_solution("UNKNOWN", incumbent_solver)
+                elif status == "FEASIBLE":
+                    status_message = explain_not_optimal(incumbent_solver)
+                else:
+                    status_message = None
+            else:
+                status_message = str(stored_result.get("summary") or "").strip() or None
             self.jobs.mark_completed(
                 job_id,
                 stored_result,
                 status,
                 has_incumbent=has_incumbent,
-                # 没产出方案时，任务状态卡上直接写原因，别只说"已完成"。
-                status_message=(
-                    None
-                    if has_incumbent
-                    else str(stored_result.get("summary") or "").strip()[:300] or None
-                ),
+                # 状态卡直接写原因，别只说"已完成"。
+                status_message=str(status_message).strip()[:300] if status_message else None,
             )
             current = self.jobs.get(job_id)
             if current:
@@ -2037,7 +2108,8 @@ class AgentRuntime:
         )
         proof = "已证明最优" if status == "OPTIMAL" else "已找到并复核可行方案，尚未证明最优"
         solver = summary.get("solver") or {}
-        if str(solver.get("方案来源") or "") == "HEURISTIC_FALLBACK":
+        fallback = str(solver.get("方案来源") or "") == "HEURISTIC_FALLBACK"
+        if fallback:
             # 求解器没产出排程时，给出的是启发式基线的部分排程，不能按“可行方案”汇报。
             opening = (
                 f"本次未得到求解器排程：现在这版是启发式基线兜底，"
@@ -2045,6 +2117,20 @@ class AgentRuntime:
             )
         else:
             opening = f"排程完成：{proof}。"
+
+        # 「尚未证明最优」必须说清卡在哪一步；兜底 / 没解也要给得出的事实。
+        # 理由只从求解记录里取，不许模型或模板自己补一个「可能是工时不够」。
+        from app.core.solve_explanation import explain_no_solution, explain_not_optimal
+
+        if fallback:
+            reason_line = explain_no_solution("UNKNOWN", solver)
+        elif status in ("UNKNOWN", "INFEASIBLE"):
+            reason_line = explain_no_solution(status, solver)
+        elif status == "FEASIBLE":
+            reason_line = explain_not_optimal(solver)
+        else:
+            reason_line = ""
+
         savings = summary.get("baselineSavings", {})
         savings_text = "；".join(
             f"较{name}节省 {value / 10000:.2f} 万元"
@@ -2053,8 +2139,9 @@ class AgentRuntime:
         )
         return (
             f"{opening}\n"
-            f"建议窗口：{windows or '暂无'}\n"
-            f"完成任务：{completed}/{total}；总成本：{total_cost / 10000:.2f} 万元"
+            + (f"{reason_line}\n" if reason_line else "")
+            + f"建议窗口：{windows or '暂无'}\n"
+            + f"完成任务：{completed}/{total}；总成本：{total_cost / 10000:.2f} 万元"
             + (f"；{savings_text}" if savings_text else "")
             + "。点击下方方案卡可查看完整排程和审计证据。"
         )
