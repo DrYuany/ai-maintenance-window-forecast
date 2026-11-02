@@ -12,6 +12,10 @@ from typing import Any
 from . import slots as S
 from .apply import CompiledRequest, compile_patches, needs_partial
 from .patch import Patch, fingerprint
+# 注意：本模块末尾也有一个 describe（描述求解结果），所以这里必须取别名，
+# 否则导入会被后面的同名定义覆盖，对账的文本描述会调错函数。
+from .reconcile import Ctx, reconcile
+from .reconcile import describe as describe_audit
 from .validate import validate
 from . import PROJECT_ROOT, solver_modules
 
@@ -34,6 +38,7 @@ def run(
     output: Path | None = None,
     strategy: str = "成本最低优先",
     max_tasks: int | None = None,
+    _diagnose: bool = True,
 ) -> dict[str, Any]:
     """跑一次小一修求解。返回 {排程, 求解, 回显, 指纹, 数据, 警告}。"""
     modules = solver_modules()
@@ -82,18 +87,39 @@ def run(
         data, options, output, seconds=seconds, strategy=strategy, hint=hint, **kwargs
     )
     recommended = None
-    if selected is not None:
-        try:
-            recommended = modules["account"](data, selected)
-        except ValueError as exc:
-            # 独立复核没过：这份排程自己站不住，不能带着"复核通过"交出去
-            raise YxError([f"求解结果未通过独立复核：{exc}"], warnings) from exc
+    if selected is None:
+        # 没解出来不能把基线的旧方案交出去（大一修踩过：旧方案被当成"有解"返回，
+        # 解状态还写 FEASIBLE，用户以为约束生效了）。这里直接拦，由诊断层说原因。
+        from .diagnose import explain_infeasible
+
+        info["策略"] = strategy
+        info["权重"] = request.weights
+        # _diagnose=False 是归因探针在调用，别再递归展开一次诊断
+        reason = (explain_infeasible(patches, data, options, info, request)
+                  if _diagnose else "这一条单独就排不出方案")
+        raise YxError([reason], warnings)
+    try:
+        recommended = modules["account"](data, selected)
+    except ValueError as exc:
+        # 独立复核没过：这份排程自己站不住，不能带着"复核通过"交出去
+        raise YxError([f"求解结果未通过独立复核：{exc}"], warnings) from exc
+
+    info["策略"] = strategy
+    info["权重"] = request.weights
+    audit = reconcile(patches, Ctx(selected=selected, rec=recommended, data=data,
+                                   base_data=base_data, info=info, request=request))
+    # 违例是"对不上"，未核对是"没法证明对得上"——两者都不能出方案。
+    # 收紧的代价是任何一条没实现对账的旋钮都会在这里被拦下，而不是悄悄放过去。
+    if audit["违例"] or audit["未核对"]:
+        raise YxError(["意图对账未通过：" + describe_audit(audit)], warnings)
+    audit_text = describe_audit(audit)
     return {
         "排程": selected,
         "推荐": recommended,
         "求解": info,
         "回显": request.echo,
         "待确认": request.uncertain,
+        "对账": audit_text,
         "指纹": fp,
         "数据": data.meta,
         "警告": warnings,
