@@ -71,3 +71,6 @@ voice-bridge/
 
 # WorkBuddy 本地应用卡产物（会话临时文件，不入库）
 .wbapp_*.genie
+
+# ── 小一修：每次求解的产物目录（指纹命名，本地可复跑） ──
+小一修/runs/
