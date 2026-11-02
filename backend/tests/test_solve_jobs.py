@@ -59,6 +59,34 @@ def test_interrupted_running_jobs_are_recovered_as_unknown_failures(temp_db_path
     assert "服务重启" in restored.error
 
 
+def test_completed_without_solution_does_not_claim_finished(temp_db_path) -> None:
+    """没产出方案却写"已完成"，用户看到的是"成功了但什么也没有"。
+
+    这跟兜底冒充结果是同一类：状态字段说的话，跟产物里的事实对不上。
+    """
+    repository = SolveJobRepository(Database(temp_db_path))
+    job = repository.create("conv-1", {"strategy": "成本最低优先"}, "model-1")
+
+    infeasible = repository.mark_completed(
+        job.id, {"summary": "不可行"}, solver_status="INFEASIBLE", has_incumbent=False
+    )
+    assert "无解" in infeasible.statusMessage
+    assert "已完成" not in infeasible.statusMessage
+
+    timeout = repository.mark_completed(
+        job.id, {"summary": "超时"}, solver_status="UNKNOWN", has_incumbent=False
+    )
+    assert "未证明无解" in timeout.statusMessage
+
+
+def test_completed_with_solution_keeps_the_normal_message(temp_db_path) -> None:
+    repository = SolveJobRepository(Database(temp_db_path))
+    job = repository.create("conv-1", {"strategy": "成本最低优先"}, "model-1")
+
+    done = repository.mark_completed(job.id, {"summary": "ok"}, solver_status="OPTIMAL")
+
+    assert done.statusMessage == "排程与独立复核已完成"
+
 
 def test_running_job_progress_advances_with_elapsed_time(temp_db_path) -> None:
     """求解期间进度按「已用时长/时限」在 35→80 之间推进，不再长期停在 35。"""

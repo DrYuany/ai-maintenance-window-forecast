@@ -166,7 +166,9 @@ def _validate_constraint(spec: Any, data, where: str) -> list[str]:
         if key not in allowed:
             errors.append(f"{where}: 原语 {ctype} 不允许字段 {key!r}")
     if ctype not in prim_reg.COMPILED_CONSTRAINTS:
-        errors.append(f"{where}: 原语 {ctype} 已登记但原型未实现编译")
+        reason = prim_reg.UNIMPLEMENTED_REASONS.get(ctype)
+        suffix = f"（{reason}）" if reason else ""
+        errors.append(f"{where}: 原语 {ctype} 已登记但原型未实现编译{suffix}")
 
     if "op" in spec:
         if spec["op"] not in prim_reg.OPS:
@@ -178,7 +180,7 @@ def _validate_constraint(spec: Any, data, where: str) -> list[str]:
     if "line" in spec:
         errors.extend(_check_bound(spec["line"], where, "line", integer=True, minimum=1))
     if "limit" in spec:
-        errors.extend(_check_bound(spec["limit"], where, "limit", minimum=0))
+        errors.extend(_check_bound(spec["limit"], where, "limit", integer=True, minimum=0))
 
     if ctype == "co_occur":
         mode = spec.get("mode")
@@ -214,6 +216,19 @@ def _validate_constraint(spec: Any, data, where: str) -> list[str]:
         errors.extend(_check_task_ref(spec.get("after"), data, where))
     if ctype in ("at_most_one", "at_least_one"):
         errors.extend(_check_task_list(spec.get("tasks"), data, where))
+    if ctype == "capacity":
+        # resource 是维度名，不是具体线号：写"2号船"会被当未知维度拒掉，
+        # 那种诉求属于 fix(task, line) 或 exclude，不该从 capacity 混进来。
+        if spec.get("resource") not in prim_reg.CAPACITY_RESOURCES:
+            errors.append(
+                f"{where}: capacity 的 resource 只支持 {prim_reg.CAPACITY_RESOURCES}，"
+                f"收到 {spec.get('resource')!r}（要指定具体某条线请用 fix）"
+            )
+        if data is not None:
+            if entity_reg.resolve_day(data, spec.get("time")) is None:
+                errors.append(
+                    f"{where}: capacity 的时间 {spec.get('time')!r} 不在规划范围内"
+                )
     if ctype == "forbidden_dates":
         if not isinstance(spec.get("dates"), list) or not spec["dates"]:
             errors.append(f"{where}: forbidden_dates 需要非空日期列表")

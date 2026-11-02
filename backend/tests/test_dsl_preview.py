@@ -59,12 +59,17 @@ def test_co_occur_preview_distinguishes_all_six_modes() -> None:
 
 
 def test_unimplemented_primitive_says_so_before_confirmation() -> None:
-    """登记了但没实现编译的原语，预览当场说明会报错，不能等点确认才炸。"""
+    """登记了但没实现编译的原语，预览当场说明会报错，不能等点确认才炸。
+
+    用 no_overlap：它是唯一还留在"登记但未实现"里的原语（按当前资源维度
+    做出来是恒真约束，见 primitives.UNIMPLEMENTED_REASONS）。
+    """
     body = _body(
-        {"constraints": [{"type": "at_most_one", "tasks": ["任务001", "任务002"]}]}
+        {"constraints": [{"type": "no_overlap", "resource": "line", "tasks": ["任务001", "任务002"]}]}
     )
 
     assert "未实现" in body and "不会生效" in body
+    assert "不改变解" in body, "要说清不做它的原因，而不是只说'未实现'"
 
 
 def test_unimplemented_co_occur_mode_says_so() -> None:

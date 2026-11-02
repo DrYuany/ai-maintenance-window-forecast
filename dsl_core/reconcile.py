@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .registry.entities import resolve_minute, resolve_task
+from .registry.entities import resolve_day, resolve_minute, resolve_task
 from .registry.parameters import to_internal_key
 from .registry.quantities import resolve_quantity
 
@@ -149,6 +149,12 @@ def _ref_value(ref: Any, rows: list[dict[str, Any]], rec: dict[str, Any]) -> flo
             return float(sum(int(r.get("开始") or 0) for r in selected))
         if coeff == "day":
             return float(sum(int(r.get("开始") or 0) // 1440 for r in selected))
+        # 成本类小计能从推荐报告整份读出，但只在 filter 为空时成立：
+        # 「人工」是整份方案的合计，筛"高严重"就得逐行重算，而排程行里没有
+        # 人工单价，重算不出来。那种情况返回 None（未核对），不猜一个数。
+        cost_field = {"labor": "人工", "material": "备件", "other_fee": "其他费用"}.get(coeff)
+        if cost_field and not filter_spec and rec.get(cost_field) is not None:
+            return float(rec[cost_field])
     return None
 
 
@@ -353,6 +359,60 @@ def _constraint_checks(
                             "实际所在日：" + "、".join(map(str, sorted(days))),
                         )
                     )
+            elif ctype in ("at_most_one", "at_least_one"):
+                tasks = [resolve_task(data, ref) for ref in spec["tasks"]]
+                present = [task for task in tasks if scheduled(task) is not None]
+                ok = (
+                    len(present) <= 1
+                    if ctype == "at_most_one"
+                    else len(present) >= 1
+                )
+                checks.append(
+                    _item(
+                        f"{where}：{'、'.join(tasks)} "
+                        + ("最多排一个" if ctype == "at_most_one" else "至少排一个"),
+                        PASS if ok else FAIL,
+                        f"实际排入 {len(present)} 个：{'、'.join(present) or '无'}",
+                    )
+                )
+            elif ctype == "capacity":
+                day = resolve_day(data, spec["time"])
+                if day is None:
+                    checks.append(
+                        _item(f"{where}：{spec['resource']} 日配额", UNVERIFIED, "时间无法解析成某一天")
+                    )
+                    continue
+                field = {"line": "作业线", "turbine": "风机编号", "part": "部件名称"}.get(
+                    spec["resource"]
+                )
+                if field is None:
+                    checks.append(
+                        _item(f"{where}：{spec['resource']} 日配额", UNVERIFIED, "未知资源维度")
+                    )
+                    continue
+                start_of_day, end_of_day = day * 1440, (day + 1) * 1440
+                used: set = set()
+                for row in rows:
+                    segments = row.get("作业段")
+                    if segments:
+                        works = any(
+                            a < end_of_day and b > start_of_day for a, b in segments
+                        )
+                    else:
+                        # 产物没带作业段时退回整体跨度。口径更宽（跨天任务会被算进
+                        # 两天），可能多算一个资源，但不会漏算——漏算才是假通过。
+                        works = int(row.get("开始") or 0) < end_of_day and int(
+                            row.get("完成") or 0
+                        ) > start_of_day
+                    if works:
+                        used.add(row.get(field))
+                checks.append(
+                    _item(
+                        f"{where}：第 {day} 天最多 {spec['limit']} 个 {spec['resource']}",
+                        PASS if len(used) <= int(spec["limit"]) else FAIL,
+                        f"实际用了 {len(used)} 个：{'、'.join(map(str, sorted(used, key=str))) or '无'}",
+                    )
+                )
             elif ctype == "cardinality":
                 filter_spec = spec.get("filter") or {}
                 selected = _matching(rows, filter_spec)
@@ -369,15 +429,22 @@ def _constraint_checks(
                 )
             elif ctype == "budget":
                 field = _COST_FIELDS.get(str(spec["quantity"]))
-                if field is None or rec.get(field) is None:
+                if field is not None and rec.get(field) is not None:
+                    actual = rec.get(field)
+                else:
+                    # 不是那两个口径就走重算（人工/备件/其他费用这类小计）。
+                    # 重算不出来就是未核对，不拿别的口径顶替——那是最容易
+                    # "看起来核过了其实核的是另一个数"的地方。
+                    actual = _ref_value(spec["quantity"], rows, rec)
+                if actual is None:
                     checks.append(_item(f"{where}：{spec['quantity']} 限额", UNVERIFIED, "报告里没有这项成本口径"))
                     continue
-                ok = _op_ok(rec.get(field), str(spec["op"]), spec["value"])
+                ok = _op_ok(actual, str(spec["op"]), spec["value"])
                 checks.append(
                     _item(
                         f"{where}：{spec['quantity']} {spec['op']} {spec['value']}",
                         UNVERIFIED if ok is None else (PASS if ok else FAIL),
-                        f"实际 {rec.get(field)}",
+                        f"实际 {actual}",
                     )
                 )
             elif ctype == "linear":

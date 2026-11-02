@@ -78,3 +78,27 @@ def resolve_minute(data: Any, ref: str) -> int | None:
     except (ValueError, AttributeError):
         return None
     return None
+
+
+def resolve_day(data: Any, ref: str) -> int | None:
+    """把"某一天"解析成天序号（相对快照 base 的第几天）。
+
+    和 resolve_minute 的区别是容忍纯日期：「2026-11-05」没有时区，
+    product_data.minute 会直接拒绝（它要求 ISO 带 tz）。但用户说的
+    「11月5日」就是这种写法，capacity 这类按天作用域的约束必须收下。
+    纯数字当分钟偏移处理。
+    """
+    text = str(ref).strip()
+    if text.isdigit():
+        minute: int | None = int(text)
+    else:
+        minute = resolve_minute(data, text)
+        if minute is None:
+            # 补当地零点再试一次：时区从快照 base 上取，不硬编码。
+            base = getattr(data, "base", None)
+            offset = base.strftime("%z") if base is not None else ""
+            suffix = f"T00:00:00{offset[:3]}:{offset[3:]}" if len(offset) == 5 else "T00:00:00+08:00"
+            minute = resolve_minute(data, text + suffix)
+    if minute is None or not (0 <= minute <= data.end):
+        return None
+    return minute // 1440

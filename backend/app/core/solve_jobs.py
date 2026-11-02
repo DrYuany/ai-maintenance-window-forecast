@@ -115,22 +115,38 @@ class SolveJobRepository:
         solver_status: SolverStatus,
         has_incumbent: bool | None = None,
         now: datetime | None = None,
+        status_message: str | None = None,
     ) -> SolveJob:
         job = self._require(job_id)
         finished = now or datetime.now(timezone.utc)
         elapsed = self._elapsed(job, finished)
+        incumbent = (
+            solver_status in {"OPTIMAL", "FEASIBLE"}
+            if has_incumbent is None
+            else has_incumbent
+        )
+        if status_message:
+            message = status_message
+        elif not incumbent and solver_status == "INFEASIBLE":
+            # 没产出方案却写"排程与独立复核已完成"，是另一种"说一套做一套"：
+            # 任务状态说完成了，界面上什么方案都没有。
+            message = "已证明在给定约束下无解，未产出方案"
+        elif not incumbent:
+            message = "达到时限，未找到可行方案（未证明无解）"
+        else:
+            message = "排程与独立复核已完成"
         updated = job.model_copy(
             update={
                 "status": "COMPLETED",
                 "solverStatus": solver_status,
-                "hasIncumbent": solver_status in {"OPTIMAL", "FEASIBLE"} if has_incumbent is None else has_incumbent,
+                "hasIncumbent": incumbent,
                 "finishedAt": finished.isoformat(),
                 "elapsedSeconds": elapsed,
                 "needsUserDecision": False,
                 "result": result,
                 "phase": "completed",
                 "progressPercent": 100,
-                "statusMessage": "排程与独立复核已完成",
+                "statusMessage": message,
             }
         )
         self._save(updated)

@@ -20,7 +20,7 @@ from typing import Any, Callable
 from . import generator
 from .registry import primitives as prim_reg
 from .registry import quantities as qty_reg
-from .registry.entities import resolve_minute, resolve_task
+from .registry.entities import resolve_day, resolve_minute, resolve_task
 
 MONEY = 1_000_000  # 微元，与 product_planner.MONEY 一致
 
@@ -137,6 +137,7 @@ def compile_constraint(
     data,
     spec: dict[str, Any],
     metrics: dict | None = None,
+    task_vars: dict[str, list[tuple[dict, Any]]] | None = None,
 ) -> list[str]:
     """单条约束 → 加进模型，返回错误列表（空 = 成功）。"""
     ctype = spec["type"]
@@ -167,6 +168,70 @@ def compile_constraint(
         terms = generator.per_task_terms(cands, task, "day", data)
         variables = [choices[i][1] for _c, i in terms]
         model.Add(sum(variables) == 0)
+    elif ctype in ("at_most_one", "at_least_one"):
+        # 分组选择：「这几个里最多/至少挑一个」。
+        # 每个任务在模型里有一串候选变量，且至多一个为真（完整模式恰好一个），
+        # 所以 sum(所有候选变量) 就等于"这批任务里被排了几个"，直接加界即可。
+        #
+        # 注意完整模式：product_planner 给每个任务加了 sum(x)==1，此时
+        # at_most_one 的 <=1 与"每个都必须排"直接矛盾 —— 这是真冲突，必须让它
+        # 老老实实报不可行，由 diagnose 说清"你要的是一选一，模型却在全排"。
+        variables: list[Any] = []
+        missing: list[str] = []
+        for ref in spec["tasks"]:
+            task = resolve_task(data, ref)
+            pairs = task_vars.get(task) if task else None
+            if not pairs:
+                missing.append(str(ref))
+                continue
+            variables.extend(variable for _c, variable in pairs)
+        if missing:
+            # 不能静默跳过：空变量表加 <=1 等于什么都没约束，用户以为生效了。
+            return [f"{ctype} 里的任务在当前快照里没有可选排程：{'、'.join(missing)}"]
+        if ctype == "at_most_one":
+            model.Add(sum(variables) <= 1)
+        else:
+            model.Add(sum(variables) >= 1)
+    elif ctype == "capacity":
+        # 日配额：「某天最多用 N 个 <资源>」。
+        #
+        # resource 是维度名（line/turbine/part），不是具体线号——具体到哪条线
+        # 由 fix 负责。这里问的是"那天开了几条线 / 动了几台风机 / 用了几个部件"。
+        #
+        # 判定"那天有没有作业"用作业段与当天是否有交集，不看 开始/完成：
+        # 一个任务可能跨天，开始在前一天、作业落在目标日，用开始日期会漏。
+        resource = spec["resource"]
+        day = resolve_day(data, spec["time"])
+        if day is None:
+            return [f"capacity 的时间 {spec['time']!r} 不在规划范围内"]
+        limit = int(spec["limit"])
+
+        def _resource_key(candidate: dict) -> Any:
+            if resource == "line":
+                return candidate.get("作业线")
+            if resource == "turbine":
+                return candidate.get("风机编号")
+            return candidate.get("部件编号")
+
+        def _works_on_day(candidate: dict) -> bool:
+            start_of_day, end_of_day = day * 1440, (day + 1) * 1440
+            return any(
+                a < end_of_day and b > start_of_day
+                for a, b in candidate.get("作业段") or []
+            )
+
+        groups: dict[Any, list[Any]] = {}
+        for candidate, variable in choices:
+            if not _works_on_day(candidate):
+                continue
+            groups.setdefault(_resource_key(candidate), []).append(variable)
+        used: list[Any] = []
+        for key, variables in groups.items():
+            flag = model.NewBoolVar(f"cap_{resource}_{key}_{day}")
+            model.AddMaxEquality(flag, variables)
+            used.append(flag)
+        if used:
+            model.Add(sum(used) <= limit)
     elif ctype == "precedence":
         before = resolve_task(data, spec["before"])
         after = resolve_task(data, spec["after"])
@@ -308,7 +373,9 @@ def constraints_builder(
         cands = generator.candidate_rows(choices)
         errors: list[str] = []
         for index, spec in enumerate(dsl_constraints):
-            errors.extend(compile_constraint(m, choices, cands, data, spec, metrics))
+            errors.extend(compile_constraint(
+                m, choices, cands, data, spec, metrics, task_vars
+            ))
             if errors:
                 errors.append(f"（第 {index + 1} 条约束编译失败）")
                 break

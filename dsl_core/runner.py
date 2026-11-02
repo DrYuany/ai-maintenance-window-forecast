@@ -19,11 +19,16 @@ _SCRIPTS = PROJECT_ROOT / "maintenance-milp-modeler" / "scripts"
 
 
 class DslError(RuntimeError):
-    """校验或编译失败，携带全部错误信息。"""
+    """校验或编译失败，携带全部错误信息。
 
-    def __init__(self, errors: list[str]) -> None:
+    ``diagnosis``：求解没产出方案时的结构化原因（见 ``diagnose.py``）。
+    没有它的时候是 None——空着比编一句"可能冲突"好。
+    """
+
+    def __init__(self, errors: list[str], diagnosis: dict | None = None) -> None:
         super().__init__("；".join(errors))
         self.errors = errors
+        self.diagnosis = diagnosis
 
 
 def _solver_modules():
@@ -63,12 +68,15 @@ def run(
     )
     from .validator import validate_dsl
 
-    # exclude 是"允许少修"的明确信号：完整模式把每个任务强制排入
-    # （product_planner 里 sum(x)==1），跟 exclude 的 sum(x)==0 直接矛盾，
-    # 必然判不可行。见到就切部分排程，不要等失败了再降级——那条降级路径
-    # 一旦被旧方案的兜底挡住就永远走不到。
+    # exclude / at_most_one 都是"允许少修"的明确信号：完整模式把每个任务强制
+    # 排入（product_planner 里 sum(x)==1），跟 exclude 的 sum(x)==0、
+    # at_most_one 的"这批里最多排一个"直接矛盾，必然判不可行。
+    #
+    # at_least_one 不在此列：它只说"至少一个"，没说其余能不能排，完整模式
+    # 下恒真（本来就全排），切 partial 反而会把"全修"降级成"挑一个"。
+    _PARTIAL_HINTS = {"exclude", "at_most_one"}
     if not partial and any(
-        str(spec.get("type")) == "exclude" for spec in (dsl.get("constraints") or [])
+        str(spec.get("type")) in _PARTIAL_HINTS for spec in (dsl.get("constraints") or [])
     ):
         partial = True
 
@@ -171,11 +179,16 @@ def run(
     # 原样返回、解状态还写 FEASIBLE，只能靠来源字段事后识别。现在 solve 只在
     # 真解出来时返回 selected，这里直接按"有没有解"判定，不再看来源。
     if selected is None and constraints:
-        raise DslError([
-            "求解器没有在满足这些约束的前提下找到解；"
-            "不把它当作结果。请放宽约束，或确认这几条约束是否互相冲突："
-            + str([spec.get("type") for spec in constraints])
-        ])
+        # 报"没找到解"等于什么都没说。这里把能算出来的原因一并给出：
+        # 直接矛盾、时间窗为空、任务无候选、配额上限不够——每一条都带证据，
+        # 算不出来就明说"未能定位"，不拿"可能冲突"糊过去。
+        from .diagnose import describe as describe_diagnosis
+        from .diagnose import diagnose
+
+        diagnosis = diagnose(
+            dsl=dsl, data=data, options=options, info=info, partial=partial
+        )
+        raise DslError([describe_diagnosis(diagnosis)], diagnosis=diagnosis)
 
     # 意图对账：DSL 说了什么，产物里就必须有什么。
     #
@@ -203,7 +216,11 @@ def run(
         context={"策略": strategy, "目标模式": mode, "自定义权重": weights},
     )
     info["意图对账"] = audit
-    if audit["违例"]:
+    # 违例是"对不上"，未核对是"没法证明对得上"。两者都不能出方案：
+    # 前者是反证，后者是空白证据——用户拿到的仍然是一份没被验证过诉求的方案。
+    # 收紧的直接后果是：任何一条诉求没有对账实现，都会在这里被拦下来，
+    # 而不是悄悄放过去、让用户以为约束生效了。
+    if audit["违例"] or audit["未核对"]:
         raise DslError(["意图对账未通过：" + describe(audit)])
     return {
         "数据": data.meta,

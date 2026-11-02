@@ -23,6 +23,12 @@ CO_OCCUR_LABELS: dict[str, str] = {
     "diff_line": "安排在不同作业线",
 }
 
+CAPACITY_LABELS: dict[str, str] = {
+    "line": "作业线",
+    "turbine": "风机",
+    "part": "部件",
+}
+
 
 def _fmt_filter(filter_spec: dict[str, Any] | None) -> str:
     if not filter_spec:
@@ -71,7 +77,12 @@ def _render_constraint(spec: dict[str, Any]) -> str:
     elif ctype == "no_overlap":
         text = f"资源 {spec.get('resource')} 上 {_fmt_tasks(spec.get('tasks'))} 不得重叠"
     elif ctype == "capacity":
-        text = f"资源 {spec.get('resource')} 在 {spec.get('time')} 最多 {spec.get('limit')}"
+        # 日配额：不写"某天最多几个作业线"，用户会以为是全局上限。
+        label = CAPACITY_LABELS.get(str(spec.get("resource")), "资源")
+        text = (
+            f"日配额：{spec.get('time')} 当天最多用 {spec.get('limit')} 个"
+            f"{label}（{spec.get('resource')}）"
+        )
     elif ctype == "fix":
         text = f"固定作业线：{spec.get('task')} 只上 {spec.get('line')} 号线"
     elif ctype == "cardinality":
@@ -95,7 +106,9 @@ def _render_constraint(spec: dict[str, Any]) -> str:
         from dsl_core.registry import primitives as prim_reg
 
         if ctype in prim_reg.CONSTRAINT_PRIMITIVES and ctype not in prim_reg.COMPILED_CONSTRAINTS:
-            text += "　【原型未实现：确认后会报错，不会生效】"
+            text += "　【原型未实现：确认后会报错，不会生效"
+            reason = prim_reg.UNIMPLEMENTED_REASONS.get(str(ctype))
+            text += f"；{reason}】" if reason else "】"
         if ctype == "co_occur" and spec.get("mode") not in prim_reg.COMPILED_CO_OCCUR_MODES:
             text += f"　【模式 {spec.get('mode')} 未实现：确认后会报错，不会生效】"
     except Exception:  # pragma: no cover - 注册表不可用时不影响预览

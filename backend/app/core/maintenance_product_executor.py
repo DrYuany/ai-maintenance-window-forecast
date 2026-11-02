@@ -103,7 +103,7 @@ class MaintenanceProductExecutor:
                 # sum(x)==1（必须排入），跟 exclude 的 sum(x)==0 直接矛盾，
                 # 必然判不可行。见到就切部分排程，别等失败再降级。
                 allow_partial = any(
-                    str(spec.get("type")) == "exclude"
+                    str(spec.get("type")) in {"exclude", "at_most_one"}
                     for spec in (dsl.get("constraints") or [])
                 )
                 customs = custom_objectives(dsl)
@@ -120,12 +120,16 @@ class MaintenanceProductExecutor:
                     (output / "model_artifact.json").exists()
                     or (output / "diagnostic_model_artifact.json").exists()
                 )
+                cached_audit = (cached_report.get("求解") or {}).get("意图对账") or {}
+                cached_clean = not (
+                    cached_audit.get("违例") or cached_audit.get("未核对")
+                )
                 if not has_cached_solution or not has_cached_artifact:
                     output = base_output.with_name(f"{base_output.name}-{job_id[-8:]}")
                     result_path = output / "结果.json"
-                # 意图对账没过的结果不能当缓存复用：代码改了、约束补了，
-                # 还拿旧结论顶上去，等于把上次的错再确认一遍。
-                elif ((cached_report.get("求解") or {}).get("意图对账") or {}).get("违例"):
+                # 意图对账没过（违例或未核对）的结果不能当缓存复用：代码改了、
+                # 约束补了，还拿旧结论顶上去，等于把上次的错再确认一遍。
+                elif not cached_clean:
                     output = base_output.with_name(f"{base_output.name}-{job_id[-8:]}")
                     result_path = output / "结果.json"
             # 并发求解：按输出目录加锁——指纹不同则目录不同、可并发互不覆盖；
@@ -159,15 +163,41 @@ class MaintenanceProductExecutor:
                         shutil.rmtree(output, ignore_errors=True)
                         raise MaintenanceProductExecutionError("求解已由用户停止")
             # 意图对账有违例 = 这份排程跟用户的要求对不上，不能沉淀成方案。
+            # 未核对同理：没有证据证明对得上，就不是"通过"，不能出方案。
             # 启发式兜底另外处理：它本来就不是按约束求出来的，界面已有专门标注
             # （"启发式兜底方案 · 未证明最优"），这里不重复拦截。
             audit = (report.get("求解") or {}).get("意图对账") or {}
-            if audit.get("违例") and str((report.get("求解") or {}).get("方案来源")) != "HEURISTIC_FALLBACK":
+            if (audit.get("违例") or audit.get("未核对")) and str(
+                (report.get("求解") or {}).get("方案来源")
+            ) != "HEURISTIC_FALLBACK":
                 from dsl_core.reconcile import describe
 
                 raise MaintenanceProductExecutionError(
                     "意图对账未通过，这份排程与实际要求不符：" + describe(audit)
                 )
+            # 没产出方案时，把"为什么"写进报告。这份诊断只由代码算出来：
+            # 直接矛盾、时间窗为空、任务无候选、配额上限不够，每条带证据；
+            # 算不出来就标"未能定位"，绝不让模型事后编一个理由。
+            if dsl and not report.get("推荐"):
+                try:
+                    from product_data import candidates
+
+                    from dsl_core.diagnose import diagnose
+
+                    options = {t["任务编号"]: candidates(data, t) for t in data.tasks}
+                    report.setdefault("求解", {})["失败诊断"] = diagnose(
+                        dsl=dsl,
+                        data=data,
+                        options=options,
+                        info=report.get("求解") or {},
+                        partial=allow_partial,
+                    )
+                except Exception:  # noqa: BLE001 - 诊断失败不能掩盖原始失败
+                    report.setdefault("求解", {})["失败诊断"] = {
+                        "结论": "未能定位",
+                        "原因": [],
+                        "建议": ["诊断过程本身出错，没有给出原因"],
+                    }
             report["Agent任务"] = {
                 "任务编号": job_id,
                 "输出目录": str(output),

@@ -1954,7 +1954,16 @@ class AgentRuntime:
                     "decisionArtifact": artifact_payload.model_dump(),
                 }
             else:
-                reason = "求解达到时限，尚未找到可用方案，但未证明无解。" if status == "UNKNOWN" else "模型已由求解器证明不可行。"
+                # 失败原因只能来自系统算出来的诊断，不能是模板话术。
+                # 以前这里是一句固定的"时限内没找到 / 已证明不可行"——没错，
+                # 但用户拿不到任何可行动的信息，模型还会自己补一个"可能是工时不够"。
+                diagnosis = (raw_result.get("求解") or {}).get("失败诊断") or {}
+                if diagnosis:
+                    from dsl_core.diagnose import describe as describe_diagnosis
+
+                    reason = describe_diagnosis(diagnosis)
+                else:
+                    reason = "求解达到时限，尚未找到可用方案，但未证明无解。" if status == "UNKNOWN" else "模型已由求解器证明不可行。"
                 self._finalize_response(
                     current.conversationId,
                     reason,
@@ -1975,7 +1984,18 @@ class AgentRuntime:
                         modelFingerprint=artifact.model_fingerprint,
                     ).model_dump(),
                 }
-            self.jobs.mark_completed(job_id, stored_result, status, has_incumbent=has_incumbent)
+            self.jobs.mark_completed(
+                job_id,
+                stored_result,
+                status,
+                has_incumbent=has_incumbent,
+                # 没产出方案时，任务状态卡上直接写原因，别只说"已完成"。
+                status_message=(
+                    None
+                    if has_incumbent
+                    else str(stored_result.get("summary") or "").strip()[:300] or None
+                ),
+            )
             current = self.jobs.get(job_id)
             if current:
                 self._continue_batch(current.conversationId, job_id, produced_version_id)

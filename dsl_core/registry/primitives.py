@@ -23,6 +23,9 @@ CONSTRAINT_PRIMITIVES: dict[str, dict] = {
     "co_occur":        {"required": ["mode", "tasks"]},
     # 资源维度
     "no_overlap":      {"required": ["resource", "tasks"]},
+    # capacity 是**日配额**：「某天最多开 N 条线 / 动 N 台风机 / 用 N 个部件」。
+    # resource 是维度名（line/turbine/part），不是具体线号——具体到哪条线用 fix。
+    # time 写哪一天（日期字符串或分钟偏移），整条约束只作用在那一天。
     "capacity":        {"required": ["resource", "time", "limit"]},
     "fix":             {"required": ["task", "line"]},
     # 计数维度
@@ -41,7 +44,21 @@ CONSTRAINT_PRIMITIVES: dict[str, dict] = {
 COMPILED_CONSTRAINTS: frozenset[str] = frozenset({
     "must", "exclude", "precedence", "co_occur", "fix",
     "cardinality", "deadline", "earliest", "forbidden_dates", "budget", "linear",
+    "at_most_one", "at_least_one", "capacity",
 })
+
+# capacity 的资源维度：问的是"那天开了几条线"这类**维度级**配额。
+# crew（班组）不在里面：模型里没有班组变量，"人员总上限"只用来算线数，
+# 人员是按任务工时折成本的，没有"谁在哪天干什么"。
+CAPACITY_RESOURCES: tuple[str, ...] = ("line", "turbine", "part")
+
+# no_overlap 登记在册但不实现编译。原因不是做不了（模型里已有 IntervalVar +
+# AddNoOverlap，按线、按风机各一组），而是**按当前语义做出来是恒真约束**：
+# 同线不重叠、同风机不重叠模型本来就保证，再加一条解空间不变。
+# 要它有意义，得等班组维度（crew）或跨窗口重叠的线；那属于模型结构改动。
+UNIMPLEMENTED_REASONS: dict[str, str] = {
+    "no_overlap": "当前资源维度（线/风机）模型已保证不重叠，加了不改变解；班组维度尚无变量",
+}
 
 # co_occur 模式：同/不同 × 日/窗口/线；原型实现 day 两种，其余登记在册
 CO_OCCUR_MODES: tuple[str, ...] = (
