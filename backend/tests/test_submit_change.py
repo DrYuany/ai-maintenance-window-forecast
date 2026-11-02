@@ -153,9 +153,10 @@ def test_pending_change_dispatches_through_the_same_path_as_user_confirm(monkeyp
     runtime.memories = SimpleNamespace(get_or_create=lambda _cid: SimpleNamespace())
     seen: dict = {}
 
-    def fake_start_dsl_solve(*, conversation_id, dsl, content, memory, base_version_id=None):
+    def fake_start_dsl_solve(*, conversation_id, dsl, content, memory, base_version_id=None, utterance=None):
         seen.update({"conversationId": conversation_id, "dsl": dsl,
-                     "content": content, "baseVersionId": base_version_id})
+                     "content": content, "baseVersionId": base_version_id,
+                     "utterance": utterance})
         return SimpleNamespace(solveJob=SimpleNamespace(id="job_real_looking"), message="x")
 
     runtime._start_dsl_solve = fake_start_dsl_solve
@@ -163,7 +164,7 @@ def test_pending_change_dispatches_through_the_same_path_as_user_confirm(monkeyp
     outcome = AgentRuntime._submit_pending_change(
         runtime, "conv_submit",
         {"kind": "dsl", "dsl": {"constraints": []}, "baseVersionId": "ver_1",
-         "sourcePrompt": "船租涨到8万，直接算"},
+         "sourcePrompt": "船租涨到8万，直接算", "utterance": "船租涨到8万，直接算"},
         "直接算吧",
     )
 
@@ -172,6 +173,9 @@ def test_pending_change_dispatches_through_the_same_path_as_user_confirm(monkeyp
     assert seen["conversationId"] == "conv_submit"
     assert seen["baseVersionId"] == "ver_1"
     assert seen["content"] == "船租涨到8万，直接算"
+    # 原话跟着变更一起交给求解侧：那里会拿它跟 DSL 再核一次。
+    # 只传模型转写过的 sourcePrompt，等于把核查材料换成被核查人自己写的。
+    assert seen["utterance"] == "船租涨到8万，直接算"
     # 外层靠这个字段决定"用求解响应顶掉模型的话"，忘了设就会重复播报
     assert runtime._tls.submitted_response is not None
 
@@ -230,9 +234,10 @@ def test_pending_change_dispatches_through_the_same_path_as_user_confirm(monkeyp
     runtime.memories = SimpleNamespace(get_or_create=lambda _cid: SimpleNamespace())
     seen: dict = {}
 
-    def fake_start_dsl_solve(*, conversation_id, dsl, content, memory, base_version_id=None):
+    def fake_start_dsl_solve(*, conversation_id, dsl, content, memory, base_version_id=None, utterance=None):
         seen.update({"conversationId": conversation_id, "dsl": dsl,
-                     "content": content, "baseVersionId": base_version_id})
+                     "content": content, "baseVersionId": base_version_id,
+                     "utterance": utterance})
         return SimpleNamespace(solveJob=SimpleNamespace(id="job_real_looking"), message="x")
 
     runtime._start_dsl_solve = fake_start_dsl_solve
@@ -240,7 +245,7 @@ def test_pending_change_dispatches_through_the_same_path_as_user_confirm(monkeyp
     outcome = AgentRuntime._submit_pending_change(
         runtime, "conv_submit",
         {"kind": "dsl", "dsl": {"constraints": []}, "baseVersionId": "ver_1",
-         "sourcePrompt": "船租涨到8万，直接算"},
+         "sourcePrompt": "船租涨到8万，直接算", "utterance": "船租涨到8万，直接算"},
         "直接算吧",
     )
 
@@ -249,6 +254,9 @@ def test_pending_change_dispatches_through_the_same_path_as_user_confirm(monkeyp
     assert seen["conversationId"] == "conv_submit"
     assert seen["baseVersionId"] == "ver_1"
     assert seen["content"] == "船租涨到8万，直接算"
+    # 原话跟着变更一起交给求解侧：那里会拿它跟 DSL 再核一次。
+    # 只传模型转写过的 sourcePrompt，等于把核查材料换成被核查人自己写的。
+    assert seen["utterance"] == "船租涨到8万，直接算"
     # 外层靠这个字段决定"用求解响应顶掉模型的话"，忘了设就会重复播报
     assert runtime._tls.submitted_response is not None
 

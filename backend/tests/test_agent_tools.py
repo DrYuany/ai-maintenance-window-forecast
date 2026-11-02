@@ -157,6 +157,7 @@ def _toolbox(
     temp_db_path: Path,
     with_artifact: bool = True,
     with_third: bool = False,
+    user_message: str | None = None,
 ) -> AgentToolbox:
     db = Database(temp_db_path)
     versions = VersionRepository(db)
@@ -185,6 +186,7 @@ def _toolbox(
         conversation_id="conv_tools",
         versions=versions,
         model_artifacts=artifacts,
+        user_message=user_message,
     )
 
 
@@ -755,3 +757,79 @@ def test_single_version_read_is_not_a_compare(temp_db_path: Path) -> None:
     )
     # 单版走 detail 路径，不产生差异
     assert result["data"]["mode"] != "compare"
+
+
+# ── 原话 ↔ DSL：solve 是最后一道能提前拦住的口子 ──────────────────────────
+
+
+def _fake_dsl_change(dsl: dict, preview: str = "变更预览：以 DSL 为准"):
+    from app.core.change_planning import DslChange
+    from dsl_core.planning_request import PlanningRequest
+
+    return DslChange(
+        dsl=dsl,
+        request=PlanningRequest(),
+        residual=True,  # expressible=False → 走 DSL 段
+        preview=preview,
+    )
+
+
+def test_solve_refuses_when_the_dsl_drops_the_count_limit(
+    temp_db_path: Path, monkeypatch
+) -> None:
+    """用户说"只修前 8 个"，解析成 8 条 must = 一个上限都没压住。
+
+    这是复盘里那次真实事故：预览照常生成、用户点了确认、求解把在册任务全排上。
+    现在必须在预览之前就拒绝，并且把上一轮那份 pending 清掉——否则模型还能
+    直接 submit_change 把它派出去，等于绕过这次拒绝。
+    """
+    from app.core import change_planning
+
+    dsl = {"constraints": [{"type": "must", "task": f"任务{i:03d}"} for i in range(1, 9)]}
+    monkeypatch.setattr(change_planning, "plan_dsl_change", lambda *a, **k: _fake_dsl_change(dsl))
+
+    toolbox = _toolbox(temp_db_path, user_message="只修前8个，其余不安排")
+    toolbox.pending_change = {"kind": "dsl", "dsl": {"constraints": []}}
+    result = toolbox.execute("solve", {"instruction": "只修前8个，其余不安排"})
+
+    assert result["status"] == "clarify", result
+    markdown = result["data"]["markdown"]
+    assert "对不上" in markdown
+    assert "没有把数量压到 8 个" in markdown
+    assert result["data"]["verbatim"] is True
+    assert toolbox.pending_change is None, "拒绝之后不能还留着待确认变更"
+
+
+def test_solve_keeps_the_audit_in_the_preview_when_it_passes(
+    temp_db_path: Path, monkeypatch
+) -> None:
+    """对得上也要把核对结果写进预览：用户要看的是"系统怎么理解我说的"。"""
+    from app.core import change_planning
+
+    dsl = {"constraints": [{"type": "cardinality", "filter": {}, "op": "<=", "value": 8}]}
+    monkeypatch.setattr(change_planning, "plan_dsl_change", lambda *a, **k: _fake_dsl_change(dsl))
+
+    toolbox = _toolbox(temp_db_path, user_message="只修前8个")
+    result = toolbox.execute("solve", {"instruction": "只修前8个"})
+
+    assert result["status"] == "needs_confirmation", result
+    markdown = result["data"]["markdown"]
+    assert "原话核对" in markdown
+    assert "全部对上" in markdown
+    assert toolbox.pending_change is not None
+    assert toolbox.pending_change["utterance"] == "只修前8个", "原话要跟着变更一起走，求解时再核一次"
+
+
+def test_solve_without_a_claim_says_it_did_not_check(temp_db_path: Path, monkeypatch) -> None:
+    """参数类变更抽不到断言时，预览必须写明"没核对"，不能默认通过。"""
+    from app.core import change_planning
+
+    dsl = {"parameters": [{"field": "船舶日租金", "op": "=", "value": 50000}]}
+    monkeypatch.setattr(change_planning, "plan_dsl_change", lambda *a, **k: _fake_dsl_change(dsl))
+
+    toolbox = _toolbox(temp_db_path, user_message="船租改成5万")
+    result = toolbox.execute("solve", {"instruction": "船租改成5万"})
+
+    assert result["status"] == "needs_confirmation", result
+    assert "没有系统能核对的具体诉求" in result["data"]["markdown"]
+    assert "不能说它等于你要的那件事" in result["data"]["markdown"]

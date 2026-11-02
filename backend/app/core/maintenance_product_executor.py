@@ -56,8 +56,14 @@ class MaintenanceProductExecutor:
         job_id: str,
         model_fingerprint: str | None = None,
         dsl: dict[str, Any] | None = None,
+        utterance: str | None = None,
     ) -> dict[str, Any]:
-        """dsl：受控 DSL（约束/自定义目标），校验后编译成注入闭包传给求解。"""
+        """dsl：受控 DSL（约束/自定义目标），校验后编译成注入闭包传给求解。
+
+        utterance：用户这一轮的原话。它跟 DSL 对不上就不出方案——预览阶段已经拦过
+        一次，这里是第二道：pending 可能来自上一轮、也可能被人改过，只靠前一道门
+        等于把"用户批准的东西"这一点押在一条路径上。
+        """
         cancel_event: threading.Event | None = None
         try:
             from product_data import load_project
@@ -74,6 +80,7 @@ class MaintenanceProductExecutor:
             extra_constraints = None
             custom_stages = None
             allow_partial = False
+            utterance_audit: dict[str, Any] | None = None
             if dsl:
                 from dsl_core.validator import validate_dsl
 
@@ -82,6 +89,19 @@ class MaintenanceProductExecutor:
                     raise MaintenanceProductExecutionError(
                         "DSL 校验失败：" + "；".join(dsl_errors)
                     )
+                # 原话 ↔ DSL 的第二道门（第一道在 solve 生成预览时）。这里拒绝，
+                # 是因为"用户批准的那句话"和"要执行的那份 DSL"必须始终是同一件事；
+                # 只靠预览阶段拦一次，等于把这一点押在一条路径上。
+                if utterance:
+                    from dsl_core.utterance import audit_utterance, world_from_data
+                    from dsl_core.utterance import describe as describe_utterance
+
+                    utterance_audit = audit_utterance(utterance, dsl, world_from_data(data))
+                    if utterance_audit.get("违例"):
+                        raise MaintenanceProductExecutionError(
+                            "原话核对未通过，这份变更不是你要的那件事："
+                            + describe_utterance(utterance_audit)
+                        )
                 # 第三期：DSL 全段编译——参数/数据/目标并入 PlanningRequest，
                 # 只剩 PlanningRequest 表达不了的约束/目标走注入闭包。
                 from dsl_core.compiler import constraints_builder, stages_builder
@@ -99,13 +119,12 @@ class MaintenanceProductExecutor:
                 )
                 if residual:
                     extra_constraints = constraints_builder(residual, data)
-                # exclude 是"允许少修"的明确信号：完整模式给每个任务加
-                # sum(x)==1（必须排入），跟 exclude 的 sum(x)==0 直接矛盾，
-                # 必然判不可行。见到就切部分排程，别等失败再降级。
-                allow_partial = any(
-                    str(spec.get("type")) in {"exclude", "at_most_one"}
-                    for spec in (dsl.get("constraints") or [])
-                )
+                # exclude / at_most_one / 完成数上限都是"允许少修"的明确信号：
+                # 完整模式给每个任务加 sum(x)==1（必须排入），跟"少修"直接矛盾，
+                # 必然判不可行。判定收在 compiler.needs_partial，和 runner 同一份。
+                from dsl_core.compiler import needs_partial
+
+                allow_partial = needs_partial(dsl)
                 customs = custom_objectives(dsl)
                 if customs:
                     custom_stages = stages_builder(customs, data)
@@ -203,6 +222,8 @@ class MaintenanceProductExecutor:
                 "输出目录": str(output),
                 "模型输入": request.to_payload(),
             }
+            if utterance_audit:
+                report.setdefault("求解", {})["原话对账"] = utterance_audit
             if dsl:
                 report["Agent任务"]["DSL"] = dsl
             artifact_path = output / "model_artifact.json"

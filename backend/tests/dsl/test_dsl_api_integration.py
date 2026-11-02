@@ -46,7 +46,7 @@ def _report() -> dict:
 def _client(temp_db_path, monkeypatch, captured: dict) -> TestClient:
     os.environ["MWA_DB_PATH"] = str(temp_db_path)
 
-    def fake_execute(self, request, job_id, model_fingerprint=None, dsl=None):
+    def fake_execute(self, request, job_id, model_fingerprint=None, dsl=None, utterance=None):
         captured["dsl"] = dsl
         captured["request"] = request.to_payload()
         return _report()

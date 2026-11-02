@@ -156,6 +156,7 @@ class AgentToolbox:
         jobs: SolveJobRepository | None = None,
         on_submit_change: Callable[[str, dict[str, Any], str], dict[str, Any]] | None = None,
         planner: PlanningIntentCompiler | None = None,
+        user_message: str | None = None,
     ) -> None:
         self.conversation_id = conversation_id
         self.versions = versions
@@ -164,6 +165,9 @@ class AgentToolbox:
         self.on_tool = on_tool
         self.on_pending_change = on_pending_change
         self.on_tool_trace = on_tool_trace
+        # 用户这一轮的**原话**。solve 拿它跟解析出的 DSL 对账，不能拿模型自己
+        # 转写的 instruction 当原话——那等于让被核查的人自己写核查材料。
+        self.user_message = (user_message or "").strip() or None
         # 求解任务仓库：read_jobs 靠它看活，submit_change 靠它派活。
         # 不传就是「这套工具箱没有求解能力」，两个工具会明确说做不到，而不是假装有。
         self.jobs = jobs
@@ -1576,6 +1580,61 @@ class AgentToolbox:
                 data["verbatim"] = True
         return result
 
+    def _utterance_audit(self, dsl: dict[str, Any] | None) -> dict[str, Any] | None:
+        """原话 ↔ DSL 对账。没有原话（模型直接调工具）就跳过，不假装核过。
+
+        拿的是 `self.user_message`，不是模型传进来的 `instruction`：instruction
+        是模型自己转写的一句话，拿它跟模型自己编的 DSL 对账，等于让被核查的人
+        自己写核查材料。"只修前 8 个"被改写成"调整排程，优先修前 8 个"之后，
+        原话里那个硬上限就没了。
+        """
+        utterance = self.user_message
+        if not utterance:
+            return None
+        from dsl_core.utterance import audit_utterance, world_from_project
+
+        try:
+            return audit_utterance(utterance, dsl or {}, world_from_project())
+        except Exception as exc:  # noqa: BLE001 - 对账自身出错必须说出来，不能悄悄放过
+            return {
+                "出错": f"原话核对没能跑起来：{type(exc).__name__}: {exc}",
+                "检查项": 0,
+                "违例": [],
+                "未核对": [],
+                "明细": [],
+                "未核对片段": [],
+                "通过": False,
+                "结论": "未能核对",
+            }
+
+    def _reject_on_utterance(self, audit: dict[str, Any], base) -> dict[str, Any]:
+        """原话与 DSL 对不上：不出方案，且把待确认变更清掉。
+
+        不清的话，上一轮那份 pending 还在，模型可以直接 submit_change 把它派出去，
+        等于绕过这次拒绝。
+        """
+        from dsl_core.utterance import format_audit
+
+        self.pending_change = None
+        text = (
+            "这句话和你准备执行的变更对不上，系统没有生成方案，也没有发起求解。\n\n"
+            + format_audit(audit)
+            + "\n\n请按上面这几条重新说明要改什么；如果是这句话里某部分不用改，请指明是哪部分。"
+        )
+        return self._envelope(
+            "clarify",
+            {
+                "message": text,
+                "markdown": text,
+                "verbatim": True,
+                "requiresUserConfirmation": False,
+                "utteranceAudit": audit,
+            },
+            version=base,
+            warnings=["原话与解析结果不一致，这份变更没有进入求解。"],
+            next_actions=["按原话里对不上的那几条重新解析，不要直接提交。"],
+        )
+
     def _solve_inner(self, arguments: dict[str, Any]) -> dict[str, Any]:
         instruction = str(arguments.get("instruction") or "").strip()
         base = self.resolve_version(arguments.get("baseVersion"))
@@ -1593,13 +1652,22 @@ class AgentToolbox:
 
         dsl_change = plan_dsl_change(instruction, current, base_id)
         if dsl_change is not None and not dsl_change.expressible:
+            audit = self._utterance_audit(dsl_change.dsl)
+            if audit and audit.get("违例"):
+                return self._reject_on_utterance(audit, base)
+            preview = dsl_change.preview
+            if audit:
+                from dsl_core.utterance import format_audit
+
+                preview = f"{preview}\n\n{format_audit(audit)}"
             payload = {
                 "kind": "dsl",
                 "dsl": dsl_change.dsl,
                 "source": dsl_change.source,
                 "baseVersionId": base_id,
                 "sourcePrompt": instruction,
-                "preview": dsl_change.preview,
+                "utterance": self.user_message or instruction,
+                "preview": preview,
             }
             self.pending_change = payload
             if self.on_pending_change:
@@ -1607,14 +1675,15 @@ class AgentToolbox:
             return self._envelope(
                 "needs_confirmation",
                 {
-                    "preview": dsl_change.preview,
+                    "preview": preview,
                     # 预览就是契约，必须原样送到用户眼前。交给模型转述会出现
                     # "预览说排除了 5 个、模型里一条排除都没有"——用户批准的
                     # 是模型的话，执行的是另一份 DSL，中间没有任何绑定。
-                    "markdown": dsl_change.preview,
+                    "markdown": preview,
                     "verbatim": True,
                     "basePlanNumber": self.plan_numbers.get(base.id) if base else None,
                     "requiresUserConfirmation": True,
+                    "utteranceAudit": audit,
                 },
                 version=base,
                 next_actions=["等待用户确认；确认前不得声称已求解或已生成方案。"],
@@ -1641,12 +1710,22 @@ class AgentToolbox:
             source_prompt = plan.source_prompt
             base_id = plan.base_version_id
 
+        # 参数/数据类变更同样要对账："说只修 8 个、结果只改了个船租"是更隐蔽的漏。
+        operations_audit = self._utterance_audit(None)
+        if operations_audit and operations_audit.get("违例"):
+            return self._reject_on_utterance(operations_audit, base)
+        if operations_audit:
+            from dsl_core.utterance import format_audit
+
+            preview = f"{preview}\n\n{format_audit(operations_audit)}"
+
         payload = {
             "baseVersionId": base_id,
             "request": request.to_payload(),
             "operations": operations,
             "preview": preview,
             "sourcePrompt": source_prompt,
+            "utterance": self.user_message or source_prompt,
         }
         self.pending_change = payload
         if self.on_pending_change:

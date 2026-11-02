@@ -29,6 +29,32 @@ MONEY = 1_000_000  # 微元，与 product_planner.MONEY 一致
 # 拿来筛任务没有意义，给了就明确报错，不要猜。
 _MUST_FILTERS = frozenset({"task", "severity", "turbine", "part"})
 
+# 出现这些原语说明用户在**挑拣**要修哪些，而不是"全都得修"。
+# 完整模式给每个任务加 sum(x)==1（必须排入），跟"少修"直接矛盾：
+# exclude 的 sum(x)==0 会立刻打架，cardinality 的上限则会在求解后期被证明
+# 不可行，而诊断还给不出原因。所以见到就切部分排程。
+#
+# at_least_one 不在此列：它只说"至少一个"，没说其余能不能排，完整模式下恒真；
+# 切 partial 反而会把"全修"降级成"挑一个"。
+_SELECTION_PRIMITIVES = frozenset({"exclude", "at_most_one"})
+
+
+def needs_partial(dsl: dict[str, Any]) -> bool:
+    """这份 DSL 是不是在"挑拣任务"，也就是必须走部分排程。
+
+    只在能判死的地方返回 True：
+      - exclude / at_most_one：本身就是"少修几个"的选择语义
+      - cardinality 的上限（<= / ==）：完整模式下每个任务都被强制排入，
+        这类上限只要小于在册任务数就必然不可行
+    """
+    for spec in dsl.get("constraints") or []:
+        ctype = str(spec.get("type"))
+        if ctype in _SELECTION_PRIMITIVES:
+            return True
+        if ctype == "cardinality" and str(spec.get("op") or "=") in ("<=", "=", "=="):
+            return True
+    return False
+
 
 def task_matches(task: dict, filter_spec: dict, data) -> bool:
     """任务是否命中过滤维度（must/cardinality 共用；对账也复用它）。"""

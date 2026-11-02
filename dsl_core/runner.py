@@ -64,20 +64,17 @@ def run(
         compile_data,
         compile_parameters,
         constraints_builder,
+        needs_partial,
         stages_builder,
     )
     from .validator import validate_dsl
 
-    # exclude / at_most_one 都是"允许少修"的明确信号：完整模式把每个任务强制
-    # 排入（product_planner 里 sum(x)==1），跟 exclude 的 sum(x)==0、
-    # at_most_one 的"这批里最多排一个"直接矛盾，必然判不可行。
-    #
-    # at_least_one 不在此列：它只说"至少一个"，没说其余能不能排，完整模式
-    # 下恒真（本来就全排），切 partial 反而会把"全修"降级成"挑一个"。
-    _PARTIAL_HINTS = {"exclude", "at_most_one"}
-    if not partial and any(
-        str(spec.get("type")) in _PARTIAL_HINTS for spec in (dsl.get("constraints") or [])
-    ):
+    # exclude / at_most_one / cardinality 上限都是"允许少修"的明确信号：
+    # 完整模式把每个任务强制排入（product_planner 里 sum(x)==1），跟 exclude 的
+    # sum(x)==0、"这批里最多排一个"、"最多完成 8 个"直接矛盾，必然判不可行。
+    # at_least_one 不在此列（完整模式下它恒真，切 partial 会把"全修"降级成"挑一个"）。
+    # 判定逻辑收在 compiler.needs_partial，执行器和原话对账共用同一份，别各写一套。
+    if not partial and needs_partial(dsl):
         partial = True
 
     load_project, candidates, heuristic, solve = _solver_modules()

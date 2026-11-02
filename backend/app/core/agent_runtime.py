@@ -400,6 +400,7 @@ class AgentRuntime:
                     content=str(pending.get("sourcePrompt") or content),
                     memory=memory,
                     base_version_id=pending.get("baseVersionId"),
+                    utterance=pending.get("utterance"),
                 )
             try:
                 request = PlanningRequest(**pending["request"])
@@ -416,6 +417,7 @@ class AgentRuntime:
                 content=str(pending.get("sourcePrompt") or content),
                 request=request,
                 memory=memory,
+                utterance=pending.get("utterance"),
             )
 
         if is_solve_execution_command(content):
@@ -1175,6 +1177,7 @@ class AgentRuntime:
         content: str,
         memory,
         base_version_id: str | None = None,
+        utterance: str | None = None,
     ) -> AgentResponse:
         """DSL 变更确认后的求解：绑定预览时的基版，注入 DSL 约束/目标。"""
         base_version = self.versions.get(base_version_id) if base_version_id else None
@@ -1187,6 +1190,7 @@ class AgentRuntime:
             request=request,
             memory=memory,
             dsl=dsl,
+            utterance=utterance,
         )
 
     def _start_planning_solve(
@@ -1198,6 +1202,7 @@ class AgentRuntime:
         memory,
         pending_batch: dict[str, Any] | None = None,
         dsl: dict[str, Any] | None = None,
+        utterance: str | None = None,
     ) -> AgentResponse:
         if not self.jobs:
             return self._finalize_response(
@@ -1297,6 +1302,7 @@ class AgentRuntime:
             request,
             artifact,
             dsl,
+            utterance,
         )
         return response
 
@@ -1329,6 +1335,7 @@ class AgentRuntime:
                     content=content,
                     memory=memory,
                     base_version_id=pending.get("baseVersionId"),
+                    utterance=pending.get("utterance"),
                 )
             else:
                 request = PlanningRequest(**pending["request"])
@@ -1337,6 +1344,7 @@ class AgentRuntime:
                     content=content,
                     request=request,
                     memory=memory,
+                    utterance=pending.get("utterance"),
                 )
         except (KeyError, TypeError, ValueError) as exc:
             return {"ok": False, "message": f"待确认的变更已经失效：{exc}"}
@@ -1613,6 +1621,7 @@ class AgentRuntime:
         conversation_id: str,
         selected_version,
         sink: StreamSink | None,
+        user_message: str = "",
     ) -> AgentToolbox:
         def on_tool(name: str, _result: dict[str, Any]) -> None:
             if sink:
@@ -1638,6 +1647,7 @@ class AgentRuntime:
             on_tool_trace=self._record_tool_call,
             jobs=self.jobs,
             on_submit_change=self._submit_pending_change,
+            user_message=user_message,
         )
 
     def _answer_with_conversation_agent(
@@ -1650,7 +1660,9 @@ class AgentRuntime:
         selected_version,
         sink: StreamSink | None,
     ) -> str:
-        toolbox = self._build_toolbox(conversation_id, selected_version, sink)
+        # 原话一起交给工具盒：solve 要用它跟解析出的 DSL 对账，
+        # 不能拿模型转写的 instruction 当原话。
+        toolbox = self._build_toolbox(conversation_id, selected_version, sink, user_message=content)
         snapshot = self.memory_cache.get(conversation_id, len(history))
         if snapshot is None:
             snapshot = build_memory_snapshot(
@@ -1888,12 +1900,19 @@ class AgentRuntime:
         request: PlanningRequest,
         artifact,
         dsl: dict[str, Any] | None = None,
+        utterance: str | None = None,
     ) -> None:
         assert self.jobs is not None
         produced_version_id: str | None = None
         try:
             self.jobs.mark_running(job_id)
-            raw_result = self.product_executor.execute(request, job_id, artifact.model_fingerprint, dsl=dsl)
+            raw_result = self.product_executor.execute(
+                request,
+                job_id,
+                artifact.model_fingerprint,
+                dsl=dsl,
+                utterance=utterance,
+            )
             current = self.jobs.get(job_id)
             if not current or current.status == "CANCELLED":
                 return
