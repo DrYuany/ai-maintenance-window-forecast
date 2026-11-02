@@ -35,6 +35,18 @@ INDEX_KINDS: dict[str, dict[str, str]] = {
     "moment": {"说明": "规划期内的一个时刻", "性质": "开放"},
     "window": {"说明": "窗口编号", "性质": "离散"},
     "strategy": {"说明": "四种目标策略之一", "性质": "离散"},
+    "项": {"说明": "改的是哪一个量（风速/浪高/电价）", "性质": "离散"},
+    "端": {"说明": "窗口的开始还是结束", "性质": "离散"},
+    "粒度": {"说明": "按天还是按窗口判定", "性质": "离散"},
+}
+
+# 可选索引的取值域：给了就校验，不给就按该维全改/默认处理。
+OPTIONAL_ENUMS: dict[str, tuple[str, ...]] = {
+    "项": ("风速", "浪高", "电价"),
+    "端": ("开始", "结束"),
+    "粒度": ("天", "窗口"),
+    "严重度": ("高", "中", "低"),
+    "海况": ("常态", "恶劣但安全"),
 }
 
 # 组（group）能取的类别。全部离散，除「任务清单」开放。
@@ -76,6 +88,7 @@ class Slot:
     reconcile: str = ""             # 对账函数名，注册即承诺，不许空
     examples: tuple[str, ...] = ()
     note: str = ""
+    optional: tuple[str, ...] = ()  # 可省略的索引维度（省略 = 该维全改/取默认）
 
 
 # ── A 组：标量参数（走 overrides） ──────────────────────────────────────
@@ -211,7 +224,7 @@ SLOTS: dict[str, Slot] = {
         name="budget_max", group="G", label="预算上限", route="limits_or_closure",
         index=(("口径", "budget_口径"), ("组", "group")), default=None, default_note="不设上限",
         unit="元或艘天", value_type="float", bounds=(0, 1e12), consumption="model",
-        strength="hard", reconcile="reconcile_budget",
+        strength="hard", reconcile="reconcile_budget", optional=("组",),
         examples=("现金不超 80 万", "总成本压到 200 万内", "人工费单列不超 50 万",
                   "高危备件费不超 30 万", "租船最多 5 天"),
         note="现金/总成本走内核 limits；人工/备件/租船天走注入口",
@@ -227,24 +240,24 @@ SLOTS: dict[str, Slot] = {
     ),
     "same_bucket": Slot(
         name="same_bucket", group="H", label="安排在同一天/同一窗口", route="closure",
-        index=(("集合", "task_set"),), default=None, default_note="不设共现",
-        value_type="enum", consumption="model", strength="hard",
-        reconcile="reconcile_same_bucket",
+        index=(("集合", "task_set"), ("粒度", "粒度")), default=None, default_note="不设共现",
+        value_type="act", consumption="model", strength="hard",
+        reconcile="reconcile_same_bucket", optional=("粒度",),
         examples=("018 和 022 同一天", "这三个放同一个窗口"),
         note="N 元同样是链式相等，零新形态",
     ),
     "all_diff": Slot(
         name="all_diff", group="H", label="分在不同天", route="closure",
-        index=(("集合", "task_set"),), default=None, default_note="不设互异",
-        value_type="enum", consumption="model", strength="hard",
-        reconcile="reconcile_all_diff",
+        index=(("集合", "task_set"), ("粒度", "粒度")), default=None, default_note="不设互异",
+        value_type="act", consumption="model", strength="hard",
+        reconcile="reconcile_all_diff", optional=("粒度",),
         examples=("018 和 022 不许同一天", "这三台风机分在不同天"),
         note="新形态（CP-SAT AllDifferent），已过加族评审；二元时吃掉原来的 diff_bucket",
     ),
     "sev_before": Slot(
         name="sev_before", group="H", label="严重度层间硬顺序", route="closure",
         index=(("层对", "severity_pair"),), default=None, default_note="关",
-        value_type="bool", consumption="model", strength="hard",
+        value_type="act", consumption="model", strength="hard",
         reconcile="reconcile_sev_before",
         examples=("高危没干完不许开中危",),
     ),
@@ -259,7 +272,7 @@ SLOTS: dict[str, Slot] = {
     "scope_only": Slot(
         name="scope_only", group="I", label="只修这些", route="closure",
         index=(("范围", "group"),), default=None, default_note="全部",
-        value_type="bool", consumption="model", strength="hard",
+        value_type="act", consumption="model", strength="hard",
         reconcile="reconcile_scope_only",
         examples=("这轮只修叶片", "只在窗口03 里干", "只修风机001", "只修这五个任务"),
         note="编译成「补集压零」。与 bucket_max 互补：话里有「只」用这个，有「不/别」用 bucket_max",
@@ -270,7 +283,7 @@ SLOTS: dict[str, Slot] = {
         index=(("部件", "part"), ("严重度", "severity"), ("海况", "sea")),
         default=None, default_note="部件库原值", unit="小时", value_type="float",
         bounds=(0.01, 1000), consumption="candidates", strength="hard",
-        reconcile="reconcile_part_hours",
+        reconcile="reconcile_part_hours", optional=("严重度", "海况"),
         examples=("齿轮箱高危按 20 小时算", "恶劣海况工时翻倍"),
     ),
     "part_arrival": Slot(
@@ -282,23 +295,23 @@ SLOTS: dict[str, Slot] = {
     ),
     "weather": Slot(
         name="weather", group="J", label="某日海况假设", route="timeline",
-        index=(("日期", "day"),), default=None, default_note="快照原值",
+        index=(("日期", "day"), ("项", "项")), default=None, default_note="快照原值",
         value_type="float", consumption="candidates", strength="hard",
-        reconcile="reconcile_weather",
+        reconcile="reconcile_weather", optional=("项",),
         examples=("11月8号风速按 15 米算", "那天浪高 2.5 米"),
     ),
     "hourly": Slot(
         name="hourly", group="J", label="某时刻电价/风速假设", route="timeline",
-        index=(("时刻", "moment"),), default=None, default_note="快照原值",
+        index=(("时刻", "moment"), ("项", "项")), default=None, default_note="快照原值",
         value_type="float", consumption="candidates", strength="hard",
-        reconcile="reconcile_hourly",
+        reconcile="reconcile_hourly", optional=("项",),
         examples=("明天上午电价按 1.2 元算",),
     ),
     "window": Slot(
         name="window", group="J", label="窗口起止假设", route="timeline",
-        index=(("窗口", "window"),), default=None, default_note="快照原值",
+        index=(("窗口", "window"), ("端", "端")), default=None, default_note="快照原值",
         value_type="minutes", consumption="candidates", strength="hard",
-        reconcile="reconcile_window",
+        reconcile="reconcile_window", optional=("端",),
         examples=("窗口03 推迟两天开始",),
     ),
     # A 组里唯一不是系数的：部分排程开关

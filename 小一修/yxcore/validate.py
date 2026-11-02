@@ -64,6 +64,14 @@ def _check_value(patch: Patch, slot: S.Slot, data) -> list[str]:
     """第 3 条：数值类型 / 单位 / 区间。"""
     errors: list[str] = []
     value = patch.value
+    if slot.value_type == "act":
+        # 激活类：这一族只需要「点亮」，值可以省略。
+        if value is not None and not (value is True or value in ("是", "启用", 1)):
+            errors.append(f"{slot.label}：这是开关型旋钮，不需要数值，收到 {value!r}")
+        return errors
+    if value is None:
+        errors.append(f"{slot.label}：需要一个值")
+        return errors
     if slot.value_type == "bool":
         if not isinstance(value, bool) and value not in ("是", "否", "允许", "不允许"):
             errors.append(f"{slot.label}：需要 是/否，收到 {value!r}")
@@ -117,6 +125,14 @@ def _check_index(data, patch: Patch, slot: S.Slot) -> list[str]:
             from dsl_core.registry import entities
             error = None if entities.resolve_task(data, str(spec.get("value"))) else \
                 f"任务 {spec.get('value')!r} 不在告警快照里"
+        elif kind in ("task_seq", "task_set"):
+            from dsl_core.registry import entities
+            ids = spec.get("value")
+            if not isinstance(ids, (list, tuple)) or len(ids) < 2:
+                error = f"需要至少两个任务编号，收到 {ids!r}"
+            else:
+                missing = [v for v in ids if entities.resolve_task(data, str(v)) is None]
+                error = f"任务 {missing} 不在告警快照里" if missing else None
         elif kind == "metric":
             error = None if spec.get("value") in S.METRIC_NAMES else \
                 f"目标量 {spec.get('value')!r} 未登记"
@@ -131,13 +147,19 @@ def _check_index(data, patch: Patch, slot: S.Slot) -> list[str]:
         elif kind == "budget_口径":
             error = None if spec.get("value") in S.BUDGET_KINDS else \
                 f"预算口径 {spec.get('value')!r} 未登记，能填：{'、'.join(S.BUDGET_KINDS)}"
-        elif kind in ("part", "window", "day", "moment", "severity", "sea", "strategy"):
+        elif kind in S.OPTIONAL_ENUMS:
+            allowed = S.OPTIONAL_ENUMS[kind]
+            error = None if spec.get("value") in allowed else \
+                f"{kind} 只能填 {'、'.join(allowed)}，收到 {spec.get('value')!r}"
+        elif kind in ("part", "window", "day", "moment", "strategy"):
             error = None  # 数据类索引在落地（apply）时用内核自身的校验再挡一次
         else:
             error = f"索引种类 {kind} 没有解析器"
         if error:
             errors.append(f"{patch.slot} 的 {key}：{error}")
     for key in declared:
+        if key in slot.optional:
+            continue  # 可省略：省略即该维全改/取默认，已在槽位说明里写死
         if key not in patch.index and slot.route not in ("data", "timeline"):
             errors.append(f"{patch.slot}：缺索引 {key}（{declared[key]}）")
     return errors

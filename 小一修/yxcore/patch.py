@@ -70,8 +70,8 @@ def parse_patch(raw: dict[str, Any]) -> tuple[Patch | None, str | None]:
         return None, f"索引必须是对象，收到 {type(index).__name__}"
     if op == "reset" and raw.get("value") is not None:
         return None, "reset 是拧回默认，不该带值"
-    if op != "reset" and (raw.get("value") is None and (raw.get("值") is None)):
-        return None, f"运算 {op} 需要一个值"
+    # 值可以在这里缺省（开关型旋钮不需要数值），但校验器会对需要数值的族报错——
+    # 不在这一层静默补默认值，免得"漏给值"变成"当成 1"。
     value = raw.get("value") if raw.get("value") is not None else raw.get("值")
     return Patch(
         slot=slot, index=index, op=op, value=value,
