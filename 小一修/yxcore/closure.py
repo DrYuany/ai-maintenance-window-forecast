@@ -255,7 +255,7 @@ def _compile_sev(patch, ctx: _Ctx) -> None:
 
 
 def _compile_scope_only(patch, ctx: _Ctx) -> None:
-    group, error = S.group_predicate(ctx.data, patch.index.get("范围", {}))
+    group, error = S.scope_predicate(ctx.data, patch.index.get("范围", {}))
     if error:
         ctx.errors.append(f"scope_only：{error}")
         return

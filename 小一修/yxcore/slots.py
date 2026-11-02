@@ -22,6 +22,7 @@ from typing import Any, Callable
 # 每个种类登记：提示词里怎么描述、它的取值是离散枚举还是开放填写。
 INDEX_KINDS: dict[str, dict[str, str]] = {
     "group": {"说明": "按什么类别圈定一批任务", "性质": "混合"},
+    "group_or_bucket": {"说明": "类别或时段皆可（只限 scope_only 圈范围用）", "性质": "混合"},
     "bucket": {"说明": "哪一段时间（按开工时间计）", "性质": "混合"},
     "task": {"说明": "点名一个任务编号", "性质": "离散"},
     "task_seq": {"说明": "有序任务序列，长度≥2", "性质": "开放"},
@@ -275,7 +276,7 @@ SLOTS: dict[str, Slot] = {
     # I 组 · 只修哪些
     "scope_only": Slot(
         name="scope_only", group="I", label="只修这些", route="closure",
-        index=(("范围", "group"),), default=None, default_note="全部",
+        index=(("范围", "group_or_bucket"),), default=None, default_note="全部",
         value_type="act", consumption="model", strength="hard",
         reconcile="reconcile_scope_only",
         examples=("这轮只修叶片", "只在窗口03 里干", "只修风机001", "只修这五个任务"),
@@ -432,6 +433,17 @@ def group_predicate(data, spec: dict[str, Any]) -> tuple[Callable[[dict], bool] 
             return None, f"作业线 {line} 超出当前可用线数"
         return (lambda c, ln=line: c["作业线"] == ln), None
     return None, f"未知的组类别 {kind!r}，可填：{'、'.join(GROUP_KINDS)}"
+
+
+def scope_predicate(data, spec: dict[str, Any]) -> tuple[Callable[[dict], bool] | None, str | None]:
+    """scope_only 的「范围」：既能是类别（部件/风机/严重度…）也能是时段（窗口/某日/区间）。
+
+    只有 scope_only 开这个口子——它的语义就是「圈一个范围」，范围天然可跨类别/时段。
+    其他槽位的组仍然不认时段，R1 边界（整轮 vs 某段时光）不因此被破坏。
+    """
+    if (spec.get("kind") or "全部") in GROUP_KINDS:
+        return group_predicate(data, spec)
+    return bucket_predicate(data, spec)
 
 
 def _resolve_window(data, ref: str) -> str | None:

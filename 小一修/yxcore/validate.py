@@ -119,6 +119,8 @@ def _check_index(data, patch: Patch, slot: S.Slot) -> list[str]:
             continue
         if kind == "group":
             _, error = S.group_predicate(data, spec)
+        elif kind == "group_or_bucket":
+            _, error = S.scope_predicate(data, spec)
         elif kind == "bucket":
             _, error = S.bucket_predicate(data, spec)
         elif kind == "task":

@@ -187,7 +187,8 @@ def _reconcile_sev(patch: Patch, ctx: Ctx) -> tuple[str, str]:
 
 
 def _reconcile_scope_only(patch: Patch, ctx: Ctx) -> tuple[str, str]:
-    rows = _group_rows(ctx, patch.index.get("范围"))
+    pred, _ = S.scope_predicate(ctx.data, patch.index.get("范围") or {"kind": "全部"})
+    rows = [s for s in ctx.selected if pred(s)] if pred else []
     outside = len(ctx.selected) - len(rows)
     return (PASS, f"产物 {len(ctx.selected)} 个任务全部落在圈定范围内") if outside == 0 else \
         (VIOLATION, f"产物里有 {outside} 个任务在圈定范围之外")
