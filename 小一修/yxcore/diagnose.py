@@ -38,6 +38,42 @@ def _capacity_hint(patch: Patch, data, options) -> str | None:
     return None
 
 
+def _describe_patch(patch: Patch, data) -> str:
+    """把补丁说成一句话：哪个旋钮、哪一格、拧到几。
+
+    光靠原话归因不够——原话可能没写、也可能说的是另一件事；归因必须自带格子信息，
+    否则用户看不出要松开哪一格。
+    """
+    slot = S.SLOTS.get(patch.slot) or S.PARAM_SLOTS.get(patch.slot)
+    label = slot.label if isinstance(slot, S.Slot) else f"参数「{patch.slot}」"
+    cells = []
+    for key, spec in patch.index.items():
+        if key in ("组", "范围"):
+            cells.append(S.describe_group(data, spec))
+            continue
+        if not isinstance(spec, dict):
+            cells.append(str(spec))
+            continue
+        value = spec.get("value")
+        joiner = "→" if key == "层对" else "、"  # 顺序用箭头，集合用顿号
+        cells.append(f"{key}={joiner.join(str(v) for v in value)}"
+                     if isinstance(value, (list, tuple)) else f"{key}={value}")
+    cell = "·".join(cells)
+    if patch.op == "reset":
+        tail = "拧回默认"
+    elif patch.value is None:
+        tail = "点亮"
+    else:
+        tail = {"=": f"={patch.value}", "*": f"×{patch.value}",
+                "+": f"+{patch.value}", "-": f"−{patch.value}"}.get(patch.op, str(patch.value))
+    return f"{label}（{cell}）{tail}" if cell else f"{label} {tail}"
+
+
+def _label(patch: Patch, data) -> str:
+    return f"「{patch.utterance}」（{_describe_patch(patch, data)}）" if patch.utterance else \
+        f"「{_describe_patch(patch, data)}」"
+
+
 def _static_reason(patch: Patch, data, options) -> str | None:
     """静态算得出来的矛盾：不用跑求解器就能判的。"""
     if patch.slot == "count_min" and isinstance(patch.value, (int, float)):
@@ -76,7 +112,7 @@ def explain_infeasible(patches: list[Patch], data, options, info: dict[str, Any]
     for patch in patches:
         reason = _static_reason(patch, data, options)
         if reason:
-            static.append(f"「{patch.utterance or patch.slot}」：{reason}")
+            static.append(f"{_label(patch, data)}：{reason}")
     if static:
         lines.append("直接能看出来的矛盾：")
         lines.extend("  * " + item for item in static)
@@ -92,7 +128,7 @@ def explain_infeasible(patches: list[Patch], data, options, info: dict[str, Any]
             run([patch], base_id=base_id, seconds=seconds, _diagnose=False)
         except Exception as exc:  # noqa: BLE001 - 只关心能不能跑出方案
             hint = _capacity_hint(patch, data, options)
-            culprits.append(f"「{patch.utterance or patch.slot}」单独就要不到方案"
+            culprits.append(f"{_label(patch, data)} 单独就要不到方案"
                             + (f"；{hint}" if hint else f"；{str(exc)[:120]}"))
     if culprits:
         lines.append("逐条查了一遍，这几条单独就排不出：")

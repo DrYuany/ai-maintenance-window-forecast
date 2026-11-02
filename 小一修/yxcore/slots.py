@@ -15,6 +15,9 @@
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -27,6 +30,8 @@ INDEX_KINDS: dict[str, dict[str, str]] = {
     "task": {"说明": "点名一个任务编号", "性质": "离散"},
     "task_seq": {"说明": "有序任务序列，长度≥2", "性质": "开放"},
     "task_set": {"说明": "任务集合，长度≥2，无序", "性质": "开放"},
+    "severity": {"说明": "严重度层（高/中/低）", "性质": "离散"},
+    "sea": {"说明": "海况（常态/恶劣但安全）", "性质": "离散"},
     "severity_pair": {"说明": "两个严重度层，如 高→中", "性质": "离散"},
     "metric": {"说明": "14 个已登记目标量之一", "性质": "离散"},
     "budget_口径": {"说明": "花钱的口径", "性质": "离散"},
@@ -67,7 +72,26 @@ METRIC_NAMES = (
     "人工费", "备件费", "船舶艘天",
 )
 
-STRATEGY_NAMES = ("成本最低优先", "高风险优先抢修", "最早完工优先", "最多完成数优先")
+_STRATEGY_FALLBACK: tuple[str, ...] = ()
+
+
+def _load_strategy_names() -> tuple[str, ...]:
+    """策略名从内核的目标模板文件反向读，不在小一修这边另编一份。
+
+    自己编名字的代价是灾难性的：内核按模板编号查表，查不到就 StopIteration 崩在求解里，
+    而且崩点离用户的那句「越早干完越好」隔着三层。名字只有内核这一份事实来源。
+    """
+    path = (Path(__file__).resolve().parents[2] / "maintenance-milp-modeler"
+            / "references" / "四种目标模板.json")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        names = tuple(t["模板编号"] for t in payload["模板"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ()
+    return names
+
+
+STRATEGY_NAMES = _load_strategy_names() or _STRATEGY_FALLBACK
 
 
 @dataclass(frozen=True)
@@ -336,6 +360,10 @@ def audit_registry() -> list[str]:
     对账函数为空是最严重的一类——它会让「加了族却没对账」这个大一修的窟窿重新出现。
     """
     errors: list[str] = []
+    if not STRATEGY_NAMES:
+        errors.append("策略清单没从内核「四种目标模板.json」读到——小一修不许自己编策略名")
+    elif "成本最低优先" not in STRATEGY_NAMES:
+        errors.append(f"内核策略模板里没有「成本最低优先」，读到的是：{'、'.join(STRATEGY_NAMES)}")
     for name, slot in SLOTS.items():
         if not slot.label:
             errors.append(f"{name}: 缺人话名")
@@ -348,7 +376,7 @@ def audit_registry() -> list[str]:
         if not slot.examples:
             errors.append(f"{name}: 缺业务话术例子（提示词与回归集都靠它）")
         for index_name, kind in slot.index:
-            if kind not in INDEX_KINDS and kind not in ("severity", "sea"):
+            if kind not in INDEX_KINDS:
                 errors.append(f"{name}: 索引 {index_name} 的种类 {kind} 未登记")
     for alias, system_name in PARAM_ALIASES.items():
         if alias not in PARAM_SLOTS:
@@ -431,8 +459,39 @@ def group_predicate(data, spec: dict[str, Any]) -> tuple[Callable[[dict], bool] 
             return None, f"作业线必须是数字，收到 {value!r}"
         if not 1 <= line <= min(data.params["最多作业线数"], data.params["人员总上限"]):
             return None, f"作业线 {line} 超出当前可用线数"
-        return (lambda c, ln=line: c["作业线"] == ln), None
+        # 候选行分两种：内核 build_model 展开后的（带「作业线」）和原始候选（不带——
+        # 线是求解时才定的）。不带线意味着「可能上任何一条船」，静态计数按可能为真算。
+        return (lambda c, ln=line: c.get("作业线") is None or c["作业线"] == ln), None
     return None, f"未知的组类别 {kind!r}，可填：{'、'.join(GROUP_KINDS)}"
+
+
+def describe_group(data, spec: dict[str, Any] | None) -> str:
+    """把「组」索引翻译成人话，给对账和回显用。
+
+    对账只说「排了 2 个、要求至少 1」是不够的——用户看不出数的是哪个格子，
+    证据链不完整。这里把格子点名：部件→部件名称、作业线→几号船。
+    """
+    spec = spec or {}
+    kind = spec.get("kind")
+    value = spec.get("value")
+    if kind in (None, "全部"):
+        return "全部任务"
+    if kind == "严重度":
+        return f"{value}严重度的任务"
+    if kind == "部件":
+        pid = _resolve_entities().resolve_part(data, str(value))
+        name = data.parts.get(pid or "", {}).get("部件名称") or str(value)
+        return f"{name}的任务"
+    if kind == "风机":
+        return f"{value}的活" if str(value).startswith("风机") else f"风机{value}的活"
+    if kind == "任务":
+        return str(value)
+    if kind == "任务清单":
+        count = len(value) if isinstance(value, (list, tuple)) else 0
+        return f"点名的 {count} 个任务"
+    if kind == "作业线":
+        return f"{value} 号船"
+    return str(value) if value is not None else "全部任务"
 
 
 def scope_predicate(data, spec: dict[str, Any]) -> tuple[Callable[[dict], bool] | None, str | None]:

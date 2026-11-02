@@ -98,8 +98,16 @@ def needs_partial(patches: list[Patch], data, options: dict[str, list[dict]] | N
             ids = S.group_task_ids(data, patch.index.get("组", {})) or []
             if patch.value < len(ids):
                 return True
-        elif patch.slot == "scope_only":
-            return True
+        elif patch.slot == "scope_only" and options:
+            # 只有「圈定范围把某个任务整轮排除在候选之外」时才需要切部分排程。
+            # 无条件切会让「只在窗口03 干」这类根本没排除任何任务的意图也丢任务——
+            # 用户没说可以少修，多丢一个就是欺骗。
+            group, error = S.scope_predicate(data, patch.index.get("范围", {}))
+            if error:
+                continue
+            for tid, rows in options.items():
+                if rows and not any(group(c) for c in rows):
+                    return True
         elif patch.slot == "bucket_max" and patch.value == 0 and options:
             bucket, error = S.bucket_predicate(data, patch.index.get("桶", {}))
             group, gerror = S.group_predicate(data, patch.index.get("组", {}))

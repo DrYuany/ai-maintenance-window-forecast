@@ -13,6 +13,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPTS = PROJECT_ROOT / "maintenance-milp-modeler" / "scripts"
 
+# dsl_core（部件目录、实体解析）在项目根下；不挂上，脱离项目根跑（如 eval 脚本）就 import 不到。
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 
 def solver_modules():
     """挂载并返回求解内核的公开入口。"""

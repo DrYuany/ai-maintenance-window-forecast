@@ -82,7 +82,10 @@ def run(
     output.mkdir(parents=True, exist_ok=True)
 
     hint = modules["heuristic"](data, options, "严重性优先")
+    # 策略只有一份出口：编好的请求里带就用它的，否则用 run 的默认。
+    # 两边都传会变成同一个关键字传两次（strategy 槽位此前从未端到端跑过，就是这个bug）
     kwargs = request.as_solve_kwargs()
+    kwargs.pop("strategy", None)
     selected, info = modules["solve"](
         data, options, output, seconds=seconds, strategy=strategy, hint=hint, **kwargs
     )
@@ -113,6 +116,14 @@ def run(
     if audit["违例"] or audit["未核对"]:
         raise YxError(["意图对账未通过：" + describe_audit(audit)], warnings)
     audit_text = describe_audit(audit)
+    # 状态诚实性：没证到最优就要说出来。时限内波动是求解器的正常行为，
+    # 但「方案可能随机器而变」这件事必须写进产物，不能让复现性悄悄失效。
+    unproven = info.get("未达最优阶段") or []
+    if unproven:
+        warnings = list(warnings) + [
+            f"这些目标没证到最优（{'、'.join(unproven)}）：方案在时限内波动，"
+            "同一批旋钮换台机器排出来的内容可能不同"
+        ]
     return {
         "排程": selected,
         "推荐": recommended,
@@ -124,6 +135,8 @@ def run(
         "数据": data.meta,
         "警告": warnings,
         "部分排程": request.partial,
+        "已证最优": not unproven,
+        "未证最优目标": unproven,
         "请求": request,
     }
 

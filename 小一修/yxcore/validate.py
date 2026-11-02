@@ -149,6 +149,12 @@ def _check_index(data, patch: Patch, slot: S.Slot) -> list[str]:
         elif kind == "budget_口径":
             error = None if spec.get("value") in S.BUDGET_KINDS else \
                 f"预算口径 {spec.get('value')!r} 未登记，能填：{'、'.join(S.BUDGET_KINDS)}"
+        elif kind in ("severity", "sea"):
+            # part_hours 的可选子维度；kind 用英文登记，但模型常照提示词写中文，两种都收
+            enum_key = "严重度" if kind == "severity" else "海况"
+            allowed = S.OPTIONAL_ENUMS[enum_key]
+            error = None if spec.get("value") in allowed else \
+                f"{enum_key} 只能填 {'、'.join(allowed)}，收到 {spec.get('value')!r}"
         elif kind in S.OPTIONAL_ENUMS:
             allowed = S.OPTIONAL_ENUMS[kind]
             error = None if spec.get("value") in allowed else \

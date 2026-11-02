@@ -119,7 +119,15 @@ def _compile_bucket(patch, ctx: _Ctx) -> None:
 
 
 def _compile_earliest(patch, ctx: _Ctx) -> None:
-    minute = int(patch.value)
+    # 值可能是 ISO 时刻字符串（校验层已认过），也可能是分钟数；统一折成分钟。
+    if isinstance(patch.value, str):
+        try:
+            minute = int(ctx.data.minute(patch.value))
+        except (ValueError, AttributeError):
+            ctx.errors.append(f"earliest：时刻 {patch.value!r} 读不出来")
+            return
+    else:
+        minute = int(patch.value)
     group, error = S.group_predicate(ctx.data, patch.index.get("组", {}))
     if error:
         ctx.errors.append(f"earliest：{error}")

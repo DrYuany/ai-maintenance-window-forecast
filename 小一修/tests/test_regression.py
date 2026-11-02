@@ -21,7 +21,7 @@ from yxcore.patch import Patch, parse_patch
 from yxcore.validate import validate
 
 HERE = Path(__file__).resolve().parent
-CASES = json.loads((HERE / "utterances.json").read_text(encoding="utf-8"))
+CASES = json.loads((HERE.parent / "eval" / "utterances.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="module")

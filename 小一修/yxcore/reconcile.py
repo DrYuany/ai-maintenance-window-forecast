@@ -52,11 +52,12 @@ def _reconcile_count(patch: Patch, ctx: Ctx) -> tuple[str, str]:
     rows = _group_rows(ctx, patch.index.get("组"))
     got = len(rows)
     want = int(patch.value)
+    who = S.describe_group(ctx.data, patch.index.get("组"))
     if patch.slot == "count_min":
-        return (PASS, f"排了 {got} 个，要求至少 {want}") if got >= want else \
-            (VIOLATION, f"只排了 {got} 个，要求至少 {want} 个")
-    return (PASS, f"排了 {got} 个，上限 {want}") if got <= want else \
-        (VIOLATION, f"排了 {got} 个，超过上限 {want}")
+        return (PASS, f"{who}：排了 {got} 个，要求至少 {want}") if got >= want else \
+            (VIOLATION, f"{who}：只排了 {got} 个，要求至少 {want} 个")
+    return (PASS, f"{who}：排了 {got} 个，上限 {want}") if got <= want else \
+        (VIOLATION, f"{who}：排了 {got} 个，超过上限 {want}")
 
 
 def _reconcile_bucket(patch: Patch, ctx: Ctx) -> tuple[str, str]:
@@ -64,11 +65,12 @@ def _reconcile_bucket(patch: Patch, ctx: Ctx) -> tuple[str, str]:
     got = len(rows)
     want = int(patch.value)
     label = patch.index.get("桶", {}).get("value", "全程")
+    who = S.describe_group(ctx.data, patch.index.get("组"))
     if patch.slot == "bucket_min":
-        return (PASS, f"{label} 内排了 {got} 个，要求至少 {want}") if got >= want else \
-            (VIOLATION, f"{label} 内只排了 {got} 个，要求至少 {want} 个")
-    return (PASS, f"{label} 内排了 {got} 个，上限 {want}") if got <= want else \
-        (VIOLATION, f"{label} 内排了 {got} 个，超过上限 {want}")
+        return (PASS, f"{label} 内 {who}：排了 {got} 个，要求至少 {want}") if got >= want else \
+            (VIOLATION, f"{label} 内 {who}：只排了 {got} 个，要求至少 {want} 个")
+    return (PASS, f"{label} 内 {who}：排了 {got} 个，上限 {want}") if got <= want else \
+        (VIOLATION, f"{label} 内 {who}：排了 {got} 个，超过上限 {want}")
 
 
 def _reconcile_earliest(patch: Patch, ctx: Ctx) -> tuple[str, str]:
@@ -121,8 +123,9 @@ def _reconcile_budget(patch: Patch, ctx: Ctx) -> tuple[str, str]:
         return UNCHECKED, f"结算里没有 {key} 这个口径，无法核对"
     got = float(ctx.rec[key])
     want = float(patch.value)
-    return (PASS, f"{key} {got}，上限 {want}") if got <= want + 1e-6 else \
-        (VIOLATION, f"{key} {got}，超过上限 {want}")
+    kind = patch.index.get("口径", {}).get("value")
+    return (PASS, f"{kind}（{key}）{got}，上限 {want}") if got <= want + 1e-6 else \
+        (VIOLATION, f"{kind}（{key}）{got}，超过上限 {want}")
 
 
 def _reconcile_before_seq(patch: Patch, ctx: Ctx) -> tuple[str, str]:
@@ -205,8 +208,15 @@ def _reconcile_part_hours(patch: Patch, ctx: Ctx) -> tuple[str, str]:
     want = float(patch.value)
     got = [round(float(ctx.data.parts[pid][k]), 6) for k in keys]
     ok = all(abs(g - want) < 1e-6 for g in got)
-    return (PASS, f"部件 {pid} 的 {len(keys)} 个工时刻都已改成 {want} 小时") if ok else \
-        (VIOLATION, f"部件 {pid} 的工时刻实际是 {got}，要求是 {want}")
+    label = _part_label(ctx.data, pid)
+    return (PASS, f"{label} 的 {len(keys)} 个工时刻都已改成 {want} 小时") if ok else \
+        (VIOLATION, f"{label} 的工时刻实际是 {got}，要求是 {want}")
+
+
+def _part_label(data, pid: str | None) -> str:
+    """对外说话用部件名称，不甩内部编号（用户看不懂「部件01」）。"""
+    name = data.parts.get(pid or "", {}).get("部件名称")
+    return f"{name}（{pid}）" if name else (pid or "未知部件")
 
 
 def _reconcile_part_arrival(patch: Patch, ctx: Ctx) -> tuple[str, str]:
@@ -215,11 +225,11 @@ def _reconcile_part_arrival(patch: Patch, ctx: Ctx) -> tuple[str, str]:
     minute = patch.value if isinstance(patch.value, (int, float)) else ctx.data.minute(str(patch.value))
     frozen = getattr(ctx.data, "part_freeze", {}).get(pid)
     if frozen is None:
-        return UNCHECKED, f"部件 {pid} 没有登记到货冻结，无法核对"
+        return UNCHECKED, f"{_part_label(ctx.data, pid)} 没有登记到货冻结，无法核对"
     early = [s["任务编号"] for s in ctx.selected
              if s["部件编号"] == pid and s["开始"] < minute]
-    return (PASS, f"{pid} 在 {ctx.data.stamp(minute)[:16]} 之前没有开工") if not early and frozen >= minute else \
-        (VIOLATION, f"{pid} 在到货前就开工了：{early}")
+    return (PASS, f"{_part_label(ctx.data, pid)} 在 {ctx.data.stamp(minute)[:16]} 之前没有开工") if not early and frozen >= minute else \
+        (VIOLATION, f"{_part_label(ctx.data, pid)} 在到货前就开工了：{early}")
 
 
 def _reconcile_weather(patch: Patch, ctx: Ctx) -> tuple[str, str]:
