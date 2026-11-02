@@ -176,6 +176,31 @@ def _boundary_text() -> str:
     return "\n".join(lines)
 
 
+def _turn_rules() -> str:
+    """多轮与复合需求的口径。不写这几条，模型会把「改主意」做成「加一条」。"""
+    return "\n".join([
+        "── 多轮与一句话多个要求（照这几条落） ──",
+        "1. 一句话里有几个要求就出几条补丁，各自独立；**不要**为了「合并」把两个不同格子"
+        "拼成一条，也不要把一条拆成两条写同一格。",
+        "2. 用户改主意（「改成…」「提高到…」「别超…了，改成…」）：输出**同一个 slot + 完全"
+        "相同的 index**，op 用 =（或 + - *）。索引照抄下面「当前已生效」里那一条，"
+        "一个字都别改——改一个字就是另一个格子，旧约束还在，等于加了条新的。",
+        "3. 用户要去掉某条（「刚才那条不要了」「取消现金上限」「不用管顺序了」）："
+        "op 用 reset，索引照抄那一条。要说「全都恢复默认」就为每一条各出一条 reset。",
+        "3b. 「改成」但换的是另一格（「现金不超80万」→「改成人工费不超50万」，口径变了；"
+        "「只修叶片」→「改成只修齿轮箱」，范围变了）：**先 reset 旧的那条，再给新的**。"
+        "旧的那条不撤，两条会一起生效，等于加了条更严的。",
+        "4. 相对量（涨两成/再加 5 万/降一点）只给 op 和数值，**不要**自己把上一轮的值算进去——"
+        "执行器会以当前生效值为基数折算。",
+        "5. 「只修」类（scope_only）有两种意图，看话里有没有「改成/换成」：",
+        "   * 换成另一个范围（「改成只修齿轮箱」）→ 先把上一轮那条 reset，再给新的"
+        "（两条scope_only 是**取交集**，只加新的会变成「只修叶片且只修齿轮箱」= 一个都修不成）",
+        "   * 追加一层限制（「而且只在窗口03」）→ 直接再加一条，不用撤",
+        "6. 用户指着上一轮说过的话（「刚才那个」「上一条」「那个上限」）却指不清是哪一格时："
+        "strength 报 unsure，不要猜一个格子。",
+    ])
+
+
 def _output_spec() -> str:
     return "\n".join([
         "输出只要一个 JSON 对象，不要解释、不要 markdown 代码块：",
@@ -199,8 +224,14 @@ def _output_spec() -> str:
     ])
 
 
-def build_prompt(data, options: dict[str, list[dict]] | None = None, *, extra: str = "") -> str:
-    """生成完整提示词。data 用来给离散索引附上当前数字护栏。"""
+def build_prompt(data, options: dict[str, list[dict]] | None = None, *, extra: str = "",
+                 session_text: str = "") -> str:
+    """生成完整提示词。data 用来给离散索引附上当前数字护栏。
+
+    ``session_text`` 是多轮时「当前已生效的旋钮」清单（由 ``Session.prompt_state``
+    生成，补丁原格式）。空串表示这是第一轮——第一轮不该出现这一段，
+    否则模型会以为已经有约束在生效。
+    """
     sections = [
         ROLE,
         "",
@@ -214,11 +245,18 @@ def build_prompt(data, options: dict[str, list[dict]] | None = None, *, extra: s
         "",
         _disambiguation(),
         "",
+    ]
+    if session_text:
+        # 放在多轮规则**之前**：规则里说「照抄下面那一条」，得先有那一条可抄
+        sections.extend(["── 当前已生效的旋钮（多轮累积） ──", session_text, ""])
+    sections.extend([
+        _turn_rules(),
+        "",
         "── 边界 ──",
         _boundary_text(),
         "",
         _output_spec(),
-    ]
+    ])
     if extra:
         sections.extend(["", "── 本次补充 ──", extra])
     return "\n".join(sections)

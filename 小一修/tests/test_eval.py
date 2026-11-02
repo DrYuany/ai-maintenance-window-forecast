@@ -1,7 +1,9 @@
 """把评测的快层挂进 pytest——评测只在手动跑时起作用，等于没有评测。
 
-E1（校验）/ E2离线（gold 与注册表一致）/ E4（提示词一致性）都不跑求解器，几秒就完，
-所以每次提交都跑。E3 要跑三十几次求解（约 5 分钟），留在 `eval/run_eval.py` 里单独跑。
+E1（校验）/ E2离线（gold 与注册表一致）/ E5（多轮状态机）/ E4（提示词一致性）
+都不跑求解器，几秒就完，所以每次提交都跑。
+E3（端到端）/ E6（复合需求，含求解）/ E7（多轮在线）要跑求解或调模型，
+留在 `eval/run_eval.py` 里单独跑。
 """
 from __future__ import annotations
 
@@ -23,6 +25,12 @@ def test_e1_validator_layer():
 
 def test_e2_gold_matches_registry():
     failures = run_eval.run_e2_offline()
+    assert not failures, "\n".join(failures)
+
+
+def test_e5_multiturn_state_machine():
+    """多轮语义：覆盖、叠加、撤销、改主意没撤旧的要拦下。"""
+    failures = run_eval.run_e5()
     assert not failures, "\n".join(failures)
 
 

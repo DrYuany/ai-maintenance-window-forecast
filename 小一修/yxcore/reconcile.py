@@ -117,15 +117,32 @@ def _reconcile_cap(patch: Patch, ctx: Ctx) -> tuple[str, str]:
 
 
 def _reconcile_budget(patch: Patch, ctx: Ctx) -> tuple[str, str]:
-    key = {"现金": "现金支出", "总成本": "总成本", "人工": "人工",
-           "备件": "备件", "租船天": "船舶艘天"}.get(patch.index.get("口径", {}).get("value"))
-    if key is None or key not in ctx.rec:
-        return UNCHECKED, f"结算里没有 {key} 这个口径，无法核对"
-    got = float(ctx.rec[key])
-    want = float(patch.value)
+    from . import costs  # noqa: PLC0415
+
     kind = patch.index.get("口径", {}).get("value")
-    return (PASS, f"{kind}（{key}）{got}，上限 {want}") if got <= want + 1e-6 else \
-        (VIOLATION, f"{kind}（{key}）{got}，超过上限 {want}")
+    key = {"现金": "现金支出", "总成本": "总成本", "人工": "人工",
+           "备件": "备件", "租船天": "船舶艘天"}.get(kind)
+    if key is None:
+        return UNCHECKED, f"预算口径 {kind!r} 未登记，无法核对"
+    spec = patch.index.get("组") or {"kind": "全部"}
+    whole = (spec.get("kind") or "全部") == "全部"
+    want = float(patch.value)
+    where = "整轮" if whole else S.describe_group(ctx.data, spec)
+
+    if whole:
+        if key not in ctx.rec:
+            return UNCHECKED, f"结算里没有 {key} 这个口径，无法核对"
+        got = float(ctx.rec[key])
+    else:
+        # 分组口径不能拿整轮结算去比——那会把「高危超了」和「整轮没超」混为一谈
+        if kind not in ("人工", "备件"):
+            return UNCHECKED, f"{kind} 不支持按「{where}」核对（只能整轮）"
+        pred, _ = S.group_predicate(ctx.data, spec)
+        rows = [s for s in ctx.selected if pred(s)] if pred else []
+        cost_of = costs.labor_yuan if kind == "人工" else costs.spare_yuan
+        got = sum(cost_of(ctx.data, s) for s in rows)
+    return (PASS, f"{where}的{kind} {round(got, 2)}，上限 {want}") if got <= want + 1e-6 else \
+        (VIOLATION, f"{where}的{kind} {round(got, 2)}，超过上限 {want}")
 
 
 def _reconcile_before_seq(patch: Patch, ctx: Ctx) -> tuple[str, str]:
@@ -190,11 +207,19 @@ def _reconcile_sev(patch: Patch, ctx: Ctx) -> tuple[str, str]:
 
 
 def _reconcile_scope_only(patch: Patch, ctx: Ctx) -> tuple[str, str]:
-    pred, _ = S.scope_predicate(ctx.data, patch.index.get("范围") or {"kind": "全部"})
+    spec = patch.index.get("范围") or {"kind": "全部"}
+    pred, _ = S.scope_predicate(ctx.data, spec)
     rows = [s for s in ctx.selected if pred(s)] if pred else []
     outside = len(ctx.selected) - len(rows)
-    return (PASS, f"产物 {len(ctx.selected)} 个任务全部落在圈定范围内") if outside == 0 else \
-        (VIOLATION, f"产物里有 {outside} 个任务在圈定范围之外")
+    # 「哪一格」必须点名：两条「只修」叠着用时，光说「都在范围内」看不出是哪一条兑现了
+    if (spec.get("kind") or "全部") in S.GROUP_KINDS:
+        where = S.describe_group(ctx.data, spec)
+    else:
+        where = f"{spec.get('value')} 这个时段" if spec.get("kind") != "日期区间" else \
+            f"{spec['value'][0]} 到 {spec['value'][1]}"
+    return (PASS, f"只修「{where}」：产物 {len(rows)} 个都在范围内，范围外 {outside} 个") \
+        if outside == 0 else \
+        (VIOLATION, f"只修「{where}」：产物里还有 {outside} 个任务在范围之外")
 
 
 def _reconcile_part_hours(patch: Patch, ctx: Ctx) -> tuple[str, str]:

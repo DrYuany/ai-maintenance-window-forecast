@@ -69,6 +69,17 @@ def parse_patch(raw: dict[str, Any]) -> tuple[Patch | None, str | None]:
     index = raw.get("index") or raw.get("索引") or {}
     if not isinstance(index, dict):
         return None, f"索引必须是对象，收到 {type(index).__name__}"
+    # 索引值是对象（{"kind": …, "value": …}），不是裸字符串。模型偶尔写成 {"组": "全部"}，
+    # 这种补丁能过解析、能进状态，但下游按 spec.get("kind") 读就崩——在入口挡掉，
+    # 让它变成一句能被转述的话，而不是一个 traceback。
+    for key, item in index.items():
+        if not isinstance(item, dict):
+            return None, (f"索引「{key}」要写成对象，例如 "
+                          f'{{"{key}": {{"kind": "全部"}}}} 或 '
+                          f'{{"{key}": {{"kind": "部件", "value": "齿轮箱"}}}}，'
+                          f"收到 {item!r}")
+        if key == "组" and not item.get("kind"):
+            return None, f"索引「组」缺 kind（要说清是全部、部件、风机还是严重度），收到 {item!r}"
     if op == "reset" and raw.get("value") is not None:
         return None, "reset 是拧回默认，不该带值"
     # 值可以在这里缺省（开关型旋钮不需要数值），但校验器会对需要数值的族报错——
@@ -135,6 +146,18 @@ _KIND_ALIASES = {
 }
 
 
+# 提示词里索引是「中文(英文)」两种写法并排印的（组(group)、部件(part)、严重度(severity)），
+# 模型照英文那一半抄是完全可能的。英文到中文是**一对一**的，登记下来就是确定的映射，
+# 不是猜；没登记的（如笼统的 group / bucket，指向哪一类说不清）照样报错。
+_KIND_NAME_ALIASES = {
+    "severity": "严重度", "sea": "海况", "part": "部件", "turbine": "风机",
+    "task": "任务", "task_list": "任务清单", "task_set": "任务清单", "tasks": "任务清单",
+    "line": "作业线", "all": "全部",
+    "window": "窗口", "day": "某日", "date": "某日",
+    "range": "日期区间", "date_range": "日期区间",
+}
+
+
 def normalize_patch(patch: "Patch") -> "Patch":
     """把大模型给的口语化写法归一到注册值。只做唯一可判定的归一，其余原样留给校验器。
 
@@ -159,6 +182,8 @@ def normalize_patch(patch: "Patch") -> "Patch":
                 index[key] = spec  # 多 kind 维度给了裸值：不猜，交给校验器报错
                 continue
         spec = dict(spec)
+        if isinstance(spec.get("kind"), str) and spec["kind"] in _KIND_NAME_ALIASES:
+            spec["kind"] = _KIND_NAME_ALIASES[spec["kind"]]
         value = spec.get("value")
         if (spec.get("kind") or declared.get(key)) in ("作业线", "task", "task_set", "task_seq"):
             value = _to_line_no(value)  # 作业线/任务编号的各种写法归一

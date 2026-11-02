@@ -15,6 +15,8 @@
 """
 from __future__ import annotations
 
+import json
+
 from typing import Any
 
 from . import slots as S
@@ -34,23 +36,37 @@ def _nearest_slot(name: str) -> str | None:
     return match[0] if match else None
 
 
-def _task_ids_of_group(data, spec: dict[str, Any]) -> list[str]:
-    ids = S.group_task_ids(data, spec)
-    return ids or []
+def _task_ids_of_group(data, spec: dict[str, Any]) -> list[str] | None:
+    """组里有哪些任务；组本身解析不出来时返回 None（**不是空列表**）。
+
+    两者必须分开：空列表是「这一类现在没有任务」，None 是「这一格没读懂」。
+    混在一起就会在「部件名写错」时报「这一格最多只有 0 个」，把用户引到错的地方。
+    """
+    return S.group_task_ids(data, spec)
 
 
-def _count_planable(data, options: dict[str, list[dict]], task_ids: list[str], bucket_spec=None) -> int:
+def _count_planable(data, options: dict[str, list[dict]], task_ids: list[str], bucket_spec=None,
+                    allowed: set[str] | None = None) -> int | None:
     """这一格里最多能修几个：有候选、且（给了桶的话）候选能落进桶里的任务数。
 
     这是上界，不是「一定会修这么多」。报静态不可行时用它当理由的数字来源。
+
+    ``allowed`` 是别的补丁已经圈死的范围（目前只有 ``scope_only``）。不交叠就会
+    出现「只修叶片 + 至少修 3 个」这种校验放过、求解爆炸的组合——两个要求分开看都合理，
+    合起来只有 2 个任务可用。
+
+    返回 None 表示**算不出来**（谓词解析失败），调用方必须闭嘴：
+    把「解析失败」说成「这一格只有 0 个任务」是更坏的错——用户会去改一个没问题的数。
     """
     bucket = None
     if bucket_spec:
         bucket, error = S.bucket_predicate(data, bucket_spec)
         if error:
-            return 0
+            return None
     total = 0
     for tid in task_ids:
+        if allowed is not None and tid not in allowed:
+            continue
         rows = options.get(tid) or []
         if bucket is None:
             if rows:
@@ -179,29 +195,51 @@ def _check_index(data, patch: Patch, slot: S.Slot) -> list[str]:
     return errors
 
 
-def _check_static(patch: Patch, data, options: dict[str, list[dict]]) -> list[str]:
+def _scope_allowed(patches: list[Patch], data, options: dict[str, list[dict]]) -> set[str] | None:
+    """别的补丁已经把宇宙缩小到哪几件事了（目前只有 scope_only 会缩）。
+
+    静态预检必须在这个缩小后的宇宙里数数，否则「只修叶片 + 至少修 3 个」
+    会被判成合法：分开看都合理，合起来叶片只有 2 个任务。
+    """
+    if not options:
+        return None  # 没有候选就算不出交集；宁可不算，也不能误报"一个都修不成"
+    allowed: set[str] | None = None
+    for patch in patches:
+        if patch.slot != "scope_only" or patch.op == "reset":
+            continue
+        pred, error = S.scope_predicate(data, patch.index.get("范围") or {"kind": "全部"})
+        if error or pred is None:
+            continue
+        keep = {tid for tid, rows in options.items() if any(pred(c) for c in rows)}
+        allowed = keep if allowed is None else (allowed & keep)
+    return allowed
+
+
+def _check_static(patch: Patch, data, options: dict[str, list[dict]],
+                  allowed: set[str] | None = None) -> list[str]:
     """第 4 条：静态不可行预检——只报算得出来的，算不出来就闭嘴。"""
     errors: list[str] = []
     value = patch.value
+    ids = _task_ids_of_group(data, patch.index.get("组", {}))
+    if ids is None and patch.slot in ("count_min", "count_max"):
+        return errors  # 这一格没读懂，交给第 2 条报，别再补一句误导的数字
     if patch.slot == "count_min":
-        ids = _task_ids_of_group(data, patch.index.get("组", {}))
-        able = _count_planable(data, options, ids)
-        if isinstance(value, (int, float)) and value > able:
-            errors.append(f"要求至少修 {int(value)} 个，但这一格里最多只有 {able} 个任务排得进去")
+        able = _count_planable(data, options, ids or [], allowed=allowed)
+        if able is not None and isinstance(value, (int, float)) and value > able:
+            errors.append(f"要求至少修 {int(value)} 个，但这一格里最多只有 {able} 个任务排得进去"
+                          + ("（已扣除被「只修」圈掉的部分）" if allowed is not None else ""))
     elif patch.slot == "bucket_min":
-        ids = _task_ids_of_group(data, patch.index.get("组", {}))
-        able = _count_planable(data, options, ids, patch.index.get("桶"))
-        if isinstance(value, (int, float)) and value > able:
+        able = _count_planable(data, options, ids or [], patch.index.get("桶"), allowed=allowed)
+        if able is not None and isinstance(value, (int, float)) and value > able:
             bucket = patch.index.get("桶", {}).get("value", "该时段")
             errors.append(f"{bucket} 内要求至少开工 {int(value)} 个，"
                           f"但排得进去的只有 {able} 个（按开工时间计）")
     elif patch.slot == "count_max":
-        ids = _task_ids_of_group(data, patch.index.get("组", {}))
         if isinstance(value, (int, float)) and value == 0 and patch.strength == "hard" \
-                and len(ids) == len(data.tasks):
+                and ids is not None and len(ids) == len(data.tasks):
             errors.append("把所有任务都排除了，这次排程一个都修不成")
     elif patch.slot == "same_bucket":
-        ids = _task_ids_of_group(data, {"kind": "任务清单", "value": patch.index.get("集合", {}).get("value")})
+        ids = _task_ids_of_group(data, {"kind": "任务清单", "value": patch.index.get("集合", {}).get("value")}) or []
         day_sets = []
         for tid in ids:
             rows = options.get(tid) or []
@@ -214,7 +252,7 @@ def _check_static(patch: Patch, data, options: dict[str, list[dict]]) -> list[st
         if day_sets and not set.intersection(*day_sets):
             errors.append("这几个任务没有共同的可用日期，安排不到同一天")
     elif patch.slot == "all_diff":
-        ids = _task_ids_of_group(data, {"kind": "任务清单", "value": patch.index.get("集合", {}).get("value")})
+        ids = _task_ids_of_group(data, {"kind": "任务清单", "value": patch.index.get("集合", {}).get("value")}) or []
         day_sets = [{c["开始"] // 1440 for c in (options.get(tid) or [])} for tid in ids]
         if day_sets and any(not d for d in day_sets):
             errors.append("集合里有任务在规划期内没有任何可开工的候选")
@@ -273,6 +311,33 @@ def _check_conflicts(patches: list[Patch], data) -> list[str]:
             forced_out.update(
                 t["任务编号"] for t in data.tasks if t["任务编号"] not in keep
             )
+    # 同一格既「至少 N」又「最多 M」且 N > M：不用跑求解器就知道做不到。
+    # 分开看两条都合理（高危全修 / 高危最多 2 个），合起来自相矛盾。
+    floors: dict[str, int] = {}
+    ceils: dict[str, int] = {}
+    labels: dict[str, str] = {}
+    for patch in patches:
+        if patch.op == "reset" or not isinstance(patch.value, (int, float)):
+            continue
+        if patch.slot in ("count_min", "bucket_min"):
+            table = floors
+        elif patch.slot in ("count_max", "bucket_max"):
+            table = ceils
+        else:
+            continue
+        key = patch.slot.rsplit("_", 1)[0] + json.dumps(
+            [patch.index.get("组"), patch.index.get("桶")], sort_keys=True, ensure_ascii=False)
+        table[key] = int(patch.value)
+        if key not in labels:
+            bucket = (patch.index.get("桶") or {}).get("value")
+            who = S.describe_group(data, patch.index.get("组"))
+            labels[key] = f"{bucket} 内{who}" if bucket else who
+    for key, low in floors.items():
+        high = ceils.get(key)
+        if high is not None and low > high:
+            errors.append(f"「{labels.get(key, '同一格')}」既要求至少 {low} 个、又要求最多 {high} 个，"
+                          "这两条自相矛盾")
+
     both = sorted(forced_in & forced_out)
     if both:
         errors.append("这些任务既被要求必须修、又被要求不修：" + "、".join(both))
@@ -307,6 +372,14 @@ def validate(
     if dups:
         errors.append("同一格子被写了两次（同一需求请合并成一个补丁）：" + "；".join(dups))
 
+    # 别的补丁可能已经把可选范围缩小了（只修叶片…），静态预检要在这个范围里数
+    allowed = _scope_allowed(patches, data, options)
+    if allowed is not None and not allowed:
+        # 两条「只修」叠起来没有交集，等于一条都不许修。多轮里这最常发生在
+        # 「改成只修齿轮箱」没把上一轮的「只修叶片」撤掉的时候。
+        errors.append("几条「只修」的限制叠在一起后没有任何任务剩下，这次一个都修不成；"
+                      "若你是想换一个范围，请先把上一条撤掉（reset）")
+
     for patch in patches:
         if patch.slot in S.PARAM_SLOTS:
             spec = S.PARAM_SLOTS[patch.slot]
@@ -329,7 +402,7 @@ def validate(
         errors.extend(_check_index(data, patch, slot))
         if patch.op != "reset":
             errors.extend(_check_value(patch, slot, data))
-        errors.extend(_check_static(patch, data, options))
+        errors.extend(_check_static(patch, data, options, allowed))
 
     errors.extend(_check_conflicts(patches, data))
 

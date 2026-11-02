@@ -495,6 +495,9 @@ def describe_group(data, spec: dict[str, Any] | None) -> str:
     对账只说「排了 2 个、要求至少 1」是不够的——用户看不出数的是哪个格子，
     证据链不完整。这里把格子点名：部件→部件名称、作业线→几号船。
     """
+    if not isinstance(spec, dict):
+        # 解析层已经挡掉了裸字符串；这里再兜一层：回显不该因为拿不到结构就崩
+        return str(spec)
     spec = spec or {}
     kind = spec.get("kind")
     value = spec.get("value")
@@ -516,6 +519,119 @@ def describe_group(data, spec: dict[str, Any] | None) -> str:
     if kind == "作业线":
         return f"{value} 号船"
     return str(value) if value is not None else "全部任务"
+
+
+_INDEX_WORDS = {
+    "口径": "口径", "维度": "维度", "量": "量", "项": "项", "端": "端",
+    "粒度": "粒度", "严重度": "严重度", "海况": "海况", "部件": "部件",
+    "日期": "日期", "时刻": "时刻", "窗口": "窗口", "任务": "任务", "数量": "数量",
+}
+
+
+def _bucket_label(data, spec: dict[str, Any]) -> str:
+    kind = spec.get("kind")
+    value = spec.get("value")
+    if kind in (None, "全程"):
+        return "全程"
+    if kind == "窗口":
+        return str(value)
+    if kind == "某日":
+        return f"{value} 那天"
+    if kind == "日期区间":
+        return f"{value[0]} 到 {value[1]}" if isinstance(value, (list, tuple)) and len(value) == 2 else str(value)
+    return str(value)
+
+
+def _human_minutes(minutes: float) -> str:
+    """分钟数换成人话：整天的说天，整小时的说小时，其余说分钟。"""
+    total = abs(int(minutes))
+    if total == 0:
+        return "0 分钟"
+    if total % 1440 == 0:
+        return f"{total // 1440} 天"
+    if total % 60 == 0:
+        return f"{total // 60} 小时"
+    return f"{total} 分钟"
+
+
+def describe_patch(patch, data=None, *, show_value: bool = True) -> str:
+    """把一条补丁说成人话：**哪一格、拧到几**。
+
+    专门给「当前生效的旋钮」清单用。要求有两件事：格子必须点名（不能只说
+    「一条上限约束」），值必须带口径（不能只说「2」）——否则用户看不出
+    「我刚才那句话，现在到底按什么在算」。
+
+    ``data`` 缺省时按索引里的原始写法说（不查部件名），保证这个函数
+    在任何上下文都调得动——回显不该因为拿不到快照就崩掉。
+    """
+    slot = SLOTS.get(patch.slot)
+    if slot is None:
+        if patch.slot in PARAM_SLOTS:
+            spec = PARAM_SLOTS[patch.slot]
+            return f"参数 {patch.slot} = {patch.value} {spec['单位']}".strip()
+        return f"{patch.slot} = {patch.value}"
+
+    # 目标类：策略与权重没有「值」的强弱，说清点了哪个量就够
+    if patch.slot == "strategy":
+        return f"整体排程风格按「{patch.value}」"
+    if patch.slot == "weight":
+        return f"「{patch.index.get('量', {}).get('value')}」参与权衡（权重 {patch.value}）"
+
+    cells: list[str] = []
+    index = patch.index or {}
+    if "组" in index:
+        cells.append(describe_group(data, index["组"]))
+    if "范围" in index:
+        spec = index["范围"] or {}
+        cells.append(describe_group(data, spec) if (spec.get("kind") or "全部") in GROUP_KINDS
+                     else _bucket_label(data, spec))
+    if "桶" in index:
+        cells.append(_bucket_label(data, index["桶"] or {}))
+    for key in ("序列", "集合"):
+        if key in index:
+            ids = (index[key] or {}).get("value") or []
+            joiner = " → " if key == "序列" else "、"
+            cells.append("任务" + joiner.join(str(i) for i in ids))
+    if "层对" in index:
+        pair = (index["层对"] or {}).get("value") or []
+        cells.append(" → ".join(str(p) for p in pair) + " 之间")
+    for key, word in _INDEX_WORDS.items():
+        if key in index and key not in ("部件",):
+            value = (index[key] or {}).get("value")
+            if value is not None:
+                cells.append(f"{word}={value}")
+    if "部件" in index:
+        raw = (index["部件"] or {}).get("value")
+        pid = _resolve_entities().resolve_part(data, str(raw)) if data is not None else None
+        name = (data.parts.get(pid or "", {}).get("部件名称") if data is not None else None) or raw
+        cells.append(f"部件={name}")
+
+    head = "｜".join(cells) if cells else "全程"
+    if slot.value_type == "act" or not show_value:
+        return f"{head}｜{slot.label}"
+    # 时刻类的量：内部一律是「距规划起点的分钟数」。直接印 -3 就是「-3 时刻」，
+    # 用户读不出这是「提前三天」还是「提前三分钟」——回显必须换算成人能读的单位。
+    if slot.value_type == "minutes" and isinstance(patch.value, (int, float)) \
+            and not isinstance(patch.value, bool):
+        if patch.op in ("+", "-"):
+            word = "提前" if (patch.op == "-" or patch.value < 0) else "推后"
+            return f"{head}｜{slot.label}{word} {_human_minutes(patch.value)}"
+        if patch.op == "=" and data is not None and hasattr(data, "stamp"):
+            try:
+                return f"{head}｜{slot.label}定在 {data.stamp(int(patch.value))[:10]}"
+            except Exception:      # 值不是合法时刻就退回原样，不在回显里抛错
+                pass
+    if isinstance(patch.value, bool):
+        shown = "是" if patch.value else "否"
+    elif patch.value is None:
+        shown = ""
+    else:
+        shown = str(patch.value)
+    unit = slot.unit
+    if unit == "元或艘天":  # 预算两种口径的量纲不同，说错单位比不说更糟
+        unit = "艘天" if (index.get("口径") or {}).get("value") == "租船天" else "元"
+    tail = f" {unit}" if unit and shown else ""
+    return f"{head}｜{slot.label} = {shown}{tail}" if shown else f"{head}｜{slot.label}"
 
 
 def scope_predicate(data, spec: dict[str, Any]) -> tuple[Callable[[dict], bool] | None, str | None]:

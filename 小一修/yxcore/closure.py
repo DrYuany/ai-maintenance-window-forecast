@@ -182,25 +182,54 @@ def _compile_cap(patch, ctx: _Ctx) -> None:
 
 
 def _compile_budget(patch, ctx: _Ctx) -> None:
-    """预算上限。现金/总成本走内核 limits（见 apply），这里只管注入口能算的口径。"""
+    """预算上限。现金/总成本走内核 limits（见 apply），这里管注入口能算的口径。
+
+    「组」不是装饰：用户说「高危备件费不超 30 万」时，管的必须只是高危那几个任务的
+    备件费。整轮口径直接取内核 metrics；分组口径现场按候选重建和式，公式与内核同一份
+    （见 costs.py）。租船天按船·天计、不分任务，只支持整轮。
+    """
+    from . import costs  # noqa: PLC0415
+
     口径 = patch.index.get("口径", {}).get("value")
     value = float(patch.value)
     if 口径 in ("现金", "总成本"):
         return  # 已经由 apply 走内核 limits 加了，这里不要再写一遍
-    if 口径 == "人工":
-        expr = ctx.metrics.get("人工费")
-    elif 口径 == "备件":
-        expr = ctx.metrics.get("备件费")
-    elif 口径 == "租船天":
+
+    group_spec = patch.index.get("组") or {"kind": "全部"}
+    whole = (group_spec.get("kind") or "全部") == "全部"
+
+    if 口径 == "租船天":
+        if not whole:
+            ctx.errors.append(
+                f"budget_max：租船天是按「船·天」算的，没法只算"
+                f"「{S.describe_group(ctx.data, group_spec)}」的租船天数——请按整轮给上限")
+            return
         expr = ctx.metrics.get("船舶艘天")
+        limit = int(round(value))
+    elif 口径 in ("人工", "备件"):
+        if whole:
+            expr = ctx.metrics.get("人工费" if 口径 == "人工" else "备件费")
+            if isinstance(expr, int) and expr == 0:
+                ctx.errors.append(f"budget_max：口径 {口径!r} 在本次模型里恒为 0，约束无从谈起")
+                return
+        else:
+            pred, error = S.group_predicate(ctx.data, group_spec)
+            if error:
+                ctx.errors.append(f"budget_max：{error}")
+                return
+            rows = ctx.pick(pred)
+            if not rows:
+                ctx.errors.append(
+                    f"budget_max：{S.describe_group(ctx.data, group_spec)}里没有任何候选，"
+                    "这条上限无从落地")
+                return
+            cost_of = costs.labor_yuan if 口径 == "人工" else costs.spare_yuan
+            terms = [round(cost_of(ctx.data, c) * costs.money()) * x for c, x in ctx.choices if pred(c)]
+            expr = sum(terms)
+        limit = round(value * costs.money())
     else:
         ctx.errors.append(f"budget_max：口径 {口径!r} 不走注入口（现金/总成本走内核 limits）")
         return
-    if isinstance(expr, int) and expr == 0:
-        ctx.errors.append(f"budget_max：口径 {口径!r} 在本次模型里恒为 0，约束无从谈起")
-        return
-    # 艘天是计数，必须整数；其余是钱，按内核的 micro-yuan 缩放。
-    limit = int(round(value)) if 口径 == "租船天" else round(value * _money())
     ctx.m.Add(expr <= limit)
 
 

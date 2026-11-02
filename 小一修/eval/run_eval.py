@@ -5,16 +5,17 @@ E2 在线层调大模型，但判分仍是确定性的——翻出来的补丁�
 （槽位、索引解析结果、运算、数值、强度），不是让另一个模型说"差不多"。
 
 用法：
-    python run_eval.py                    # 跑 E1/E2离线/E3/E4
-    python run_eval.py --online           # 加跑 E2 在线翻译（需要 DEEPSEEK_API_KEY）
-    python run_eval.py --layer E1,E3      # 只跑指定层
-    python run_eval.py --seconds 30       # E3 每个用例的求解时限
+    python run_eval.py                    # 跑 E1/E2离线/E5/E6/E4（快层，不求解）
+    python run_eval.py --layer E3         # 端到端（要跑三十多次求解）
+    python run_eval.py --online           # 加跑 E2/E7 在线层（需要 DEEPSEEK_API_KEY）
+    python run_eval.py --seconds 30       # E3/E6 每个用例的求解时限
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -27,6 +28,9 @@ from yxcore.validate import validate  # noqa: E402
 
 CASES_VALIDATE = json.loads((HERE / "cases_validate.json").read_text(encoding="utf-8"))
 CASES_E2E = json.loads((HERE / "cases_e2e.json").read_text(encoding="utf-8"))
+CASES_MULTITURN = json.loads((HERE / "cases_multiturn.json").read_text(encoding="utf-8"))
+CASES_COMPOUND = json.loads((HERE / "cases_compound.json").read_text(encoding="utf-8"))
+DIALOGUES = json.loads((HERE / "cases_dialogue.json").read_text(encoding="utf-8"))
 UTTERANCES = json.loads((HERE / "utterances.json").read_text(encoding="utf-8"))
 
 _snapshot_cache: tuple | None = None
@@ -218,8 +222,16 @@ def run_e3(*, seconds: float = 20.0) -> list[str]:
     from yxcore.pipeline import YxError, run
 
     failures: list[str] = []
+    # 端到端一条要跑求解器、拦截类还要跑诊断探针，整层十几分钟起步。
+    # 不逐条报进度的话，跑起来像卡死；顺带把上一条的用时打出来，能直接看出哪条变慢了。
+    _prev: list = [None, time.monotonic()]
     for case in CASES_E2E:
         name = case["名"]
+        if _prev[0] is not None:
+            print(f"  [E3] 上一条「{_prev[0]}」用时 {time.monotonic() - _prev[1]:.1f}s",
+                  flush=True)
+        _prev[0], _prev[1] = name, time.monotonic()
+        print(f"  [E3] {name}", flush=True)
         patches = []
         for raw in case["补丁"]:
             patch, error = parse_patch(raw)
@@ -281,6 +293,230 @@ def run_e3(*, seconds: float = 20.0) -> list[str]:
     return failures
 
 
+# ── E5 多轮状态机（离线） ───────────────────────────────────────────────
+
+def _parse_list(raws: list[dict], utterance: str) -> list[Patch]:
+    patches = []
+    for raw in raws:
+        payload = dict(raw)
+        payload.setdefault("utterance", utterance)
+        payload.setdefault("strength", "hard")
+        patch, error = parse_patch(payload)
+        assert patch is not None, f"{utterance} 的补丁形状不对：{error}"
+        patches.append(normalize_patch(patch))
+    return patches
+
+
+def run_e5() -> list[str]:
+    """多轮：同一格被反复改、撤销、叠加，以及「改主意没撤旧的」这类错要拦下。
+
+    这一层不调大模型——多轮的**语义**必须先在这一层锁死。
+    在线那层（E7）才有意义：模型答对了才说明它真的会用会话状态。
+    """
+    from yxcore.session import Session
+
+    data, options = snapshot()
+    failures: list[str] = []
+    for case in CASES_MULTITURN:
+        name = case["名"]
+        session = Session(data)
+        echoes: list[str] = []
+        for turn in case["轮"]:
+            patches = _parse_list(turn["补丁"], turn["话术"])
+            applied = session.apply(patches, utterance=turn["话术"])
+            echoes += applied.echo()
+            want = turn.get("期望") or {}
+            if "错误含" in want:
+                if not any(want["错误含"] in e for e in applied.错误):
+                    failures.append(f"E5[{name}｜{turn['话术']}]：该报错没报"
+                                    f"（要含「{want['错误含']}」），实际 {applied.错误}")
+                continue
+            for field, got in (("新增", len(applied.新增)), ("修订", len(applied.修订)),
+                               ("撤销", len(applied.撤销)), ("空撤销", len(applied.空撤销)),
+                               ("无变化", len(applied.无变化))):
+                if field in want and got != want[field]:
+                    failures.append(f"E5[{name}｜{turn['话术']}]：{field} {got}，应为 {want[field]}")
+            if applied.错误:
+                failures.append(f"E5[{name}｜{turn['话术']}]：不该报错却报了 {applied.错误}")
+        final = case["终局"]
+        if "生效数" in final and len(session.state) != final["生效数"]:
+            failures.append(f"E5[{name}]：生效 {len(session.state)} 条，应为 {final['生效数']}")
+        errors, _ = session.check(data, options)
+        if final.get("校验") == "拒":
+            if not errors:
+                failures.append(f"E5[{name}]：应该被拦下却通过了")
+            for frag in final.get("理由含", []):
+                if not any(frag in e for e in errors):
+                    failures.append(f"E5[{name}]：拦了但理由要含「{frag}」，实际 {errors}")
+        elif errors:
+            failures.append(f"E5[{name}]：终局不该被拦，实际 {errors}")
+        for slot, want_value in (final.get("值") or {}).items():
+            got = [p.value for p in session.patches() if p.slot == slot]
+            if len(got) != 1:
+                failures.append(f"E5[{name}]：终局里 {slot} 有 {len(got)} 条，应为 1 条")
+            elif isinstance(want_value, (int, float)) and abs(float(got[0]) - float(want_value)) > 1e-6:
+                failures.append(f"E5[{name}]：{slot} = {got[0]}，应为 {want_value}")
+            elif not isinstance(want_value, (int, float)) and got[0] != want_value:
+                failures.append(f"E5[{name}]：{slot} = {got[0]}，应为 {want_value}")
+        text = "\n".join(echoes)
+        for frag in final.get("含", []):
+            if frag not in text:
+                failures.append(f"E5[{name}]：回显里找不到「{frag}」；回显全文：{text}")
+        for frag in final.get("不含", []):
+            if frag in text:
+                failures.append(f"E5[{name}]：回显里出现了不该有的「{frag}」；回显全文：{text}")
+
+        # 多轮走到最后要能真的排出来：状态对了但求解炸了，等于白攒
+        run_expect = case.get("求解")
+        if run_expect and not errors:
+            from yxcore.pipeline import YxError, run as run_pipeline
+
+            try:
+                result = run_pipeline(session.patches(), seconds=case.get("秒", 20))
+            except YxError as exc:
+                if run_expect.get("期望") != "拦截":
+                    failures.append(f"E5[{name}]：终局求解被拦：{exc.errors}")
+                else:
+                    for frag in run_expect.get("拦截含", []):
+                        if not any(frag in e for e in exc.errors):
+                            failures.append(f"E5[{name}]：拦了但理由要含「{frag}」，实际 {exc.errors}")
+                continue
+            if run_expect.get("期望") == "拦截":
+                failures.append(f"E5[{name}]：期望拦截却出解了")
+                continue
+            selected = result["排程"] or []
+            if "排程数" in run_expect and len(selected) != run_expect["排程数"]:
+                failures.append(f"E5[{name}]：排程数 {len(selected)}，应为 {run_expect['排程数']}")
+            if "部分" in run_expect and result["部分排程"] != run_expect["部分"]:
+                failures.append(f"E5[{name}]：部分排程={result['部分排程']}，应为 {run_expect['部分']}")
+            for frag in run_expect.get("对账含", []):
+                if frag not in (result.get("对账") or ""):
+                    failures.append(f"E5[{name}]：对账里找不到「{frag}」")
+            said = "\n".join(result.get("警告") or [])
+            for frag in run_expect.get("警告含", []):
+                if frag not in said:
+                    failures.append(f"E5[{name}]：告警里找不到「{frag}」；告警全文：{said}")
+    return failures
+
+
+# ── E6 复合需求（离线 + 可选求解） ─────────────────────────────────────
+
+def run_e6(*, seconds: float = 20.0) -> list[str]:
+    """一句话里几个要求同时上：整体要么通过、要么拦下且理由对。
+
+    复合需求的失败模式和单条不同：每一条单看都合法，合起来才矛盾。
+    所以这里的用例全是「两条以上、跨族」的组合。
+    """
+    data, options = snapshot()
+    failures: list[str] = []
+    for case in CASES_COMPOUND:
+        name = case["名"]
+        patches = _parse_list(case["补丁"], name)
+        errors, _warnings = validate(patches, data, options)
+        if case["期望"] == "拒":
+            if not errors:
+                failures.append(f"E6[{name}]：应该拦下却放行了")
+            for frag in case.get("理由含", []):
+                if not any(frag in e for e in errors):
+                    failures.append(f"E6[{name}]：拦了但理由要含「{frag}」，实际 {errors}")
+            continue
+        if errors:
+            failures.append(f"E6[{name}]：合法组合被误拦：{errors}")
+            continue
+        solve = case.get("求解")
+        if not solve:
+            continue
+        from yxcore.pipeline import YxError, run
+
+        try:
+            result = run(patches, seconds=case.get("秒", seconds))
+        except YxError as exc:
+            reasons = list(exc.errors) + list(getattr(exc, "warnings", []) or [])
+            if solve.get("期望") != "拦截":
+                failures.append(f"E6[{name}]：期望出解却被拦：{exc.errors}")
+            else:
+                for frag in solve.get("拦截含", []):
+                    if not any(frag in e for e in reasons):
+                        failures.append(f"E6[{name}]：拦了但理由要含「{frag}」，实际 {exc.errors}")
+            continue
+        if solve.get("期望") == "拦截":
+            failures.append(f"E6[{name}]：期望拦截却出解了")
+            continue
+        selected = result["排程"] or []
+        if "排程数" in solve and len(selected) != solve["排程数"]:
+            failures.append(f"E6[{name}]：排程数 {len(selected)}，应为 {solve['排程数']}")
+        if "排程数最多" in solve and len(selected) > solve["排程数最多"]:
+            failures.append(f"E6[{name}]：排程数 {len(selected)}，超过上限 {solve['排程数最多']}")
+        if "部分" in solve and result["部分排程"] != solve["部分"]:
+            failures.append(f"E6[{name}]：部分排程={result['部分排程']}，应为 {solve['部分']}")
+        audit = result.get("对账") or ""
+        for frag in solve.get("对账含", []):
+            if frag not in audit:
+                failures.append(f"E6[{name}]：对账里找不到「{frag}」；对账全文：{audit}")
+        for frag in solve.get("对账不含", []):
+            if frag in audit:
+                failures.append(f"E6[{name}]：对账里出现了不该有的「{frag}」")
+        said = "\n".join(result.get("警告") or [])
+        for frag in solve.get("警告含", []):
+            if frag not in said:
+                failures.append(f"E6[{name}]：告警里找不到「{frag}」；告警全文：{said}")
+    return failures
+
+
+# ── E7 多轮在线（需要大模型） ───────────────────────────────────────────
+
+def run_e7(*, seconds: float = 90.0) -> tuple[list[str], list[str]]:
+    """真对话：逐轮翻译 + 落地，最后比生效旋钮表。
+
+    判分仍是确定性的：只看「动了几格」和「终局那张表」，
+    不看模型怎么解释自己。
+    """
+    from yxcore.session import Session
+
+    data, options = snapshot()
+    failures: list[str] = []
+    cautions: list[str] = []
+    for case in DIALOGUES:
+        name = case["名"]
+        session = Session(data)
+        broke = False
+        for i, text in enumerate(case["对话"]):
+            applied = session.say(text, data, options, timeout=seconds)
+            want = (case.get("期望每轮") or [])[i] if i < len(case.get("期望每轮") or []) else {}
+            if want.get("拒绝"):
+                if not applied.拒绝:
+                    failures.append(f"E7[{name}｜{text}]：该拒绝却落地了 {len(applied.新增)} 条")
+                continue
+            if applied.拒绝:
+                failures.append(f"E7[{name}｜{text}]：被错误拒绝：{applied.拒绝}")
+                broke = True
+                break
+            if applied.错误:
+                failures.append(f"E7[{name}｜{text}]：落地失败 {applied.错误}")
+                broke = True
+                break
+            for field, got in (("新增", len(applied.新增)), ("修订", len(applied.修订)),
+                               ("撤销", len(applied.撤销)), ("空撤销", len(applied.空撤销))):
+                if field in want and got != want[field]:
+                    failures.append(f"E7[{name}｜{text}]：{field} {got}，应为 {want[field]}")
+            if applied.待确认 and not want.get("待确认"):
+                cautions.append(f"E7[{name}｜{text}]：模型报了 unsure，需要追问（不算错）")
+        if broke:
+            continue
+        final = case["终局"]
+        if "生效数" in final and len(session.state) != final["生效数"]:
+            failures.append(f"E7[{name}]：终局生效 {len(session.state)} 条，应为 {final['生效数']}")
+        gold = _parse_list(final.get("补丁") or [], name)
+        got_set = sorted(canonical(p, data) for p in session.patches())
+        want_set = sorted(canonical(normalize_patch(p), data) for p in gold)
+        if got_set != want_set:
+            failures.append(f"E7[{name}]：终局旋钮表不一致\n    得到 {got_set}\n    应为 {want_set}")
+        errors, _ = session.check(data, options)
+        if final.get("校验") == "拒" and not errors:
+            failures.append(f"E7[{name}]：终局应该被拦下（自相矛盾）却通过了")
+    return failures, cautions
+
+
 # ── E4 提示词一致性 ─────────────────────────────────────────────────────
 
 def run_e4() -> list[str]:
@@ -308,7 +544,7 @@ def run_e4() -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--layer", default="E1,E2,E3,E4")
+    parser.add_argument("--layer", default="E1,E2,E5,E6,E4")
     parser.add_argument("--online", action="store_true")
     parser.add_argument("--seconds", type=float, default=20.0)
     args = parser.parse_args()
@@ -321,14 +557,21 @@ def main() -> int:
         all_failures += f
     if "E2" in layers:
         f = run_e2_offline()
-        total = len(UTTERANCES)
-        print(f"E2 翻译离线 ：{total} 条话术，gold 全部在册且过校验" if not f else f"E2 翻译离线 ：{f}")
+        print(f"E2 翻译离线 ：{len(UTTERANCES)} 条话术，gold 全部在册且过校验" if not f else f"E2 翻译离线 ：{f}")
         all_failures += f
     if "E3" in layers:
         f = run_e3(seconds=args.seconds)
         print(f"E3 端到端   ：{len(CASES_E2E)} 条，{len(CASES_E2E)-len(f)} 通过")
         for note in CAUTIONS:
             print("  标注：", note)
+        all_failures += f
+    if "E5" in layers:
+        f = run_e5()
+        print(f"E5 多轮状态 ：{len(CASES_MULTITURN)} 条对话，{len(CASES_MULTITURN)-len(f)} 通过")
+        all_failures += f
+    if "E6" in layers:
+        f = run_e6(seconds=args.seconds)
+        print(f"E6 复合需求 ：{len(CASES_COMPOUND)} 条组合，{len(CASES_COMPOUND)-len(f)} 通过")
         all_failures += f
     if "E4" in layers:
         f = run_e4()
@@ -339,13 +582,31 @@ def main() -> int:
         if not configured():
             print("E2 翻译在线 ：未配置 DEEPSEEK_API_KEY，跳过（不假装跑过）")
         else:
-            f, c = run_e2_online()
-            online_total = len(UTTERANCES)
-            print(f"E2 翻译在线 ：{online_total} 条话术，{online_total-len(f)} 通过"
-                  + (f"，另有 {len(c)} 条过慎（unsure，不判错）" if c else ""))
-            all_failures += f
-            for note in c:
-                print(f"  过慎：{note}")
+            try:
+                f, c = run_e2_online()
+                online_total = len(UTTERANCES)
+                print(f"E2 翻译在线 ：{online_total} 条话术，{online_total-len(f)} 通过"
+                      + (f"，另有 {len(c)} 条过慎（unsure，不判错）" if c else ""))
+                all_failures += f
+                for note in c:
+                    print(f"  过慎：{note}")
+            except Exception as exc:  # noqa: BLE001 - 调不通就如实说，不算通过
+                print(f"E2 翻译在线 ：调用失败，未跑（{exc}）")
+    if args.online and "E7" in layers:
+        from yxcore.parse import configured
+        if not configured():
+            print("E7 多轮在线 ：未配置 DEEPSEEK_API_KEY，跳过")
+        else:
+            try:
+                f, c = run_e7()
+                total = len(DIALOGUES)
+                print(f"E7 多轮在线 ：{total} 段对话，{total-len(f)} 通过"
+                      + (f"，另有 {len(c)} 条过慎" if c else ""))
+                all_failures += f
+                for note in c:
+                    print(f"  过慎：{note}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"E7 多轮在线 ：调用失败，未跑（{exc}）")
 
     if all_failures:
         print(f"\n── 失败 {len(all_failures)} 项 ──")

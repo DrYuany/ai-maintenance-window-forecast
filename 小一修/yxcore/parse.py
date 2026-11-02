@@ -84,13 +84,17 @@ def _strip_fences(text: str) -> str:
 
 
 def translate(utterance: str, data, options: dict[str, list[dict]] | None = None, *,
-              extra: str = "", timeout: float = 90.0) -> tuple[list[Patch], str | None]:
+              extra: str = "", timeout: float = 90.0,
+              session_text: str = "") -> tuple[list[Patch], str | None]:
     """把一句话翻译成补丁集。返回 (补丁, 拒绝理由)。
 
     拒绝理由非空表示模型认为这句话做不到（边界清单里的一类）——这是**诚实的拒绝**，
     调用方要原样转述给用户，不许拿近似槽位补上。
+
+    ``session_text`` 是多轮时上一段的「当前已生效旋钮」清单：模型靠它才能把
+    「刚才那条去掉」落成同一个格子的 reset，否则只能凭记忆重写索引（十次有九次跑偏）。
     """
-    system = build_prompt(data, options, extra=extra)
+    system = build_prompt(data, options, extra=extra, session_text=session_text)
     user = "\n".join([
         f"规划期：{data.stamp(0)[:10]} ~ {data.stamp(data.end)[:10]}",
         f"当前时点：{data.stamp(data.now)}",
@@ -121,8 +125,15 @@ def translate(utterance: str, data, options: dict[str, list[dict]] | None = None
             errors.append(error or "补丁解析失败")
         else:
             patches.append(normalize_patch(patch))
-    if errors and not patches:
-        raise LLMUnavailable("；".join(errors))
+    # 有一条没读懂就整句不执行。只返回解析成功的那几条，等于把「两个要求完成一个」
+    # 说成「按你说的改了」——用户下一轮会拿着半张表继续改，漏掉的那半再也不会被提起。
+    if errors:
+        detail = "；".join(errors)
+        if patches:
+            raise LLMUnavailable(
+                f"这句话里有一条我没读懂（{detail}）。整句先没执行——"
+                "请再说一遍，或者把它拆成两句")
+        raise LLMUnavailable(detail)
     return patches, reason
 
 

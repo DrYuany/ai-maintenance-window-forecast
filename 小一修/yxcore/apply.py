@@ -185,6 +185,15 @@ def compile_patches(patches: list[Patch], data, base_data) -> tuple[CompiledRequ
         # ── G 组预算：现金/总成本走内核 limits ──
         if patch.slot == "budget_max":
             口径 = patch.index.get("口径", {}).get("value")
+            group_spec = patch.index.get("组") or {"kind": "全部"}
+            if 口径 in ("现金", "总成本") and (group_spec.get("kind") or "全部") != "全部":
+                # 内核的 limits 只有一个全局口袋，分不了组。硬把「高危现金」记成整轮上限，
+                # 就是「生效了但生效错了」——宁可拒绝并说清能改成什么。
+                errors.append(
+                    f"预算上限：{口径}只能按整轮设（内核只认一个总口袋），"
+                    f"做不到只限「{S.describe_group(data, group_spec)}」的{口径}。"
+                    "要按类别限，改用「人工」或「备件」口径")
+                continue
             if 口径 == "现金":
                 request.limits["现金预算"] = float(value)
             elif 口径 == "总成本":
