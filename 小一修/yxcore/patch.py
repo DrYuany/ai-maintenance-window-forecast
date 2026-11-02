@@ -51,6 +51,34 @@ class Patch:
         }
 
 
+_MULTI_KIND = {"group", "bucket", "group_or_bucket"}
+_SAMPLE_INDEX = {"桶": '{"kind": "窗口", "value": "窗口03"}'}
+
+
+def index_shape_error(slot: str, index: dict[str, Any]) -> str | None:
+    """索引形状检查：哪些裸值能归一、哪些必须带 kind。
+
+    单类别维度（量/口径/维度/任务/部件…）注册表里只有一种 kind，写裸值不是猜；
+    「组/桶/范围」一格能装好几类东西，裸值分不清，必须挡回去。
+    解析层和 `run()` 入口共用这一份——否则从别的路径进来的补丁会绕过检查，
+    在下游 `.get` 上崩成 traceback。
+    """
+    from . import slots as S      # 延迟导入，避免 slots↔patch 循环
+
+    declared = dict(S.SLOTS.get(slot).index) if slot in S.SLOTS else {}
+    for key, item in index.items():
+        if not isinstance(item, dict):
+            if declared.get(key) in _MULTI_KIND:
+                sample = _SAMPLE_INDEX.get(key, '{"kind": "部件", "value": "齿轮箱"}')
+                return (f"索引「{key}」不能只给一个值——要说清是哪一类，"
+                        f'例如 {{"{key}": {sample}}}，收到 {item!r}')
+            continue
+        if key == "组" and not item.get("kind"):
+            return (f"索引「组」缺 kind（要说清是全部、部件、风机、严重度、任务、"
+                    f"任务清单还是作业线），收到 {item!r}")
+    return None
+
+
 def parse_patch(raw: dict[str, Any]) -> tuple[Patch | None, str | None]:
     """从大模型给的字典解析成补丁。形状不对就报出来，不猜。"""
     if not isinstance(raw, dict):
@@ -69,19 +97,18 @@ def parse_patch(raw: dict[str, Any]) -> tuple[Patch | None, str | None]:
     index = raw.get("index") or raw.get("索引") or {}
     if not isinstance(index, dict):
         return None, f"索引必须是对象，收到 {type(index).__name__}"
-    # 索引值是对象（{"kind": …, "value": …}），不是裸字符串。模型偶尔写成 {"组": "全部"}，
-    # 这种补丁能过解析、能进状态，但下游按 spec.get("kind") 读就崩——在入口挡掉，
-    # 让它变成一句能被转述的话，而不是一个 traceback。
-    for key, item in index.items():
-        if not isinstance(item, dict):
-            return None, (f"索引「{key}」要写成对象，例如 "
-                          f'{{"{key}": {{"kind": "全部"}}}} 或 '
-                          f'{{"{key}": {{"kind": "部件", "value": "齿轮箱"}}}}，'
-                          f"收到 {item!r}")
-        if key == "组" and not item.get("kind"):
-            return None, f"索引「组」缺 kind（要说清是全部、部件、风机还是严重度），收到 {item!r}"
+    # 索引值是对象（{"kind": …, "value": …}）。单类别的维度（量/口径/维度/任务/部件…）
+    # 只写一个裸值也**能**归一——注册表里那一维只有一种 kind，不是猜；
+    # 但「组/桶/范围」是同一格里能装好几类东西（部件？风机？严重度？），
+    # 裸值就分不清是哪一类，必须挡回去让它补 kind。
+    shape = index_shape_error(slot, index)
+    if shape:
+        return None, shape
     if op == "reset" and raw.get("value") is not None:
-        return None, "reset 是拧回默认，不该带值"
+        # reset 的语义完全由「哪一格」决定，带不带值不影响结果。模型常照抄上一条、
+        # 只把 op 改成 reset，顺手把值也带过来——为这个把整句打回去，
+        # 用户说的那句「把刚才那条取消」就白说了。丢掉值，不丢这一格。
+        raw = {**raw, "value": None}
     # 值可以在这里缺省（开关型旋钮不需要数值），但校验器会对需要数值的族报错——
     # 不在这一层静默补默认值，免得"漏给值"变成"当成 1"。
     value = raw.get("value") if raw.get("value") is not None else raw.get("值")
@@ -193,6 +220,11 @@ def normalize_patch(patch: "Patch") -> "Patch":
                 value = value[0]
             elif len(value) == 2 and value[0] == value[1]:
                 value = value[0]
+        # 反过来：一门心思想用「日期区间」的，只给一天就是那一天到那一天。
+        # 两个方向都得通——只折叠不展开，模型写单日就报「要给起止两个值」，太苛刻。
+        if (spec.get("kind") or declared.get(key)) == "日期区间" \
+                and not isinstance(value, (list, tuple)) and value is not None:
+            value = [value, value]
         kind = declared.get(key) or spec.get("kind")
         if kind in _KIND_ALIASES and isinstance(value, str):
             value = _KIND_ALIASES[kind].get(value.strip(), value)

@@ -10,7 +10,7 @@ import json
 import pytest
 
 from yxcore import PROJECT_ROOT, solver_modules
-from yxcore.patch import parse_patch
+from yxcore.patch import normalize_patch, parse_patch
 from yxcore.session import Session
 
 
@@ -181,7 +181,12 @@ def test_索引裸字符串在解析层就被挡下():
     patch, error = parse_patch({"slot": "count_max", "op": "=", "value": 8,
                                 "index": {"组": "全部"}})
     assert patch is None
-    assert "对象" in error and "kind" in error
+    assert "要说清是哪一类" in error and "kind" in error
+    # 单类别维度写裸值是**能**归一的（注册表里那一维只有一种 kind，不是猜）
+    ok, err = parse_patch({"slot": "weight", "op": "=", "value": 2,
+                           "index": {"量": "高严重完成数"}})
+    assert err is None
+    assert normalize_patch(ok).index["量"]["kind"] == "metric"
 
 
 def test_回显带错误():
@@ -232,3 +237,86 @@ def test_时刻类回显说人话(data):
                       index={"组": {"kind": "任务", "value": "任务001"}})])
     text = turn.echo()[0]
     assert "提前 3 天" in text and "时刻" not in text
+
+
+def test_不带索引的reset撤掉整族(data):
+    s = Session(data)
+    s.apply([P(slot="count_max", value=8, index={"组": {"kind": "全部"}}),
+             P(slot="count_max", value=2,
+               index={"组": {"kind": "风机", "value": "风机003"}})])
+    turn = s.apply([P(slot="count_max", op="reset", index={})])
+    assert len(turn.撤销) == 2 and s.state == {}
+    text = "；".join(turn.echo())
+    assert "全部任务" in text and "风机003" in text
+
+
+def test_数据补丁的增量叠加不是折成绝对量(data):
+    idx = {"组": {"kind": "任务", "value": "任务001"}}
+    s = Session(data)
+    s.apply([P(slot="deadline_delta", op="+", value=-4320, index=idx)])   # 提前 3 天
+    turn = s.apply([P(slot="deadline_delta", op="+", value=-2880, index=idx)])  # 再提前 2 天
+    stored = list(s.state.values())[0]
+    # 存的是「累计增量」，不是「把期限定到 -7200」——后者语义整个翻掉
+    assert stored.op == "+" and stored.value == -7200
+    assert "提前 5 天" in turn.echo()[0]
+
+
+def test_时刻型回显说日期不说ISO串(data):
+    idx = {"组": {"kind": "任务", "value": "任务001"}}
+    s = Session(data)
+    s.apply([P(slot="earliest", value="2026-11-19T00:00:00+08:00", index=idx)])
+    turn = s.apply([P(slot="earliest", value="2026-11-20", index=idx)])
+    text = turn.echo()[0]
+    assert "2026-11-20" in text and "T00:00" not in text and "时刻" not in text
+
+
+def test_reset带值照样撤_值丢掉(data):
+    """模型照抄上一条只把 op 改成 reset，值也带过来——别为这个把整句打回去。"""
+    p, error = parse_patch({"slot": "weight", "op": "reset", "value": 3,
+                            "index": {"量": {"kind": "metric", "value": "现金支出"}}})
+    assert error is None and p.value is None
+    s = Session(data)
+    s.apply([P(slot="weight", value=3, index={"量": {"kind": "metric", "value": "现金支出"}})])
+    turn = s.apply([p])
+    assert len(turn.撤销) == 1 and s.state == {}
+
+
+def test_日期区间只给一天就当成那一天(data):
+    p, error = parse_patch({"slot": "bucket_min", "value": 1,
+                            "index": {"桶": {"kind": "日期区间", "value": "2026-11-18"},
+                                      "组": {"kind": "部件", "value": "叶片"}}})
+    assert error is None
+    assert normalize_patch(p).index["桶"]["value"] == ["2026-11-18", "2026-11-18"]
+
+
+def test_回显对每个槽位都不崩_有快照和没快照都要能说(data):
+    """回显是最后一道「能不能说人话」的关：任何槽位、任何值形态都不许抛异常。"""
+    from yxcore import slots as S
+    from yxcore.patch import Patch
+
+    samples = {
+        "组": {"kind": "全部"}, "桶": {"kind": "窗口", "value": "窗口03"},
+        "维度": {"kind": "cap_维度", "value": "作业线"},
+        "口径": {"kind": "budget_口径", "value": "现金"},
+        "量": {"kind": "metric", "value": "高严重完成数"},
+        "任务": {"kind": "任务", "value": "任务001"},
+        "部件": {"kind": "部件", "value": "齿轮箱"},
+        "序列": {"kind": "task_seq", "value": ["任务001", "任务002"]},
+        "集合": {"kind": "task_set", "value": ["任务001", "任务002"]},
+        "层对": {"kind": "severity_pair", "value": ["高", "中"]},
+        "粒度": {"kind": "粒度", "value": "天"},
+        "范围": {"kind": "部件", "value": "叶片"},
+        "日期": {"kind": "day", "value": "2026-11-16"},
+        "时刻": {"kind": "moment", "value": "08:00"},
+        "窗口": {"kind": "window", "value": "窗口03"},
+        "端": {"kind": "端", "value": "开始"},
+        "项": {"kind": "项", "value": "浪高"},
+        "严重度": {"kind": "严重度", "value": "高"},
+        "海况": {"kind": "海况", "value": "恶劣"},
+    }
+    for name, slot in S.SLOTS.items():
+        index = {key: samples.get(key, {"kind": key}) for key, _ in slot.index}
+        for value in (1, "2026-11-18", True, None):
+            patch = Patch(slot=name, index=index, op="=", value=value, strength="hard")
+            for snapshot in (data, None):     # 有快照、没快照都得说得出来
+                assert S.describe_patch(patch, snapshot)

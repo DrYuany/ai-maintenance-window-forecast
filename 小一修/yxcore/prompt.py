@@ -37,7 +37,9 @@ ROLE = """你是海上风电检修排程的「旋钮填写员」。
 1. 不许发明新约束。只能从下面「能拧的旋钮」清单里挑，挑不出来就直说没有这个旋钮。
 2. 索引值只能照抄下面给的取值，不许自己造、不许模糊匹配（"叶片"不能当成"叶片备件"）。
 3. 强度只报 hard / soft / unsure 三选一，**不要给置信度数字**。
-   拿不准就报 unsure，别猜。"""
+   拿不准就报 unsure，别猜。
+4. 「全都要修」不是写 999——值就写上面清单里那一组的**任务数**（清单里已经标了「几个」）。
+   999 这种假数字会被校验层当成「超范围」拦下，明明听得懂的话也办不成。"""
 
 
 def _discrete_catalog(data, options: dict[str, list[dict]] | None) -> str:
@@ -60,8 +62,13 @@ def _discrete_catalog(data, options: dict[str, list[dict]] | None) -> str:
     sev = {level: sum(1 for t in tasks if t["严重等级"] == level) for level in ("高", "中", "低")}
     lines.append("严重度：" + "、".join(f"{k} {v} 个" for k, v in sev.items() if v))
 
-    turbines = sorted({t["风机编号"] for t in tasks})
-    lines.append("风机：" + "、".join(turbines))
+    # 风机也要带任务数：「风机001 的活全修」这句话的值就是这一台的数。
+    # 只列编号不列个数，模型只能瞎猜（实测会写 999 这种假数字，然后被校验层拦下）。
+    turbines: dict[str, int] = {}
+    for t in tasks:
+        turbines[t["风机编号"]] = turbines.get(t["风机编号"], 0) + 1
+    lines.append("风机（当前在册任务数）："
+                 + "、".join(f"{k} {v} 个" for k, v in sorted(turbines.items())))
 
     lines.append("任务：" + "、".join(
         f"{t['任务编号']}({data.parts[t['部件编号']]['部件名称']}/{t['严重等级']})" for t in tasks))

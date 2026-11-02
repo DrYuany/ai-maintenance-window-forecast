@@ -198,3 +198,20 @@ def test_探针预算用完要如实说没试完(tmp_path, monkeypatch):
     text = D.explain_infeasible(patches, data, options, {"解状态": "INFEASIBLE"}, None, seconds=5)
     assert "没试" in text or "没跑成" in text
     assert "不能当成「没问题」" in text
+
+
+def test_手搓裸索引补丁不许崩成traceback():
+    """两条入口（run 和会话）都得把形状问题说成一句话，不是 AttributeError。"""
+    from yxcore.patch import Patch
+    from yxcore.pipeline import YxError, run
+    from yxcore.session import Session
+
+    bad = Patch(slot="count_max", index={"组": "全部"}, op="=", value=8, strength="hard")
+    try:
+        run([bad], seconds=2)
+    except YxError as exc:
+        assert exc.code == "校验" and "要说清是哪一类" in "".join(exc.errors)
+    else:
+        raise AssertionError("裸索引居然跑通了")
+    turn = Session().apply([bad])
+    assert turn.错误 and "要说清是哪一类" in turn.错误[0]

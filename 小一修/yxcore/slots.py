@@ -506,6 +506,10 @@ def describe_group(data, spec: dict[str, Any] | None) -> str:
     if kind == "严重度":
         return f"{value}严重度的任务"
     if kind == "部件":
+        if data is None:
+            # 没有快照就把原始写法说出来（可能就是「齿轮箱」），别去查部件库——
+            # describe_patch 承诺过「拿不到快照也要能回显」
+            return f"{value}的任务"
         pid = _resolve_entities().resolve_part(data, str(value))
         name = data.parts.get(pid or "", {}).get("部件名称") or str(value)
         return f"{name}的任务"
@@ -611,16 +615,19 @@ def describe_patch(patch, data=None, *, show_value: bool = True) -> str:
         return f"{head}｜{slot.label}"
     # 时刻类的量：内部一律是「距规划起点的分钟数」。直接印 -3 就是「-3 时刻」，
     # 用户读不出这是「提前三天」还是「提前三分钟」——回显必须换算成人能读的单位。
-    if slot.value_type == "minutes" and isinstance(patch.value, (int, float)) \
-            and not isinstance(patch.value, bool):
-        if patch.op in ("+", "-"):
-            word = "提前" if (patch.op == "-" or patch.value < 0) else "推后"
-            return f"{head}｜{slot.label}{word} {_human_minutes(patch.value)}"
-        if patch.op == "=" and data is not None and hasattr(data, "stamp"):
-            try:
-                return f"{head}｜{slot.label}定在 {data.stamp(int(patch.value))[:10]}"
-            except Exception:      # 值不是合法时刻就退回原样，不在回显里抛错
-                pass
+    if slot.value_type == "minutes":
+        if isinstance(patch.value, str) and len(patch.value) >= 10:
+            # 校验前是原始写法（ISO 时刻串），说日期就够，别把时区和纳秒也印出来
+            return f"{head}｜{slot.label}定在 {patch.value[:10]}"
+        if isinstance(patch.value, (int, float)) and not isinstance(patch.value, bool):
+            if patch.op in ("+", "-"):
+                word = "提前" if (patch.op == "-" or patch.value < 0) else "推后"
+                return f"{head}｜{slot.label}{word} {_human_minutes(patch.value)}"
+            if patch.op == "=" and data is not None and hasattr(data, "stamp"):
+                try:
+                    return f"{head}｜{slot.label}定在 {data.stamp(int(patch.value))[:10]}"
+                except Exception:      # 值不是合法时刻就退回原样，不在回显里抛错
+                    pass
     if isinstance(patch.value, bool):
         shown = "是" if patch.value else "否"
     elif patch.value is None:

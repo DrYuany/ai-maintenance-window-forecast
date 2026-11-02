@@ -24,7 +24,8 @@ from typing import Any
 
 from . import slots as S
 from .apply import needs_partial
-from .patch import Patch, absolute_value, duplicate_cells, fingerprint, normalize_patch, sort_patches
+from .patch import (Patch, absolute_value, duplicate_cells, fingerprint, index_shape_error,
+                    normalize_patch, sort_patches)
 
 
 @dataclass
@@ -108,6 +109,21 @@ class Session:
         """
         if patch.op in ("=", "reset"):
             return patch, None
+        # 数据/时序类槽位存的是**增量**（维修期限提前几天、工时改多少），不是绝对值。
+        # 把两次「提前三天」「提前两天」折成「= -7200」会变成「把期限定到规划起点前五天」，
+        # 语义整个翻掉。这一类只做增量累加，别折叠成绝对量。
+        slot = S.SLOTS.get(patch.slot)
+        if slot is not None and slot.route in ("data", "timeline") and patch.op in ("+", "-"):
+            current = self.state.get(patch.cell)
+            if current is None or not isinstance(current.value, (int, float)):
+                return patch, None            # 还没有生效值：这条增量就是相对基线的增量
+            delta = float(patch.value) if patch.op == "+" else -float(patch.value)
+            if current.op == "=":             # 上一轮是绝对值：累加后仍是绝对值
+                value, op = round(float(current.value) + delta, 6), "="
+            else:                             # 上一轮也是增量：两份增量加起来
+                value, op = round(float(current.value) + delta, 6), "+"
+            return Patch(slot=patch.slot, index=patch.index, op=op, value=value,
+                         strength=patch.strength, utterance=patch.utterance), None
         current = self.state.get(patch.cell)
         base = current.value if current is not None and isinstance(current.value, (int, float)) \
             else self._baseline(patch)
@@ -141,6 +157,12 @@ class Session:
             turn.错误.append(f"第 {'、'.join(bad)} 条补丁是空的（解析没成功）。整句先没执行")
             self.turns.append(turn)
             return turn
+        shapes = [f"第 {i} 条：{err}" for i, p in enumerate(patches, 1)
+                  if (err := index_shape_error(p.slot, p.index))]
+        if shapes:
+            turn.错误.extend(shapes)
+            self.turns.append(turn)
+            return turn
         patches = [normalize_patch(p) for p in patches]
 
         # 同一轮内同格重复仍然是模型没合并（D2），不替它猜哪条优先
@@ -154,6 +176,14 @@ class Session:
             if patch.strength == "unsure":
                 turn.待确认.append(patch.utterance or S.describe_patch(patch, self.base_data))
             if patch.op == "reset":
+                # 不带索引的 reset 是「这一族整个不要了」——D15 承诺过，得真做到
+                if not patch.index:
+                    cells = [cell for cell, old in self.state.items() if old.slot == patch.slot]
+                    if not cells:
+                        turn.空撤销.append(patch)
+                    for cell in cells:
+                        turn.撤销.append(self.state.pop(cell))
+                    continue
                 old = self.state.pop(patch.cell, None)
                 if old is None:
                     turn.空撤销.append(patch)

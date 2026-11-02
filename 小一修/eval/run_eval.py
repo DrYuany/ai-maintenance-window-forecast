@@ -101,6 +101,10 @@ def _canon_index_value(kind: str, value, data) -> object:
     kind = {"severity": "严重度", "sea": "海况"}.get(kind, kind)  # 英文登记/中文书写同义
     if kind in (None, "", "全部") or value is None:
         return "全部"  # 整轮口径：写「全部」和不写是一回事
+    if kind == "日期区间" and isinstance(value, (list, tuple)) and len(value) == 2 \
+            and value[0] == value[1]:
+        # 只干一天：写成「某日」还是「区间[同一天,同一天]」是同一格
+        return str(value[0])
     if kind in ("部件", "part"):
         return entities.resolve_part(data, str(value)) or f"!{value}"
     if kind == "风机":
@@ -127,12 +131,22 @@ def canonical(patch: Patch, data) -> tuple:
     比的才是语义，不是书写习惯（否则「恶劣」vs「恶劣但安全」会被判成落点不同）。
     """
     patch = normalize_patch(patch)
-    idx = tuple(sorted(
-        (key, _canon_index_value((spec or {}).get("kind", ""), (spec or {}).get("value"), data)
-         if isinstance(spec, dict) else f"!索引格式错误:{spec!r}")
-        for key, spec in patch.index.items()
-    ))
+    pairs = []
+    for key, spec in patch.index.items():
+        value = _canon_index_value((spec or {}).get("kind", ""), (spec or {}).get("value"), data) \
+            if isinstance(spec, dict) else f"!索引格式错误:{spec!r}"
+        # 「组=全部」和不写组是同一格：都要么是整轮口径，要么是同一件事
+        if key == "组" and value == "全部":
+            continue
+        pairs.append((key, value))
+    idx = tuple(sorted(pairs))
     value = patch.value
+    spec = S.SLOTS.get(patch.slot)
+    if spec is not None and spec.value_type == "minutes" and isinstance(value, str) \
+            and len(value) >= 10:
+        # 用户说的是「19号」，不是「19号零点还是19号23:59」。gold 里这两种写法都有
+        # （同一个意思，写的人不同），判分只比到「哪一天」，不替用户发明分钟精度。
+        value = value[:10]
     if patch.slot == "weight":
         value = None  # 权重刻度是任意正数，只比「点了哪个量」
     elif isinstance(value, bool):
@@ -484,7 +498,10 @@ def run_e7(*, seconds: float = 90.0) -> tuple[list[str], list[str]]:
             applied = session.say(text, data, options, timeout=seconds)
             want = (case.get("期望每轮") or [])[i] if i < len(case.get("期望每轮") or []) else {}
             if want.get("拒绝"):
-                if not applied.拒绝:
+                # 「该拒」有两种落地：模型自己说做不到（拒绝），或者补丁落地时被
+                # 校验层拦下（错误 + 整轮回滚）。后者也是拒，而且更常见——
+                # 用户说「高危全修，但最多 2 个」，模型照翻，拦在校验层。
+                if not (applied.拒绝 or applied.错误):
                     failures.append(f"E7[{name}｜{text}]：该拒绝却落地了 {len(applied.新增)} 条")
                 continue
             if applied.拒绝:

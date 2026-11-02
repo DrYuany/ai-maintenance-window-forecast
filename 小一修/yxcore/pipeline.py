@@ -11,7 +11,7 @@ from typing import Any
 
 from . import slots as S
 from .apply import CompiledRequest, compile_patches, needs_partial
-from .patch import Patch, fingerprint, normalize_patch
+from .patch import Patch, fingerprint, index_shape_error, normalize_patch
 # 注意：本模块末尾也有一个 describe（描述求解结果），所以这里必须取别名，
 # 否则导入会被后面的同名定义覆盖，对账的文本描述会调错函数。
 from .reconcile import Ctx, reconcile
@@ -56,6 +56,10 @@ def run(
     bad = [str(i) for i, p in enumerate(patches, 1) if p is None]
     if bad:
         raise YxError([f"第 {'、'.join(bad)} 条补丁是空的（解析没成功）"], code="校验")
+    shapes = [f"第 {i} 条：{err}" for i, p in enumerate(patches, 1)
+              if (err := index_shape_error(p.slot, p.index))]
+    if shapes:
+        raise YxError(shapes, code="校验")
     patches = [normalize_patch(p) for p in patches]
 
     base_data = load_project(PROJECT_ROOT, base_id=base_id, as_of=as_of)
