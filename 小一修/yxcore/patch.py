@@ -80,6 +80,19 @@ def parse_patch(raw: dict[str, Any]) -> tuple[Patch | None, str | None]:
     ), None
 
 
+# 「2」「2号」「2号船」「作业线2」都是 2 号船——作业线编号只有一种读法
+_LINE_RE = re.compile(r"^(?:作业线|船|线)?\s*(\d+)\s*(?:号(?:船|作业线|线)?)?$")
+
+
+def _to_line_no(value: Any) -> Any:
+    """把作业线编号的各种写法归一成整数。数字本身没有第二种解释，这不是猜。"""
+    if isinstance(value, str):
+        hit = _LINE_RE.match(value.strip())
+        if hit:
+            return int(hit.group(1))
+    return value
+
+
 _TRUE = ("是", "允许", "开", "启用", "true", "yes")
 _FALSE = ("否", "不允许", "关", "停用", "false", "no")
 
@@ -147,8 +160,8 @@ def normalize_patch(patch: "Patch") -> "Patch":
                 continue
         spec = dict(spec)
         value = spec.get("value")
-        if isinstance(value, str) and re.fullmatch(r"\d+\s*号(船|作业线|线)?", value.strip()):
-            value = int(re.match(r"\d+", value.strip()).group())  # 「2号船」→ 2
+        if (spec.get("kind") or declared.get(key)) in ("作业线", "task", "task_set", "task_seq"):
+            value = _to_line_no(value)  # 作业线/任务编号的各种写法归一
         # 「11月16号」被写成区间 [16,16] 或单元素清单，都归一成单值
         if isinstance(value, (list, tuple)):
             if len(value) == 1:
@@ -182,6 +195,8 @@ def normalize_patch(patch: "Patch") -> "Patch":
     slot = S.SLOTS.get(patch.slot)
     if slot is not None and slot.value_type == "act":
         value = None  # 开关型：点亮即生效，带什么值都一样
+    elif patch.slot == "line_fixed":
+        value = _to_line_no(value)
     return Patch(slot=patch.slot, index=index, op=patch.op, value=value,
                  strength=patch.strength, utterance=patch.utterance)
 

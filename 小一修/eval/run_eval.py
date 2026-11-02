@@ -194,6 +194,11 @@ def run_e2_online(*, seconds: float = 90.0) -> tuple[list[str], list[str]]:
         # 槽位/索引/值都对，再看强度：unsure 算过慎不算错（按 D3，拿不准要问人）
         got_strength = {p.slot: p.strength for p in patches}
         want_strength = {p.slot: p.strength for p in gold_patches(case)}
+        # 目标类（策略/权重）没有「硬约束」这回事：它就是偏好，不比强度
+        objective = {name for name, s in S.SLOTS.items() if s.route in ("strategy", "weights")}
+        for slot in list(want_strength):
+            if slot in objective:
+                want_strength.pop(slot)
         for slot, want_s in want_strength.items():
             got_s = got_strength.get(slot)
             if got_s != want_s and got_s == "unsure":
