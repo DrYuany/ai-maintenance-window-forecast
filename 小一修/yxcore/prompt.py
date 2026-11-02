@@ -131,6 +131,12 @@ def _slot_lines() -> str:
                 kind = "是/否" if spec["类型"] == "bool" else ("时刻 HH:MM" if spec["单位"] == "HH:MM"
                                                              else f"数字（{spec['单位']}）")
                 lines.append(f"* {alias}｜参数｜{kind}｜默认：基座值")
+                if spec.get("说明"):
+                    lines.append(f"    管什么：{spec['说明']}")
+        if group == "B":
+            # 枚举值必须印出来：不印模型就只能照话术自己编名字
+            lines.append("  strategy 只能填这四个之一：" + "、".join(S.STRATEGY_NAMES))
+            lines.append("  weight 的「量」只能填这 14 个之一：" + "、".join(S.METRIC_NAMES))
         lines.append("")
     return "\n".join(lines)
 
@@ -174,6 +180,11 @@ def _output_spec() -> str:
         "]}",
         "",
         "说明：",
+        "* **间隔的单位是小时**（半天=12、一天=24），没说间隔就填 0。",
+        "* **时刻类旋钮**（earliest / deadline_delta / part_arrival / window）只能用 = 给具体日期时间，"
+        "不许用 + - *（「推迟两天」自己算成 11月17号，否则会被当成加 2 分钟）。",
+        "* 索引**必须**写成 {\"kind\": \"…\", \"value\": …} 这样的对象，"
+        "只给一个裸字符串（如 \"桶\": \"窗口03\"）不行——kind 说明这一格是哪一类，猜不得。",
         "* op 只能是 = / * / + / - / reset；相对运算（*+−）按基线值折算。",
         "* 一句话可能对应多个补丁，就都列出来；对应不上任何旋钮就回 {\"patches\": [], \"拒绝理由\": \"...\"}。",
         "* utterance 抄用户原话，一个字都别改——回显和对账要用。",

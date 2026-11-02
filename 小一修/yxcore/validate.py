@@ -64,6 +64,12 @@ def _check_value(patch: Patch, slot: S.Slot, data) -> list[str]:
     """第 3 条：数值类型 / 单位 / 区间。"""
     errors: list[str] = []
     value = patch.value
+    if slot.value_type == "minutes" and patch.op in ("*", "+", "-"):
+        # 时刻类给相对量必然算错单位：「推迟两天」会被当成 +2 分钟。
+        errors.append(f"{slot.label}：时刻只能直接给具体日期时间"
+                      f"（{patch.op} 这种相对量算不出「天」这个单位）。"
+                      "「推迟两天」请自己算成 11月17号这样的日期")
+        return errors
     if slot.value_type == "act":
         # 激活类：这一族只需要「点亮」，值可以省略。
         if value is not None and not (value is True or value in ("是", "启用", 1)):

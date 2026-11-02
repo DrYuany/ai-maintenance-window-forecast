@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -77,6 +78,99 @@ def parse_patch(raw: dict[str, Any]) -> tuple[Patch | None, str | None]:
         slot=slot, index=index, op=op, value=value,
         strength=strength, utterance=str(raw.get("utterance") or raw.get("原话") or ""),
     ), None
+
+
+_TRUE = ("是", "允许", "开", "启用", "true", "yes")
+_FALSE = ("否", "不允许", "关", "停用", "false", "no")
+
+
+def _unique_enum(value: Any, allowed: tuple[str, ...]) -> Any:
+    """枚举归一：只有一个候选对得上才归一，对不上或撞车就原样返回（让校验器去报错）。
+
+    模型会说「恶劣」「任务数」「总成本」这类口语简称。枚举是封闭的，简称到全称的映射
+    只要唯一就是确定的——不唯一就不许归一，这正是「不猜」的边界。
+    """
+    if not isinstance(value, str) or value in allowed:
+        return value
+    text = value.strip()
+    hits = [a for a in allowed if text == a or text in a or a in text]
+    return hits[0] if len(hits) == 1 else value
+
+
+_ENUM_KINDS = {
+    "metric": None,          # 运行时取 METRIC_NAMES
+    "strategy": None,        # 运行时取 STRATEGY_NAMES
+    "severity": ("高", "中", "低"),
+    "sea": ("常态", "恶劣但安全"),
+    "项": ("风速", "浪高", "电价"),
+    "端": ("开始", "结束"),
+    "粒度": ("天", "窗口"),
+    "cap_维度": None,        # 运行时取 CAP_DIMENSIONS
+    "budget_口径": None,     # 运行时取 BUDGET_KINDS
+}
+
+
+# 口径的口语别名：模型常照 metrics 的名字写（船舶艘天），而槽位登记的是「租船天」。
+# 显式登记别名是确定的映射，不是猜——猜是指「两个候选都对得上还硬选一个」。
+_KIND_ALIASES = {
+    "budget_口径": {"人工费": "人工", "备件费": "备件", "船舶艘天": "租船天",
+                    "租船费用": "租船天", "总费用": "总成本"},
+}
+
+
+def normalize_patch(patch: "Patch") -> "Patch":
+    """把大模型给的口语化写法归一到注册值。只做唯一可判定的归一，其余原样留给校验器。
+
+    放在翻译层而不是校验层：这是「大模型输出的自然波动」，不是「用户写错了」——
+    两类问题要分开处理，混在一起会让校验器替模型背锅。
+    """
+    from . import slots as S  # 延迟导入，避免 slots↔patch 循环
+
+    # 模型写的 kind 常常是口语（"口径"而非"budget_口径"）。枚举按注册表**声明**的
+    # kind 去查——校验器本来也只用声明的 kind，这里跟它保持一致。
+    declared = dict(S.SLOTS.get(patch.slot).index) if patch.slot in S.SLOTS else {}
+    index = {}
+    for key, spec in patch.index.items():
+        if not isinstance(spec, dict):
+            index[key] = spec
+            continue
+        spec = dict(spec)
+        value = spec.get("value")
+        # 「11月16号」被写成区间 [16,16] 或单元素清单，都归一成单值
+        if isinstance(value, (list, tuple)):
+            if len(value) == 1:
+                value = value[0]
+            elif len(value) == 2 and value[0] == value[1]:
+                value = value[0]
+        kind = declared.get(key) or spec.get("kind")
+        if kind in _KIND_ALIASES and isinstance(value, str):
+            value = _KIND_ALIASES[kind].get(value.strip(), value)
+        if kind in _ENUM_KINDS:
+            allowed = _ENUM_KINDS[kind]
+            if allowed is None:
+                allowed = {"metric": S.METRIC_NAMES, "strategy": S.STRATEGY_NAMES,
+                           "cap_维度": S.CAP_DIMENSIONS, "budget_口径": S.BUDGET_KINDS}[kind]
+            value = _unique_enum(value, allowed)
+        spec["value"] = value
+        index[key] = spec
+
+    value = patch.value
+    if isinstance(value, str):
+        text = value.strip()
+        if text in _TRUE:
+            value = True
+        elif text in _FALSE:
+            value = False
+        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            # 只给日期不给时刻，按当天零点补——这是确定的，不是猜
+            value = f"{text}T00:00:00+08:00"
+        elif re.fullmatch(r"\d+\s*号(船|作业线|线)?", text):
+            value = int(re.match(r"\d+", text).group())  # 「2号船」→ 2
+    slot = S.SLOTS.get(patch.slot)
+    if slot is not None and slot.value_type == "act":
+        value = None  # 开关型：点亮即生效，带什么值都一样
+    return Patch(slot=patch.slot, index=index, op=patch.op, value=value,
+                 strength=patch.strength, utterance=patch.utterance)
 
 
 def absolute_value(op: str, value: Any, baseline: Any) -> tuple[Any, str | None]:

@@ -22,7 +22,7 @@ sys.path.insert(0, str(HERE.parent))
 
 from yxcore import PROJECT_ROOT, solver_modules  # noqa: E402
 from yxcore import slots as S  # noqa: E402
-from yxcore.patch import Patch, parse_patch  # noqa: E402
+from yxcore.patch import Patch, normalize_patch, parse_patch  # noqa: E402
 from yxcore.validate import validate  # noqa: E402
 
 CASES_VALIDATE = json.loads((HERE / "cases_validate.json").read_text(encoding="utf-8"))
@@ -95,6 +95,8 @@ def _entities():
 def _canon_index_value(kind: str, value, data) -> object:
     entities = _entities()
     kind = {"severity": "严重度", "sea": "海况"}.get(kind, kind)  # 英文登记/中文书写同义
+    if kind in (None, "", "全部") or value is None:
+        return "全部"  # 整轮口径：写「全部」和不写是一回事
     if kind in ("部件", "part"):
         return entities.resolve_part(data, str(value)) or f"!{value}"
     if kind == "风机":
@@ -103,6 +105,9 @@ def _canon_index_value(kind: str, value, data) -> object:
         return entities.resolve_task(data, str(value)) or f"!{value}"
     if kind in ("任务清单", "task_seq", "task_set"):
         values = value if isinstance(value, (list, tuple)) else [value]
+        if len(values) == 1:
+            # 单元素清单和点名单个任务是同一格（模型两种写法都出现过）
+            return entities.resolve_task(data, str(values[0])) or f"!{values[0]}"
         return tuple(sorted(entities.resolve_task(data, str(v)) or f"!{v}" for v in values))
     if isinstance(value, bool):
         return value
@@ -112,9 +117,15 @@ def _canon_index_value(kind: str, value, data) -> object:
 
 
 def canonical(patch: Patch, data) -> tuple:
-    """补丁的判分形态：别名归一到注册编号，数值归一到浮点，weight 的值不比（偏好刻度无标准答案）。"""
+    """补丁的判分形态：别名归一到注册编号，数值归一到浮点，weight 的值不比（偏好刻度无标准答案）。
+
+    gold 和模型输出都要过 normalize_patch：两边都按同一套「口语→注册值」的归一处理，
+    比的才是语义，不是书写习惯（否则「恶劣」vs「恶劣但安全」会被判成落点不同）。
+    """
+    patch = normalize_patch(patch)
     idx = tuple(sorted(
-        (key, _canon_index_value((spec or {}).get("kind", ""), (spec or {}).get("value"), data))
+        (key, _canon_index_value((spec or {}).get("kind", ""), (spec or {}).get("value"), data)
+         if isinstance(spec, dict) else f"!索引格式错误:{spec!r}")
         for key, spec in patch.index.items()
     ))
     value = patch.value
@@ -165,9 +176,20 @@ def run_e2_online(*, seconds: float = 90.0) -> tuple[list[str], list[str]]:
             failures.append(f"E2在线[{case['话术']}]：被错误拒绝：{reason}")
             continue
         got = sorted(canonical(p, data) for p in patches)
-        want = sorted(canonical(p, data) for p in gold_patches(case))
-        if got != want:
-            failures.append(f"E2在线[{case['话术']}]：\n    得到 {got}\n    应为 {want}")
+        wants = [sorted(canonical(p, data) for p in gold_patches(case))]
+        for alt in case.get("期望或") or []:
+            alt_patches = []
+            for raw in alt:
+                payload = dict(raw)
+                payload.setdefault("utterance", case["话术"])
+                payload.setdefault("strength", "hard")
+                alt_patch, err = parse_patch(payload)
+                assert alt_patch is not None, f"{case['话术']} 的等价解形状不对：{err}"
+                alt_patches.append(alt_patch)
+            wants.append(sorted(canonical(p, data) for p in alt_patches))
+        if got not in wants:
+            failures.append(f"E2在线[{case['话术']}]：\n    得到 {got}\n    应为 {wants[0]}"
+                            + (f"\n    或等价解 {wants[1]}" if len(wants) > 1 else ""))
             continue
         # 槽位/索引/值都对，再看强度：unsure 算过慎不算错（按 D3，拿不准要问人）
         got_strength = {p.slot: p.strength for p in patches}

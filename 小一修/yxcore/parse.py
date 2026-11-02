@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from .patch import Patch, parse_patch
+from .patch import Patch, normalize_patch, parse_patch
 from .prompt import build_prompt
 
 DEFAULT_BASE = "https://api.deepseek.com"
@@ -120,7 +120,7 @@ def translate(utterance: str, data, options: dict[str, list[dict]] | None = None
         if patch is None:
             errors.append(error or "补丁解析失败")
         else:
-            patches.append(patch)
+            patches.append(normalize_patch(patch))
     if errors and not patches:
         raise LLMUnavailable("；".join(errors))
     return patches, reason
